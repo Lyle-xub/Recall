@@ -128,13 +128,14 @@ struct ArchiveStackView: View {
     @ObservedObject var model: AppModel
     @Binding var focusedID: String?
     @State private var images: [String:NSImage] = [:]
+    @State private var recognizedRegions:[String:[TextRegion]] = [:]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    private var frames:[MemoryFrame] { Array(model.archiveFrames.prefix(96)) }
+    private var frames:[MemoryFrame] { model.archiveFrames }
     var body: some View {
         GeometryReader { geo in
             ZStack {
                 ArchiveGlassRenderer(frames:frames,images:images,appearance:model.settings.appearance,
-                    selected:focusedID,size:geo.size,reduced:reduceMotion,onSelect:toggle,onRecordAction:recordAction)
+                    selected:focusedID,day:model.archiveDay,regions:focusedID.flatMap { recognizedRegions[$0] } ?? [],size:geo.size,reduced:reduceMotion,onSelect:toggle,onRecordAction:recordAction)
                     .accessibilityRepresentation {
                         VStack {
                             ForEach(frames) { frame in
@@ -152,6 +153,26 @@ struct ArchiveStackView: View {
                     .init(color:ArchiveTone.base(model.settings.appearance).opacity(0.9),location:0.08),
                     .init(color:.clear,location:0.23)],startPoint:.top,endPoint:.bottom)
                     .allowsHitTesting(false)
+                VStack {
+                    Spacer()
+                    HStack(spacing:14) {
+                        Button { focusedID = nil;model.moveArchiveDay(by:-1) } label: { Image(systemName:"chevron.left").frame(width:30,height:28) }.help("前一天")
+                        Text(model.archiveDay.formatted(.dateTime.year().month().day())).monospacedDigit()
+                        Text("一列一天").foregroundStyle(.secondary)
+                        Button { focusedID = nil;model.moveArchiveDay(by:1) } label: { Image(systemName:"chevron.right").frame(width:30,height:28) }.help("后一天")
+                    }.font(.system(size:11,weight:.medium)).buttonStyle(.plain)
+                        .padding(.horizontal,12).background(.regularMaterial,in:Capsule()).padding(.bottom,22)
+                }
+            }
+            .task(id:focusedID) {
+                guard let id = focusedID,let frame = frames.first(where: { $0.id == id }) else { return }
+                let url = model.store.root.appendingPathComponent(frame.imagePath)
+                guard let pixels = await MemoryImagePipeline.previews.image(at:url,maxPixels:2600),!Task.isCancelled else { return }
+                images[frame.imagePath] = NSImage(cgImage:pixels,size:NSSize(width:pixels.width,height:pixels.height))
+                if frame.regions.isEmpty,recognizedRegions[id] == nil {
+                    let regions = await Task.detached(priority:.userInitiated) { (try? NativeOCR.recognize(pixels).1) ?? [] }.value
+                    if !Task.isCancelled { recognizedRegions[id] = regions }
+                }
             }
             .onChange(of:frames.map(\.id)) { _,ids in
                 if let focusedID,!ids.contains(focusedID) { self.focusedID = nil }
@@ -165,7 +186,10 @@ struct ArchiveStackView: View {
                         loaded[frame.imagePath] = NSImage(cgImage:pixels,size:NSSize(width:pixels.width,height:pixels.height))
                     }
                 }
-                if !Task.isCancelled { images = loaded }
+                if !Task.isCancelled {
+                    for (path,image) in loaded where image.size.width > (images[path]?.size.width ?? 0) { images[path] = image }
+                    images = images.filter { paths.contains($0.key) }
+                }
             }
         }
     }
@@ -176,7 +200,7 @@ struct ArchiveStackView: View {
         guard let frame = frames.first(where: { $0.id == id }) else { return }
         switch action {
         case "star":model.star(frame)
-        case "copy":model.copy(frame.text)
+        case "copy":model.copy(frame.text.isEmpty ? (recognizedRegions[id] ?? frame.regions).map(\.text).joined(separator:"\n"):frame.text)
         case "rewind":model.select(frame)
         case "close":focusedID = nil
         default:break

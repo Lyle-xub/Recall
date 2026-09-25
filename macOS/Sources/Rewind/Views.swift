@@ -43,6 +43,7 @@ struct RootView: View {
     @Namespace private var searchGlassNamespace
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var expanded: Bool { model.searchPresented || model.askOpen || model.inspectorOpen }
+    private var libraryHome: Bool { !model.settings.glassArchiveEnabled && !expanded && model.selected == nil && model.timelineCursor == nil }
     private var compactSearch: Bool { expanded || model.selected != nil }
     private var showSearchActions: Bool { searchEngaged || compactSearch }
     var body: some View {
@@ -80,11 +81,13 @@ struct RootView: View {
                         withAnimation(reduceMotion ? nil:.spring(response:0.76,dampingFraction:0.86)) { archiveFocusedID = nil }
                     } else { model.dismissTimeline() }
                 }.ignoresSafeArea()
+                if model.settings.glassArchiveEnabled {
                 ArchiveStackView(model:model,focusedID:$archiveFocusedID)
                     .opacity(!expanded && model.selected == nil && model.timelineCursor == nil ? 1:0)
                     .scaleEffect(expanded || model.selected != nil ? 0.96:1)
                     .allowsHitTesting(!expanded && model.selected == nil && model.timelineCursor == nil)
                     .accessibilityHidden(expanded || model.selected != nil || model.timelineCursor != nil)
+                }
                 if !expanded,let frame = model.selected {
                     history(frame, size:geo.size).transition(.opacity)
                 }
@@ -110,8 +113,8 @@ struct RootView: View {
                         .zIndex(5)
                 }
                 HStack {
-                    if expanded || model.selected != nil || showSearchActions {
-                        BareIconButton(symbol:"arrow.left",label:"返回档案") { goBack() }
+                    if expanded || model.selected != nil || showSearchActions || archiveFocusedID != nil {
+                        BareIconButton(symbol:"arrow.left",label:model.settings.glassArchiveEnabled ? "返回档案":"返回记忆库") { goBack() }.frame(width:showSearchActions ? 58:34,height:58)
                     } else {
                         VStack(alignment:.leading,spacing:3) {
                             Text("RECALL").font(.system(size:geo.size.width < 1050 ? 32:42,weight:.heavy)).tracking(-1.5)
@@ -133,7 +136,7 @@ struct RootView: View {
                             BareIconButton(symbol:"xmark",label:"关闭 Recall",size:11) { model.hideOverlay() }
                         }.transition(.opacity)
                     }
-                }.padding(.horizontal,34).position(x:geo.size.width/2,y:top+59)
+                }.padding(.horizontal,34).position(x:geo.size.width/2,y:top+(showSearchActions ? 43:59))
                 Text("● \(model.apps.count) 个应用 · \(model.total) 条记忆 · 本地索引")
                     .font(.system(size:11,weight:.medium)).foregroundStyle(.secondary)
                     .frame(maxWidth:.infinity,alignment:.leading).padding(.horizontal,40)
@@ -152,6 +155,14 @@ struct RootView: View {
         }
         .font(.system(size:14)).buttonStyle(ComfortableButtonStyle()).controlSize(.large).frame(minWidth:800,minHeight:600)
         .preferredColorScheme(ArchiveTone.colorScheme(model.settings.appearance))
+        .task(id:libraryHome) {
+            if libraryHome { model.showSearch() }
+        }
+        .onChange(of:model.settings.glassArchiveEnabled) { _,enabled in
+            archiveFocusedID = nil;searchFocused = false;searchEngaged = false
+            model.returnToDesktop()
+            if !enabled { model.showSearch() }
+        }
         .sheet(isPresented:$model.settingsOpen) { SettingsView(model:model) }
         .sheet(isPresented:$model.usageOpen) { AppUsageView(model:model) }
         .onChange(of:model.query) { _,value in if !value.isEmpty { searchEngaged = true }; model.debounceSearch() }
@@ -168,6 +179,9 @@ struct RootView: View {
         searchFocused = false; searchEngaged = false
         if archiveFocusedID != nil,!expanded,model.selected == nil {
             withAnimation(reduceMotion ? nil:.spring(response:0.76,dampingFraction:0.86)) { archiveFocusedID = nil }
+        }
+        else if !model.settings.glassArchiveEnabled,model.searchPresented,!model.askOpen,!model.inspectorOpen,model.selected == nil,model.query.isEmpty,model.appFilter == nil,model.since == nil,!model.starredOnly,!model.trash {
+            model.hideOverlay()
         }
         else if model.inspectorOpen { model.inspectorOpen = false }
         else if expanded || model.selected != nil { model.returnToDesktop() }

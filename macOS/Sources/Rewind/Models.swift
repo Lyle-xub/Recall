@@ -83,6 +83,7 @@ enum OverlayAppearance: String, Codable {
 
 struct AppSettings: Codable {
     var appearance = OverlayAppearance.warmDay
+    var glassArchiveEnabled = false
     var chat = ModelProfile.builtinChat
     var transcription = ModelProfile.builtinSpeech
     var transcriptionEnabled = false
@@ -99,11 +100,12 @@ struct AppSettings: Codable {
     var showDockIcon = false
     var shortcuts = ShortcutConfiguration()
     init() {}
-    private enum CodingKeys: String, CodingKey { case appearance, chat, transcription, transcriptionEnabled, systemAudio, microphone, captureInterval, retentionDays, excludedApps, excludedNames, displayID, onboardingComplete, launchFilmSeen, launchAtLogin, showDockIcon, shortcuts }
+    private enum CodingKeys: String, CodingKey { case appearance, glassArchiveEnabled, chat, transcription, transcriptionEnabled, systemAudio, microphone, captureInterval, retentionDays, excludedApps, excludedNames, displayID, onboardingComplete, launchFilmSeen, launchAtLogin, showDockIcon, shortcuts }
     init(from decoder:Decoder) throws {
         self.init()
         let c = try decoder.container(keyedBy:CodingKeys.self)
         appearance = try c.decodeIfPresent(OverlayAppearance.self,forKey:.appearance) ?? appearance
+        glassArchiveEnabled = try c.decodeIfPresent(Bool.self,forKey:.glassArchiveEnabled) ?? glassArchiveEnabled
         chat = try c.decodeIfPresent(ModelProfile.self,forKey:.chat) ?? chat
         transcription = try c.decodeIfPresent(ModelProfile.self,forKey:.transcription) ?? transcription
         transcriptionEnabled = try c.decodeIfPresent(Bool.self,forKey:.transcriptionEnabled) ?? transcriptionEnabled

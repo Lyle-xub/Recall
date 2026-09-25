@@ -106,6 +106,23 @@ final class MemoryStore: @unchecked Sendable {
             } catch { try? execute("ROLLBACK"); throw error }
         }
     }
+    /// Bounded day queries avoid loading today's thousands of captures just
+    /// to reach yesterday. Deduplicate screenshots before applying the limit.
+    func archiveFrames(around anchor:Date,calendar:Calendar = .current) throws -> [MemoryFrame] {
+        var result:[MemoryFrame] = []
+        for column in ArchiveDayLayout.columns(frames:[],around:anchor,calendar:calendar) {
+            let end = calendar.date(byAdding:.day,value:1,to:column.day)!
+            result += try jsonRows("""
+                SELECT json FROM (
+                    SELECT json,time,id,ROW_NUMBER() OVER (
+                        PARTITION BY json_extract(json,'$.imagePath') ORDER BY time DESC,id
+                    ) AS duplicate FROM frames
+                    WHERE time>=? AND time<? AND demo=0 AND deleted IS NULL
+                ) WHERE duplicate=1 ORDER BY time DESC,id LIMIT ?
+                """,[column.day.timeIntervalSince1970,end.timeIntervalSince1970,ArchiveDayLayout.recordsPerDay],as:MemoryFrame.self)
+        }
+        return result
+    }
     func frames(query: String = "", app: String? = nil, starred: Bool = false, trash: Bool = false, since: Date? = nil, until: Date? = nil, demo: Bool? = nil, limit: Int = 500, offset: Int = 0, ascending: Bool = false) throws -> [MemoryFrame] {
         var conditions = [trash ? "deleted IS NOT NULL" : "deleted IS NULL"]
         var args: [Any?] = []

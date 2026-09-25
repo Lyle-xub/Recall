@@ -11,6 +11,8 @@ import ServiceManagement
     @Published var settings: AppSettings
     @Published var frames: [MemoryFrame] = []
     @Published var archiveFrames: [MemoryFrame] = []
+    @Published var archiveDay = Calendar.current.startOfDay(for:Date())
+    private var archiveDayInitialized = false
     @Published var apps: [String] = []
     @Published var timeline: [CapturedAppMoment] = []
     @Published var selected: MemoryFrame?
@@ -223,9 +225,12 @@ import ServiceManagement
     }
     private func receiveCapturedFrame(_ frame:MemoryFrame) {
         recordedFrames += 1; total += 1
-        archiveFrames.removeAll { $0.imagePath == frame.imagePath }
-        archiveFrames.insert(frame,at:0)
-        if archiveFrames.count > 96 { archiveFrames.removeLast(archiveFrames.count-96) }
+        let calendar = Calendar.current
+        if let delta = calendar.dateComponents([.day],from:archiveDay,to:calendar.startOfDay(for:frame.timestamp)).day,abs(delta) <= 2 {
+            archiveFrames.removeAll { $0.imagePath == frame.imagePath && calendar.isDate($0.timestamp,inSameDayAs:frame.timestamp) }
+            archiveFrames.insert(frame,at:0)
+            archiveFrames = ArchiveDayLayout.columns(frames:archiveFrames,around:archiveDay).flatMap(\.records)
+        }
         timelineStart = min(timelineStart ?? frame.timestamp,frame.timestamp)
         if !trash,navigationWindow?.contains(frame.timestamp) != false {
             timeline.append(CapturedAppMoment(frame)); timeline.sort { $0.timestamp < $1.timestamp }
@@ -244,13 +249,20 @@ import ServiceManagement
             total = try libraryReader.count(demo:false)
             apps = try libraryReader.appNames(demo:false,trash:trash,since:since)
             timelineStart = try libraryReader.firstTimelineDate()
-            let recent = (try? libraryReader.frames(trash:trash,since:since,demo:false,limit:192)) ?? []
-            var seenScreens = Set<String>()
-            archiveFrames = Array(recent.filter { seenScreens.insert($0.imagePath).inserted }.prefix(96))
+            if !archiveDayInitialized {
+                let latest = try libraryReader.frames(demo:false,limit:1).first?.timestamp ?? Date()
+                archiveDay = Calendar.current.startOfDay(for:latest);archiveDayInitialized = true
+            }
+            archiveFrames = try libraryReader.archiveFrames(around:archiveDay)
             refreshTimelineActivity(force:true)
             if searchPresented { reloadSearch() }
             if let selected,!timeline.contains(where:{$0.id == selected.id}) { loadTimeline(around:selected.timestamp) }
         } catch { self.error = error.localizedDescription }
+    }
+    func moveArchiveDay(by offset:Int) {
+        guard let day = Calendar.current.date(byAdding:.day,value:offset,to:archiveDay) else { return }
+        do { let records = try libraryReader.archiveFrames(around:day);archiveDay = day;archiveFrames = records }
+        catch { self.error = error.localizedDescription }
     }
     private func reloadSearch() {
         guard searchPresented else { return }

@@ -10,10 +10,15 @@ final class ArchiveVisualTests: XCTestCase {
         if let scene = view as? SCNView {
             let image = NSImageView(frame:scene.bounds)
             image.image = scene.snapshot();image.imageScaling = .scaleAxesIndependently
-            scene.addSubview(image)
+            scene.addSubview(image,positioned:.below,relativeTo:scene.subviews.first)
             return [image]
         }
         return view.subviews.flatMap { materializeMetal(in:$0) }
+    }
+
+    @MainActor private func selectionOverlay(in view:NSView)->IndexedTextOverlay? {
+        if let overlay = view as? IndexedTextOverlay { return overlay }
+        return view.subviews.compactMap { selectionOverlay(in:$0) }.first
     }
 
     @MainActor func testRenderArchiveStates() async throws {
@@ -27,13 +32,13 @@ final class ArchiveVisualTests: XCTestCase {
         }
         let source = URL(fileURLWithPath:sourcePath)
         let reader = try MemoryStore(root:source,readOnly:true)
-        var seen = Set<String>()
-        let records = Array(try reader.frames(demo:false,limit:192).filter { seen.insert($0.imagePath).inserted }.prefix(96))
+        let anchor = try reader.frames(demo:false,limit:1).first?.timestamp ?? Date()
+        let records = try reader.archiveFrames(around:anchor)
         XCTAssertFalse(records.isEmpty,"Visual verification requires actual recorded screenshots")
         let root = destination.appendingPathComponent("records-"+UUID().uuidString)
         let model = try AppModel(root:root)
         model.onboardingOpen = false; model.launchFilmOpen = false
-        model.settings.onboardingComplete = true; model.settings.launchFilmSeen = true
+        model.settings.onboardingComplete = true; model.settings.launchFilmSeen = true;model.settings.glassArchiveEnabled = true
         for record in records {
             guard let pixels = await MemoryImagePipeline.shared.image(at:source.appendingPathComponent(record.imagePath),maxPixels:900) else { continue }
             let bitmap = NSBitmapImageRep(cgImage:pixels)
@@ -43,12 +48,18 @@ final class ArchiveVisualTests: XCTestCase {
             try model.store.save(copy)
         }
         try root.path.write(to:destination.appendingPathComponent("preview-data-path.txt"),atomically:true,encoding:.utf8)
+        model.archiveDay = Calendar.current.startOfDay(for:anchor)
         model.reload()
         let scene = ArchiveGlassScene()
         scene.update(frames:model.archiveFrames,images:[:],appearance:.warmDay,selected:nil,size:CGSize(width:1600,height:720),reduced:true)
         XCTAssertEqual(scene.recordIDs,Set(model.archiveFrames.map(\.id)),"Exactly one sheet per real record")
-        XCTAssertEqual(scene.renderedCardCount,model.archiveFrames.count,"No decorative duplicate cards")
-        XCTAssertEqual(Set(model.archiveFrames.map(\.imagePath)).count,model.archiveFrames.count)
+        XCTAssertEqual(scene.renderedCardCount,model.archiveFrames.count,"Blank sleeves must not have record identities")
+        XCTAssertGreaterThan(scene.blankCardCount,0,"Missing slots are filled with empty glass, never invented records")
+        XCTAssertEqual(scene.dayColumns.count,5)
+        for column in scene.dayColumns {
+            XCTAssertTrue(column.records.allSatisfy { Calendar.current.isDate($0.timestamp,inSameDayAs:column.day) })
+            XCTAssertEqual(Set(column.records.map(\.imagePath)).count,column.records.count)
+        }
         scene.scroll(by:100000,precise:false)
         XCTAssertGreaterThan(scene.scrollOffset,0)
         scene.scroll(by:-100000,precise:false)
@@ -81,7 +92,7 @@ final class ArchiveVisualTests: XCTestCase {
         try snapshot("ridge-wave-left")
         moving.hover(nil)
         for _ in 0..<120 { moving.advance(dt:1/60) }
-        let id = try XCTUnwrap(model.archiveFrames.first?.id)
+        let id = try XCTUnwrap(model.archiveFrames.max(by: { $0.timestamp < $1.timestamp })?.id)
         let card = try XCTUnwrap(moving.scene.rootNode.childNode(withName:id,recursively:true))
         let original = card.simdTransform
         configure(id)
@@ -91,7 +102,18 @@ final class ArchiveVisualTests: XCTestCase {
             XCTAssertTrue(moving.scene.rootNode.childNode(withName:id,recursively:true) === card)
             if [8,16,30,120].contains(step) { try snapshot("extract-\(step)") }
         }
+        let selection = try XCTUnwrap(moving.selectionSurface())
+        XCTAssertEqual(selection.0.id,id)
+        XCTAssertGreaterThan(selection.2.width,7.3,"Expanded screenshot should be substantially wider")
+        let indexed = IndexedTextOverlay()
+        indexed.frame = CGRect(x:0,y:0,width:1000,height:650)
+        indexed.imageSize = indexed.frame.size;indexed.setRegions(selection.0.regions)
+        if !selection.0.regions.isEmpty {
+            indexed.selectAll(nil)
+            XCTAssertFalse(indexed.selectedText.isEmpty,"Real OCR remains selectable on the expanded artwork")
+        }
         configure(nil)
+        XCTAssertNil(moving.selectionSurface(),"Text selection must not float above a returning card")
         for step in 1...180 {
             moving.advance(dt:1/60)
             XCTAssertEqual(card.opacity,1)
@@ -118,14 +140,16 @@ final class ArchiveVisualTests: XCTestCase {
             ("archive-desktop",CGSize(width:1440,height:900),false,false),
             ("archive-night",CGSize(width:1600,height:720),true,false),
             ("archive-open",CGSize(width:1440,height:900),false,true),
-            ("archive-compact",CGSize(width:800,height:600),false,false)
+            ("archive-compact",CGSize(width:800,height:600),false,false),
+            ("archive-disabled",CGSize(width:1440,height:900),false,false)
         ] {
             model.settings.appearance = night ? .deepNight:.warmDay
+            model.settings.glassArchiveEnabled = name != "archive-disabled"
             let view:AnyView
             if open {
                 view = AnyView(ZStack {
                     ArchiveBackdrop(appearance:model.settings.appearance)
-                    ArchiveStackView(model:model,focusedID:.constant(model.archiveFrames.first?.id))
+                    ArchiveStackView(model:model,focusedID:.constant(model.archiveFrames.max(by: { $0.timestamp < $1.timestamp })?.id))
                 }.preferredColorScheme(.light))
             } else { view = AnyView(RootView(model:model)) }
             let host = NSHostingView(rootView:view.frame(width:size.width,height:size.height))
@@ -136,12 +160,42 @@ final class ArchiveVisualTests: XCTestCase {
             // with SceneKit itself, then include the pixels as a test-only
             // image subview during the complete native-window capture.
             let replacements = materializeMetal(in:host)
+            if name == "archive-disabled" { XCTAssertTrue(replacements.isEmpty,"Disabled archive must not mount a 3D renderer");XCTAssertTrue(model.searchPresented) }
             defer { replacements.forEach { $0.removeFromSuperview() } }
             let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in:host.bounds))
             host.cacheDisplay(in:host.bounds,to:bitmap)
             let data = try XCTUnwrap(bitmap.representation(using:.png,properties:[:]))
             try data.write(to:destination.appendingPathComponent("\(name).png"))
             XCTAssertGreaterThan(data.count,10000)
+            if open {
+                let overlay = try XCTUnwrap(selectionOverlay(in:host))
+                XCTAssertFalse(overlay.isHidden,"Selection must be mounted on the actual expanded image")
+                XCTAssertGreaterThan(overlay.frame.width,size.width*0.5)
+                // Newly captured records may not yet have stored OCR. Wait
+                // for the real on-demand recognition used by this image view.
+                for _ in 0..<16 {
+                    overlay.selectAll(nil)
+                    if !overlay.selectedText.isEmpty { break }
+                    try await Task.sleep(for:.milliseconds(500))
+                }
+                XCTAssertFalse(overlay.selectedText.isEmpty,"Actual recorded pixels must expose selectable OCR text")
+                if let selection = overlay.selection {
+                    overlay.select(from:.init(line:0,offset:0),to:.init(line:min(10,selection.head.line),offset:8))
+                    XCTAssertFalse(overlay.selectedText.isEmpty)
+                }
+                overlay.layoutSubtreeIfNeeded()
+                var hits = false
+                for x in stride(from:overlay.frame.minX+4,to:overlay.frame.maxX,by:12) {
+                    for y in stride(from:overlay.frame.minY+4,to:overlay.frame.maxY,by:12) where !hits {
+                        hits = overlay.hitTest(NSPoint(x:x,y:y)) === overlay
+                    }
+                    if hits { break }
+                }
+                XCTAssertTrue(hits,"The OCR layer must receive clicks inside the projected artwork")
+                let selectionBitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in:host.bounds))
+                host.cacheDisplay(in:host.bounds,to:selectionBitmap)
+                try XCTUnwrap(selectionBitmap.representation(using:.png,properties:[:])).write(to:destination.appendingPathComponent("archive-selection.png"))
+            }
         }
         model.prepareToQuit(); await model.shutDownRecording(); await model.storageOptimizer.stop()
     }
