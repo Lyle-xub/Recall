@@ -103,7 +103,7 @@ struct ThemeTogglePill: View {
             }.padding(3)
             .background(scheme == .dark ? Color.white.opacity(0.10):Color.white.opacity(0.55),in:Capsule())
             .overlay(Capsule().strokeBorder(Color.white.opacity(scheme == .dark ? 0.22:0.7),lineWidth:1))
-        }.buttonStyle(.plain)
+        }.buttonStyle(.plain).fixedSize()
             .help("切换暖昼 / 深夜外观").accessibilityLabel("切换外观,当前\(appearance.label)")
     }
     private func segment(_ title:String,symbol:String,active:Bool)->some View {
@@ -122,279 +122,73 @@ struct ThemeTogglePill: View {
     }
 }
 
-/// One slot in the staircase: a recorded memory, or a decorative sheet that
-/// only carries a pastel band so the wings can stretch into the fog.
-private struct ArchiveSlot: Identifiable {
-    let id: String
-    let frame: MemoryFrame?
-    let palette: Int
-}
-
-/// App-icon tint per sheet, echoing the reference where every glass panel
-/// carries the palette of the cover beneath it.
-@MainActor enum ArchiveAppTint {
-    private static var colors: [String:Color] = [:]
-    static func color(appName:String,bundleID:String?)->Color? {
-        let key = bundleID.flatMap { $0.isEmpty ? nil:$0 } ?? appName
-        if let cached = colors[key] { return cached }
-        guard let icon = AppIconCache.image(name:appName,bundleID:bundleID),
-              let image = icon.cgImage(forProposedRect:nil,context:nil,hints:nil),
-              let tint = IconColorSampler.sample(image),!tint.isNeutral else { return nil }
-        let color = Color(red:tint.red,green:tint.green,blue:tint.blue)
-        colors[key] = color
-        return color
-    }
-}
-
-/// The diagonal staircase of frosted glass sheets from the reference: a raised
-/// focus sheet at the upper middle, a steep left wing dissolving into mist and
-/// a shallow right wing stretching offscreen. Sheets further from the focus
-/// slide in front of the nearer ones, like foreground bokeh; opening a sheet
-/// lifts, sharpens and unfolds it while the staircase follows in one spring.
+/// Keep the native scene mounted across search/detail navigation so returning
+/// restores the same camera and card instead of replaying an entrance.
 struct ArchiveStackView: View {
     @ObservedObject var model: AppModel
-    @State private var focal: Int?
-    @State private var appeared = false
-    @State private var hovered: Int?
-    @State private var pointer = CGPoint(x:0.5,y:0.5)
+    @Binding var focusedID: String?
+    @State private var images: [String:NSImage] = [:]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    private static let slotCount = 20
-    private var slots: [ArchiveSlot] {
-        let frames = Array(model.archiveFrames.prefix(Self.slotCount))
-        var result = frames.map { ArchiveSlot(id:$0.id,frame:$0,palette:0) }
-        for index in result.count..<Self.slotCount { result.append(ArchiveSlot(id:"fog-\(index)",frame:nil,palette:index)) }
-        return result
-    }
-    private var defaultFocal: Int { slots.count >= 16 ? 8:slots.count/2 }
+    private var frames:[MemoryFrame] { Array(model.archiveFrames.prefix(96)) }
     var body: some View {
         GeometryReader { geo in
-            let w = min(430,max(260,geo.size.width*0.26))
-            let size = CGSize(width:w,height:w*0.72)
             ZStack {
-                ZStack {
-                    ForEach(Array(slots.enumerated()),id:\.element.id) { index,slot in
-                        card(index:index,slot:slot,size:size,scene:geo.size)
+                ArchiveGlassRenderer(frames:frames,images:images,appearance:model.settings.appearance,
+                    selected:focusedID,size:geo.size,reduced:reduceMotion) { id in toggle(id) }
+                    .accessibilityRepresentation {
+                        VStack {
+                            ForEach(frames) { frame in
+                                Button("\(focusedID == frame.id ? "收起":"展开") \(frame.title.isEmpty ? frame.appName:frame.title)，\(frame.timestamp.formatted(date:.abbreviated,time:.standard))") { toggle(frame.id) }
+                            }
+                        }
+                    }
+                LinearGradient(stops:[.init(color:ArchiveTone.base(model.settings.appearance),location:0),
+                    .init(color:ArchiveTone.base(model.settings.appearance).opacity(0.9),location:0.08),
+                    .init(color:.clear,location:0.23)],startPoint:.top,endPoint:.bottom)
+                    .allowsHitTesting(false)
+                if let frame = frames.first(where: { $0.id == focusedID }) {
+                    details(frame)
+                        .frame(width:max(190,geo.size.width*0.30-36),height:132,alignment:.bottom)
+                        .position(x:geo.size.width/2,y:geo.size.height/2+geo.size.width*0.182-78)
+                        .transition(.opacity.combined(with:.offset(y:14)))
+                }
+            }
+            .animation(reduceMotion ? nil:.easeInOut(duration:0.45),value:focusedID)
+            .onChange(of:frames.map(\.id)) { _,ids in
+                if let focusedID,!ids.contains(focusedID) { self.focusedID = nil }
+            }
+            .task(id:frames.map(\.imagePath)) {
+                let paths = Set(frames.map(\.imagePath))
+                var loaded = images.filter { paths.contains($0.key) }
+                for frame in frames where loaded[frame.imagePath] == nil {
+                    guard !Task.isCancelled else { return }
+                    if let pixels = await MemoryImagePipeline.shared.image(at:model.store.root.appendingPathComponent(frame.imagePath),maxPixels:720),!Task.isCancelled {
+                        loaded[frame.imagePath] = NSImage(cgImage:pixels,size:NSSize(width:pixels.width,height:pixels.height))
                     }
                 }
-                .frame(maxWidth:.infinity,maxHeight:.infinity)
-                .rotation3DEffect(.degrees(reduceMotion ? 0:36+Double(0.5-pointer.y)*3),axis:(x:1,y:0,z:0),perspective:0.65)
-                .rotation3DEffect(.degrees(reduceMotion ? 0:Double(pointer.x-0.5)*4),axis:(x:0,y:1,z:0),perspective:0.65)
-                .rotationEffect(reduceMotion ? .zero:.degrees(7))
-                fogOverlay(scene:geo.size).allowsHitTesting(false).zIndex(200)
-            }
-            .animation(reduceMotion ? nil:.easeOut(duration:0.35),value:pointer)
-            .onContinuousHover(coordinateSpace:.local) { phase in
-                switch phase {
-                case .active(let location):
-                    pointer = CGPoint(x:location.x/max(1,geo.size.width),y:location.y/max(1,geo.size.height))
-                case .ended:
-                    pointer = CGPoint(x:0.5,y:0.5)
-                }
-            }
-            .onAppear {
-                if focal == nil { focal = defaultFocal }
-                appeared = true
+                if !Task.isCancelled { images = loaded }
             }
         }
     }
-    /// Whiteout layers above the sheets, tuned so mid-distance cards stay
-    /// crisp: only the bottom, the far left wing and the right edge dissolve.
-    private func fogOverlay(scene:CGSize)->some View {
-        let fog = ArchiveTone.fog(model.settings.appearance)
-        return ZStack {
-            LinearGradient(stops:[.init(color:fog.opacity(0),location:0.60),.init(color:fog.opacity(0.32),location:0.82),.init(color:fog.opacity(0.80),location:1)],
-                           startPoint:.top,endPoint:.bottom)
-            LinearGradient(colors:[fog.opacity(0.60),fog.opacity(0)],
-                           startPoint:.leading,endPoint:UnitPoint(x:0.24,y:0.5))
-            RadialGradient(colors:[fog.opacity(0.5),fog.opacity(0)],center:.center,startRadius:0,endRadius:scene.width*0.24)
-                .frame(width:scene.width*0.48,height:scene.width*0.48)
-                .position(x:scene.width*1.02,y:scene.height*0.75)
-        }
+    private func toggle(_ id:String?) {
+        focusedID = focusedID == id ? nil:id
     }
-    private func card(index:Int,slot:ArchiveSlot,size:CGSize,scene:CGSize)->some View {
-        let pivot = focal ?? defaultFocal
-        let t = CGFloat(index-pivot)
-        let at = abs(t)
-        let isFocal = focal == index
-        let isHovered = hovered == index
-        let raise = size.height*1.15
-        let pivotX = scene.width/2-size.width*0.30
-        let restY = scene.height*0.58
-        let originY = restY-(focal != nil ? raise:0)
-        var x = pivotX, y = originY
-        var blur = min(4,at*0.7), opacity = max(0.55,1-at*0.04), tilt = 0.0, scale = 1-at*0.03
-        if t < 0 {
-            x = pivotX+t*size.width*0.36
-            y = originY+at*size.height*0.36
-            blur = min(4.5,at*0.7); opacity = max(0.5,1-at*0.055)
-        } else if t > 0 {
-            x = pivotX+t*size.width*0.32
-            y = originY+at*size.height*0.24
-        }
-        if isFocal { scale = 1.42; blur = 0; opacity = 1; tilt = -25 }
-        if isHovered,!isFocal,slot.frame != nil { scale *= 1.06; y -= 12; blur = max(0,blur-0.5) }
-        let day = model.settings.appearance == .warmDay
-        var label = ""
-        if let frame = slot.frame { label = "\(frame.title.isEmpty ? frame.appName:frame.title), \(frame.appName), \(frame.timeLabel)" }
-        let halo = RadialGradient(colors:[(day ? Color.white:Color(red:0.35,green:0.42,blue:0.60)).opacity(0.95),(day ? Color.white:Color.clear).opacity(0)],
-                                  center:.center,startRadius:0,endRadius:size.width*1.05)
-        let sheet = ArchiveCardView(model:model,frame:slot.frame,expanded:isFocal,trackLines:t > 0,palette:slot.palette,wing:t < 0 ? -1:1)
-            .frame(width:size.width,height:size.height)
-            .background { if isFocal { halo.frame(width:size.width*2.2,height:size.height*2.6).blur(radius:30) } }
-            .shadow(color:.black.opacity(isFocal ? 0.24:0.16),radius:isFocal ? 38:14,y:isFocal ? 20:7)
-            .scaleEffect(scale)
-            .rotation3DEffect(.degrees(reduceMotion ? 0:tilt),axis:(x:1,y:0,z:0),perspective:0.65)
-            .blur(radius:reduceMotion ? 0:blur)
-            .opacity(appeared ? opacity:0)
-            .offset(y:appeared ? 0:340)
-            .position(x:x,y:y)
-            .zIndex(isFocal ? 100:at)
-        return sheet
-            .contentShape(RoundedRectangle(cornerRadius:8,style:.continuous))
-            .onTapGesture {
-                guard slot.frame != nil else { return }
-                withAnimation(reduceMotion ? nil:.spring(response:0.62,dampingFraction:0.84)) {
-                    focal = isFocal ? nil:index
-                }
-            }
-            .onHover { if slot.frame != nil { hovered = $0 ? index:nil } }
-            .animation(reduceMotion ? nil:.spring(response:0.62,dampingFraction:0.84).delay(at*0.028),value:focal)
-            .animation(reduceMotion ? nil:.spring(response:0.72,dampingFraction:0.88).delay(0.1+Double(index)*0.04),value:appeared)
-            .animation(reduceMotion ? nil:.spring(response:0.32,dampingFraction:0.8),value:hovered)
-            .accessibilityElement(children:isFocal ? .contain:.ignore)
-            .accessibilityLabel(label)
-            .accessibilityAddTraits(isFocal ? .isSelected:[])
-    }
-}
-
-/// One frosted sheet: the recorded screen fills the card and a milky gradient
-/// frosts over it from the bottom, so the cover's colors bleed through the
-/// glass exactly like the reference. A bright hairline stroke and a per-wing
-/// tint keep every sheet distinct inside the stack.
-private struct ArchiveCardView: View {
-    @ObservedObject var model: AppModel
-    let frame: MemoryFrame?
-    let expanded: Bool
-    let trackLines: Bool
-    let palette: Int
-    let wing: CGFloat
-    @State private var thumbnail: NSImage?
-    @Environment(\.colorScheme) private var scheme
-    private static let fogPalettes: [[Color]] = [
-        [Color(red:0.98,green:0.84,blue:0.55),Color(red:0.95,green:0.68,blue:0.42)],
-        [Color(red:0.72,green:0.80,blue:0.94),Color(red:0.55,green:0.66,blue:0.88)],
-        [Color(red:0.95,green:0.74,blue:0.78),Color(red:0.88,green:0.55,blue:0.62)],
-        [Color(red:0.70,green:0.86,blue:0.80),Color(red:0.50,green:0.74,blue:0.68)],
-        [Color(red:0.84,green:0.77,blue:0.94),Color(red:0.68,green:0.60,blue:0.86)],
-        [Color(red:0.95,green:0.66,blue:0.56),Color(red:0.85,green:0.48,blue:0.42)],
-    ]
-    var body: some View {
-        GeometryReader { geo in
-            ZStack(alignment:.bottom) {
-                cover.frame(width:geo.size.width,height:geo.size.height)
-                Rectangle().fill(glassGradient).allowsHitTesting(false)
-                wingTint.allowsHitTesting(false)
-                if trackLines,!expanded {
-                    VStack(alignment:.leading,spacing:11) {
-                        trackLine(width:geo.size.width*0.58)
-                        trackLine(width:geo.size.width*0.76)
-                        trackLine(width:geo.size.width*0.44)
-                    }.padding(.horizontal,24)
-                    .frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.top)
-                    .padding(.top,geo.size.height*0.36)
-                    .allowsHitTesting(false)
-                }
-                if frame != nil {
-                    infoBar.frame(height:geo.size.height*0.34).opacity(expanded ? 1:0)
-                }
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius:expanded ? 10:7,style:.continuous))
-        .overlay(RoundedRectangle(cornerRadius:expanded ? 10:7,style:.continuous)
-            .strokeBorder(.white.opacity(scheme == .dark ? 0.3:0.92),lineWidth:1.5).allowsHitTesting(false))
-        .task(id:frame?.imagePath) {
-            guard let frame,
-                  let pixels = await MemoryImagePipeline.shared.image(at:model.store.root.appendingPathComponent(frame.imagePath),maxPixels:900),!Task.isCancelled else { return }
-            thumbnail = NSImage(cgImage:pixels,size:NSSize(width:pixels.width,height:pixels.height))
-        }
-    }
-    private var glassGradient: LinearGradient {
-        let milk = ArchiveTone.glassMilk(model.settings.appearance)
-        if expanded {
-            return LinearGradient(stops:[.init(color:milk.opacity(0),location:0),.init(color:milk.opacity(0.04),location:0.55),
-                                         .init(color:milk.opacity(0.18),location:0.8),.init(color:milk.opacity(0.4),location:1)],
-                                  startPoint:.top,endPoint:.bottom)
-        }
-        return LinearGradient(stops:[.init(color:milk.opacity(0.04),location:0),.init(color:milk.opacity(0.24),location:0.32),
-                                     .init(color:milk.opacity(0.52),location:0.62),.init(color:milk.opacity(0.78),location:1)],
-                              startPoint:.top,endPoint:.bottom)
-    }
-    private var wingTint: some View {
-        let day = scheme == .light
-        var tint = wing < 0
-            ? Color(red:0.98,green:0.90,blue:0.80).opacity(day ? 0.10:0.05)
-            : Color(red:0.80,green:0.87,blue:0.96).opacity(day ? 0.13:0.07)
-        if let frame,let appTint = ArchiveAppTint.color(appName:frame.appName,bundleID:frame.bundleID) {
-            tint = appTint.opacity(expanded ? (day ? 0.10:0.06):(day ? 0.24:0.13))
-        }
-        return Rectangle().fill(tint)
-    }
-    private var cover: some View {
-        ZStack {
-            if let thumbnail {
-                Image(nsImage:thumbnail).resizable().aspectRatio(contentMode:.fill)
-                    .saturation(expanded ? 1.05:1.25).contrast(1.05)
-            } else if frame != nil {
-                LinearGradient(colors:scheme == .dark ? [Color(white:0.17),Color(white:0.10)]:[Color(white:0.91),Color(white:0.83)],startPoint:.top,endPoint:.bottom)
-                AppBadge(name:frame!.appName,bundleID:frame!.bundleID,size:48).opacity(0.35)
-            } else {
-                let colors = Self.fogPalettes[palette%Self.fogPalettes.count]
-                LinearGradient(colors:colors.map { $0.opacity(scheme == .dark ? 0.4:0.95) },startPoint:.topLeading,endPoint:.bottomTrailing)
-            }
-        }
-    }
-    private func trackLine(width:CGFloat)->some View {
-        RoundedRectangle(cornerRadius:2)
-            .fill(scheme == .dark ? Color.white.opacity(0.3):Color(red:0.70,green:0.77,blue:0.88).opacity(0.9))
-            .frame(width:width,height:4)
-    }
-    private var infoBar: some View {
-        ZStack(alignment:.top) {
-            Rectangle().fill(.white.opacity(scheme == .dark ? 0.25:0.9)).frame(height:1)
-            info.padding(.horizontal,14).padding(.vertical,10)
-                .frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.bottom)
-        }
-        .background(scheme == .dark ? Color(white:0.12).opacity(0.88):Color.white.opacity(0.62))
-    }
-    private var info: some View {
-        VStack(alignment:.leading,spacing:9) {
-            HStack(spacing:10) {
-                AppBadge(name:frame!.appName,bundleID:frame!.bundleID,size:28)
-                VStack(alignment:.leading,spacing:3) {
-                    Text(frame!.title.isEmpty ? frame!.appName:frame!.title).font(.system(size:13,weight:.semibold)).lineLimit(1)
-                    Text("\(frame!.appName) · \(frame!.timeLabel)").font(.system(size:11)).foregroundStyle(.secondary).lineLimit(1)
-                }
-                Spacer(minLength:0)
-                if frame!.starred { Image(systemName:"star.fill").font(.system(size:12)).foregroundStyle(.yellow) }
-            }
-            HStack(spacing:2) {
-                infoButton(symbol:frame!.starred ? "star.fill":"star",label:frame!.starred ? "Remove star":"Star") { model.star(frame!) }
-                infoButton(symbol:"doc.on.doc",label:"Copy recognized text") { model.copy(frame!.text) }
-                Spacer(minLength:4)
-                Button { model.select(frame!) } label: {
-                    Label("Rewind",systemImage:"clock.arrow.circlepath")
-                        .font(.system(size:11,weight:.semibold))
-                        .padding(.horizontal,13).padding(.vertical,7)
-                        .background(Color.primary.opacity(0.88),in:Capsule())
-                        .foregroundStyle(scheme == .dark ? Color.black:Color.white)
-                }.buttonStyle(.plain).help("Rewind to this moment")
-            }
-        }
-    }
-    private func infoButton(symbol:String,label:String,action:@escaping ()->Void)->some View {
-        Button(action:action) {
-            Image(systemName:symbol).font(.system(size:13,weight:.medium)).foregroundStyle(Color.overlayControl)
-                .frame(width:32,height:32).contentShape(Rectangle())
-        }.buttonStyle(.plain).help(label).accessibilityLabel(label)
+    private func details(_ frame:MemoryFrame)->some View {
+        VStack(alignment:.leading,spacing:8) {
+            HStack {
+                Text(frame.appName.uppercased()).font(.system(size:9,weight:.semibold)).tracking(2)
+                Spacer()
+                Button { focusedID = nil } label: { Image(systemName:"arrow.up.left.and.arrow.down.right").frame(width:26,height:24) }
+                    .help("收起卡片").accessibilityLabel("收起卡片")
+            }.foregroundStyle(.secondary)
+            Text(frame.title.isEmpty ? frame.appName:frame.title).font(.system(size:14,weight:.semibold)).lineLimit(2)
+            Text(frame.timeLabel).font(.system(size:10)).foregroundStyle(.secondary)
+            HStack(spacing:14) {
+                Button { model.star(frame) } label: { Image(systemName:frame.starred ? "star.fill":"star").frame(width:24,height:26) }.help("收藏记忆")
+                Button { model.copy(frame.text) } label: { Image(systemName:"doc.on.doc").frame(width:24,height:26) }.help("复制识别文字")
+                Spacer()
+                Button { model.select(frame) } label: { Label("回到此刻",systemImage:"arrow.up.right").font(.system(size:11,weight:.medium)) }
+            }.font(.system(size:12))
+        }.buttonStyle(.plain)
     }
 }

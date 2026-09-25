@@ -145,6 +145,7 @@ import ServiceManagement
             frameCache = frameCache.mapValues(refreshed)
             if let current = selected,current.imagePath == source || current.meetingImagePath == source { selected = refreshed(current) }
             if frames.contains(where:{$0.imagePath == source || $0.meetingImagePath == source}) { frames = frames.map(refreshed) }
+            if archiveFrames.contains(where:{$0.imagePath == source || $0.meetingImagePath == source}) { archiveFrames = archiveFrames.map(refreshed) }
         }
         capture.onFrame = { [weak self] frame in self?.receiveCapturedFrame(frame) }
         capture.onFrameExtended = { [weak self] id,date in
@@ -155,6 +156,7 @@ import ServiceManagement
         }
         capture.onIndexed = { [weak self] frame in
             guard let self else { return }
+            if let index = archiveFrames.firstIndex(where: { $0.id == frame.id }) { archiveFrames[index] = frame }
             if frameCache[frame.id] != nil { cache(frame) }
             if selected?.id == frame.id { selected = frame }
             if searchPresented { reloadSearch() }
@@ -221,8 +223,9 @@ import ServiceManagement
     }
     private func receiveCapturedFrame(_ frame:MemoryFrame) {
         recordedFrames += 1; total += 1
+        archiveFrames.removeAll { $0.imagePath == frame.imagePath }
         archiveFrames.insert(frame,at:0)
-        if archiveFrames.count > 20 { archiveFrames.removeLast(archiveFrames.count-20) }
+        if archiveFrames.count > 96 { archiveFrames.removeLast(archiveFrames.count-96) }
         timelineStart = min(timelineStart ?? frame.timestamp,frame.timestamp)
         if !trash,navigationWindow?.contains(frame.timestamp) != false {
             timeline.append(CapturedAppMoment(frame)); timeline.sort { $0.timestamp < $1.timestamp }
@@ -241,7 +244,9 @@ import ServiceManagement
             total = try libraryReader.count(demo:false)
             apps = try libraryReader.appNames(demo:false,trash:trash,since:since)
             timelineStart = try libraryReader.firstTimelineDate()
-            archiveFrames = (try? libraryReader.frames(trash:trash,since:since,demo:false,limit:20)) ?? []
+            let recent = (try? libraryReader.frames(trash:trash,since:since,demo:false,limit:192)) ?? []
+            var seenScreens = Set<String>()
+            archiveFrames = Array(recent.filter { seenScreens.insert($0.imagePath).inserted }.prefix(96))
             refreshTimelineActivity(force:true)
             if searchPresented { reloadSearch() }
             if let selected,!timeline.contains(where:{$0.id == selected.id}) { loadTimeline(around:selected.timestamp) }

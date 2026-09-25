@@ -39,6 +39,7 @@ struct RootView: View {
     @ObservedObject var model: AppModel
     @FocusState private var searchFocused: Bool
     @State private var searchEngaged = false
+    @State private var archiveFocusedID: String?
     @Namespace private var searchGlassNamespace
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var expanded: Bool { model.searchPresented || model.askOpen || model.inspectorOpen }
@@ -73,7 +74,17 @@ struct RootView: View {
             let top = model.desktopInsets.top
             ZStack {
                 ArchiveBackdrop(appearance:model.settings.appearance).ignoresSafeArea().allowsHitTesting(false)
-                DesktopClickShield { searchFocused = false; model.dismissTimeline() }.ignoresSafeArea()
+                DesktopClickShield {
+                    searchFocused = false
+                    if archiveFocusedID != nil {
+                        withAnimation(reduceMotion ? nil:.spring(response:0.76,dampingFraction:0.86)) { archiveFocusedID = nil }
+                    } else { model.dismissTimeline() }
+                }.ignoresSafeArea()
+                ArchiveStackView(model:model,focusedID:$archiveFocusedID)
+                    .opacity(!expanded && model.selected == nil && model.timelineCursor == nil ? 1:0)
+                    .scaleEffect(expanded || model.selected != nil ? 0.96:1)
+                    .allowsHitTesting(!expanded && model.selected == nil && model.timelineCursor == nil)
+                    .accessibilityHidden(expanded || model.selected != nil || model.timelineCursor != nil)
                 if !expanded,let frame = model.selected {
                     history(frame, size:geo.size).transition(.opacity)
                 }
@@ -82,11 +93,6 @@ struct RootView: View {
                 else if model.inspectorOpen, let frame = model.selected {
                     DetailView(model:model,frame:frame).padding(.horizontal,40).padding(.top,top+110).padding(.bottom,32)
                 } else {
-                    if model.selected == nil,model.timelineCursor == nil,!model.archiveFrames.isEmpty {
-                        ArchiveStackView(model:model)
-                            .padding(.top,top+112).padding(.bottom,36)
-                            .transition(.opacity)
-                    }
                     if model.selected != nil { historyActions.position(x:geo.size.width/2,y:top+108) }
                     if model.total == 0 { recordingPrompt.position(x:geo.size.width/2,y:geo.size.height*0.425+106) }
                     else if model.timelineCursor != nil,model.selected == nil {
@@ -104,30 +110,43 @@ struct RootView: View {
                         .zIndex(5)
                 }
                 HStack {
-                    BareIconButton(symbol:expanded || model.selected != nil ? "arrow.left":"xmark",label:expanded ? "Back to desktop":"Close Recall") { goBack() }
+                    if expanded || model.selected != nil || showSearchActions {
+                        BareIconButton(symbol:"arrow.left",label:"返回档案") { goBack() }
+                    } else {
+                        VStack(alignment:.leading,spacing:3) {
+                            Text("RECALL").font(.system(size:geo.size.width < 1050 ? 32:42,weight:.heavy)).tracking(-1.5)
+                            Text("MEMORY ARCHIVE   /   私人记忆终端")
+                                .font(.system(size:10,weight:.medium)).tracking(1.7)
+                        }.foregroundStyle(Color.primary.opacity(0.92))
+                    }
                     Spacer()
                     if !showSearchActions {
-                        HStack(spacing:20) {
-                            BareIconButton(symbol:"folder",label:"Browse all memories") { model.query = ""; model.showSearch() }
-                            BareIconButton(symbol:"magnifyingglass",label:"Search memories") { searchEngaged = true; searchFocused = true }
+                        HStack(spacing:geo.size.width < 1050 ? 9:18) {
+                            archiveNavigation("记忆库",symbol:"folder",compact:geo.size.width < 1050) { model.query = ""; model.showSearch() }
+                            archiveNavigation("搜索",symbol:"magnifyingglass",compact:geo.size.width < 1050) { searchEngaged = true; searchFocused = true }
                             ThemeTogglePill(appearance:model.settings.appearance) { model.toggleAppearance() }
                             BareIconButton(symbol:"slider.horizontal.3",label:"Settings") { model.settingsOpen = true }
                             Rectangle().fill(Color.primary.opacity(0.16)).frame(width:1,height:16)
-                            Text("\(model.total)").font(.system(size:13,weight:.medium).monospacedDigit()).foregroundStyle(Color.overlayControl)
+                            Text("\(model.total)").font(.system(size:13,weight:.medium).monospacedDigit()).fixedSize().foregroundStyle(Color.overlayControl)
                             BareIconButton(symbol:model.recordingRequested ? "pause":"play",label:model.recordingActionTitle,size:13) { model.toggleRecording() }
                             menu
+                            BareIconButton(symbol:"xmark",label:"关闭 Recall",size:11) { model.hideOverlay() }
                         }.transition(.opacity)
                     }
-                }.padding(.horizontal,40).position(x:geo.size.width/2,y:top+43)
+                }.padding(.horizontal,34).position(x:geo.size.width/2,y:top+59)
                 Text("● \(model.apps.count) 个应用 · \(model.total) 条记忆 · 本地索引")
                     .font(.system(size:11,weight:.medium)).foregroundStyle(.secondary)
                     .frame(maxWidth:.infinity,alignment:.leading).padding(.horizontal,40)
-                    .position(x:geo.size.width/2,y:top+104).allowsHitTesting(false)
+                    .position(x:geo.size.width/2,y:top+131).allowsHitTesting(false)
+                    .opacity(showSearchActions || expanded || model.selected != nil ? 0:1)
                 if let toast = model.toast {
                     Text(toast).font(.system(size:12,weight:.medium)).padding(.horizontal,19).padding(.vertical,11)
                         .liquidGlass(radius:20).position(x:geo.size.width/2,y:geo.size.height-240).allowsHitTesting(false)
                 }
             }
+            .clipped()
+            .animation(reduceMotion ? nil:.spring(response:0.64,dampingFraction:0.9),value:expanded)
+            .animation(reduceMotion ? nil:.spring(response:0.64,dampingFraction:0.9),value:model.selected?.id)
             .animation(reduceMotion ? nil:.spring(response:0.42,dampingFraction:0.9),value:compactSearch)
             .animation(reduceMotion ? nil:.spring(response:0.58,dampingFraction:0.64),value:showSearchActions)
         }
@@ -145,10 +164,25 @@ struct RootView: View {
         .onExitCommand { goBack() }
     }
     private func goBack() {
+        let wasSearching = searchEngaged
         searchFocused = false; searchEngaged = false
-        if model.inspectorOpen { model.inspectorOpen = false }
+        if archiveFocusedID != nil,!expanded,model.selected == nil {
+            withAnimation(reduceMotion ? nil:.spring(response:0.76,dampingFraction:0.86)) { archiveFocusedID = nil }
+        }
+        else if model.inspectorOpen { model.inspectorOpen = false }
         else if expanded || model.selected != nil { model.returnToDesktop() }
-        else { model.hideOverlay() }
+        else if !wasSearching { model.hideOverlay() }
+    }
+    private func archiveNavigation(_ title:String,symbol:String,compact:Bool,action:@escaping ()->Void)->some View {
+        Button(action:action) {
+            HStack(spacing:7) {
+                Image(systemName:symbol)
+                if !compact { Text(title).fixedSize() }
+            }.font(.system(size:12,weight:.medium))
+                .foregroundStyle(Color.overlayControl).padding(.vertical,9)
+                .accessibilityLabel(title)
+                .contentShape(Rectangle())
+        }.buttonStyle(ComfortableButtonStyle())
     }
     private func searchToolbar(width:CGFloat)->some View {
         SearchGlassGroup {
@@ -244,7 +278,7 @@ struct RootView: View {
         return Group {
             Text("LOCAL COLLECTION · \(model.apps.count) APPS / \(model.total) MEMORIES")
                 .frame(maxWidth:.infinity,alignment:.leading)
-            Text("\(model.settings.appearance.label) MODE · \(model.recordingStatusTitle.uppercased())")
+            Text(size.width < 1050 ? "\(model.settings.appearance.label) · LOCAL":"\(model.settings.appearance.label) MODE · \(model.recordingStatusTitle.uppercased())")
                 .frame(maxWidth:.infinity,alignment:.trailing)
         }
         .font(style).tracking(1.8).foregroundStyle(.secondary.opacity(0.85))
