@@ -1,0 +1,192 @@
+[
+  {
+    "Id": "demo-0",
+    "Timestamp": "2026-09-24T18:38:11.517515+00:00",
+    "AppName": "zoom.us",
+    "ProcessName": "demo.zoom.us",
+    "Title": "1:1 with Bill",
+    "ImagePath": "frames/demo-desktop.jpg",
+    "Text": "Remember to use the new cover sheet on your TPS reports.",
+    "Regions": [
+      {
+        "Text": "TPS reports need the new cover sheet.",
+        "Width": 0.5517578125,
+        "Height": 0.05454545454545454,
+        "X": 0.3173828125,
+        "Y": 0.42272727272727273
+      }
+    ],
+    "MeetingRegions": [
+      {
+        "Text": "TPS reports",
+        "Width": 0.1416015625,
+        "Height": 0.045454545454545456,
+        "X": 0.302734375,
+        "Y": 0.5893939393939394
+      }
+    ],
+    "Demo": true,
+    "Starred": false,
+    "SessionId": "demo-meeting",
+    "MeetingImagePath": "frames/demo-0.jpg"
+  },
+  {
+    "Id": "demo-1",
+    "Timestamp": "2026-09-24T18:36:11.517515+00:00",
+    "AppName": "Messages",
+    "ProcessName": "demo.Messages",
+    "Title": "Fred Manley",
+    "ImagePath": "frames/demo-1.jpg",
+    "Text": "Please include the updated cover page with the TPS reports before sending them.",
+    "Regions": [
+      {
+        "Text": "Please include the updated cover page",
+        "Width": 0.5322265625,
+        "Height": 0.05303030303030303,
+        "X": 0.302734375,
+        "Y": 0.28484848484848485
+      },
+      {
+        "Text": "with the TPS reports before sending them.",
+        "Width": 0.537109375,
+        "Height": 0.05303030303030303,
+        "X": 0.302734375,
+        "Y": 0.346969696969697
+      }
+    ],
+    "MeetingRegions": [],
+    "Demo": true,
+    "Starred": false,
+    "SessionId": null,
+    "MeetingImagePath": null
+  },
+  {
+    "Id": "demo-2",
+    "Timestamp": "2026-09-24T18:34:11.517515+00:00",
+    "AppName": "Chrome",
+    "ProcessName": "demo.Chrome",
+    "Title": "TPS report ask – dan@rewind.ai",
+    "ImagePath": "frames/demo-2.jpg",
+    "Text": "Can you send me the TPS reports before the end of the day? Thanks, Brett.",
+    "Regions": [
+      {
+        "Text": "TPS report ask",
+        "Width": 0.2685546875,
+        "Height": 0.06212121212121212,
+        "X": 0.2373046875,
+        "Y": 0.2924242424242424
+      },
+      {
+        "Text": "Can you send me the TPS reports",
+        "Width": 0.48828125,
+        "Height": 0.051515151515151514,
+        "X": 0.23828125,
+        "Y": 0.6227272727272727
+      }
+    ],
+    "MeetingRegions": [],
+    "Demo": true,
+    "Starred": false,
+    "SessionId": null,
+    "MeetingImagePath": null
+  },
+  {
+    "Id": "demo-3",
+    "Timestamp": "2026-09-24T18:32:11.517515+00:00",
+    "AppName": "Word",
+    "ProcessName": "demo.Word",
+    "Title": "Initech Memorandum",
+    "ImagePath": "frames/demo-3.jpg",
+    "Text": "TPS reports — TPS Report Cover Sheets Update",
+    "Regions": [
+      {
+        "Text": "TPS reports — TPS Report Cover Sheets Update",
+        "Width": 0.6494140625,
+        "Height": 0.051515151515151514,
+        "X": 0.087890625,
+        "Y": 0.5196969696969697
+      }
+    ],
+    "MeetingRegions": [],
+    "Demo": true,
+    "Starred": false,
+    "SessionId": null,
+    "MeetingImagePath": null
+  },
+  {
+    "Id": "demo-4",
+    "Timestamp": "2026-09-24T18:30:11.517515+00:00",
+    "AppName": "Keynote",
+    "ProcessName": "demo.Keynote",
+    "Title": "CoverSheet-guide.key",
+    "ImagePath": "frames/demo-4.jpg",
+    "Text": "TPS reports and you",
+    "Regions": [
+      {
+        "Text": "TPS reports and you",
+        "Width": 0.5244140625,
+        "Height": 0.08181818181818182,
+        "X": 0.228515625,
+        "Y": 0.48333333333333334
+      }
+    ],
+    "MeetingRegions": [],
+    "Demo": true,
+    "Starred": false,
+    "SessionId": null,
+    "MeetingImagePath": null
+  },
+  {
+    "Id": "demo-5",
+    "Timestamp": "2026-09-24T18:28:11.517515+00:00",
+    "AppName": "Chrome",
+    "ProcessName": "demo.Chrome",
+    "Title": "TPS Report – 314 – Ventura",
+    "ImagePath": "frames/demo-5.jpg",
+    "Text": "TPS reports · Cover sheet walkthrough",
+    "Regions": [
+      {
+        "Text": "TPS report ask",
+        "Width": 0.2685546875,
+        "Height": 0.06212121212121212,
+        "X": 0.2373046875,
+        "Y": 0.2924242424242424
+      },
+      {
+        "Text": "Can you send me the TPS reports",
+        "Width": 0.48828125,
+        "Height": 0.051515151515151514,
+        "X": 0.23828125,
+        "Y": 0.6227272727272727
+      }
+    ],
+    "MeetingRegions": [],
+    "Demo": true,
+    "Starred": false,
+    "SessionId": null,
+    "MeetingImagePath": null
+  },
+  {
+    "Id": "demo-6",
+    "Timestamp": "2026-09-24T18:26:11.517515+00:00",
+    "AppName": "Slack",
+    "ProcessName": "demo.Slack",
+    "Title": "#general · Initech",
+    "ImagePath": "frames/demo-6.jpg",
+    "Text": "A friendly reminder: TPS reports need the new cover sheet. Thanks everyone!",
+    "Regions": [
+      {
+        "Text": "TPS reports need the new cover sheet.",
+        "Width": 0.5517578125,
+        "Height": 0.05454545454545454,
+        "X": 0.3173828125,
+        "Y": 0.42272727272727273
+      }
+    ],
+    "MeetingRegions": [],
+    "Demo": true,
+    "Starred": false,
+    "SessionId": null,
+    "MeetingImagePath": null
+  }
+]

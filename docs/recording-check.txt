@@ -1,0 +1,18 @@
+Recall — real screen recording check
+
+This document is displayed in TextEdit and captured by ScreenCaptureKit.
+It is not imported into the memory database.
+
+Verification phrase: The silver moon remembers Friday.
+会议记录验证：周五下午三点讨论产品设计。
+
+Check the timeline, select a word on the recorded image, and copy it.
+
+Second capture: native recording is running.
+
+Indexing check: The silver moon remembers Friday.
+中文搜索：周五下午三点讨论产品设计。
+
+Restart check: Recording resumed successfully.
+
+Recall 0.4 timeline check — app changes and idle capture.

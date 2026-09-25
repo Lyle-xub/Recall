@@ -1,0 +1,18 @@
+global using System;
+global using System.Collections.Generic;
+global using System.IO;
+global using System.Linq;
+global using System.Threading;
+global using System.Threading.Tasks;
+global using Rewind;
+global using Microsoft.UI.Xaml;
+global using Microsoft.UI.Xaml.Controls;
+global using Microsoft.UI.Xaml.Media;
+global using Microsoft.UI.Xaml.Input;
+global using Microsoft.UI.Xaml.Shapes;
+global using Windows.Foundation;
+global using Windows.UI;
+global using Thickness = Microsoft.UI.Xaml.Thickness;
+global using Path = System.IO.Path;
+global using Application = Microsoft.UI.Xaml.Application;
+global using Orientation = Microsoft.UI.Xaml.Controls.Orientation;

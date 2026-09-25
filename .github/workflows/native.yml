@@ -1,0 +1,37 @@
+name: Native desktop builds
+on: [push, workflow_dispatch]
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test --package-path macOS
+      - run: bash scripts/build-macos.sh
+        env:
+          RECALL_ALLOW_ADHOC: "1"
+      - run: ditto -c -k --sequesterRsrc --keepParent 'release/Recall.app' release/Recall-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Recall-macOS
+          path: release/Recall-macOS.zip
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet run --project Windows/Rewind.Tests/Rewind.Tests.csproj
+      - shell: pwsh
+        run: ./scripts/build-windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Recall-Windows-x64
+          path: |
+            release/Recall-Windows-x64.zip
+            release/Recall-Windows-x64-Setup.exe
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Recall-Windows-native-validation
+          path: release/windows-smoke

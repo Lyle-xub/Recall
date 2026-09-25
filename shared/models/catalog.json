@@ -1,0 +1,24 @@
+[
+  {
+    "id": "chat",
+    "title": "Qwen3 \u00b7 1.7B",
+    "subtitle": "Private questions and summaries \u00b7 Chinese & English",
+    "file": "Qwen3-1.7B-Q8_0.gguf",
+    "url": "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/90862c4b9d2787eaed51d12237eafdfe7c5f6077/Qwen3-1.7B-Q8_0.gguf",
+    "bytes": 1834426016,
+    "sha256": "061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a",
+    "license": "Apache-2.0",
+    "source": "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF"
+  },
+  {
+    "id": "speech",
+    "title": "Whisper \u00b7 Base",
+    "subtitle": "Offline meeting transcription \u00b7 99 languages",
+    "file": "ggml-base.bin",
+    "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin",
+    "bytes": 147951465,
+    "sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+    "license": "MIT",
+    "source": "https://huggingface.co/ggerganov/whisper.cpp"
+  }
+]

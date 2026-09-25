@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Recall — Prismatic Moments</title>
+  <desc id="desc">Three translucent iridescent glass panes overlap around a point of light, representing layered memories coming into focus.</desc>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="0.58" stop-color="#FCFBFE"/>
+      <stop offset="1" stop-color="#F2F8FC"/>
+    </linearGradient>
+    <radialGradient id="tileTint" cx="50%" cy="50%" r="50%">
+      <stop stop-color="#DFE8FF" stop-opacity=".57"/>
+      <stop offset="1" stop-color="#DFE8FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="focusLight" cx="50%" cy="50%" r="50%">
+      <stop stop-color="#FFFFFF" stop-opacity=".98"/>
+      <stop offset=".14" stop-color="#FFFFFF" stop-opacity=".92"/>
+      <stop offset=".36" stop-color="#EBF7FF" stop-opacity=".48"/>
+      <stop offset="1" stop-color="#DDEFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="violetGlass" x1=".08" y1=".04" x2=".94" y2=".98" gradientUnits="objectBoundingBox">
+      <stop stop-color="#F17CCE" stop-opacity=".93"/>
+      <stop offset=".23" stop-color="#C16AF3" stop-opacity=".86"/>
+      <stop offset=".59" stop-color="#656BEB" stop-opacity=".89"/>
+      <stop offset="1" stop-color="#62DCED" stop-opacity=".64"/>
+    </linearGradient>
+    <linearGradient id="violetSheen" x1=".02" y1="0" x2="1" y2=".84" gradientUnits="objectBoundingBox">
+      <stop stop-color="#FFFFFF" stop-opacity=".75"/>
+      <stop offset=".18" stop-color="#FFFFFF" stop-opacity=".03"/>
+      <stop offset=".73" stop-color="#003FBB" stop-opacity=".03"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity=".52"/>
+    </linearGradient>
+    <linearGradient id="coralGlass" x1=".02" y1=".08" x2="1" y2=".96" gradientUnits="objectBoundingBox">
+      <stop stop-color="#FFD491" stop-opacity=".87"/>
+      <stop offset=".28" stop-color="#FF647B" stop-opacity=".91"/>
+      <stop offset=".64" stop-color="#F54DA5" stop-opacity=".82"/>
+      <stop offset=".82" stop-color="#F184CC" stop-opacity=".68"/>
+      <stop offset="1" stop-color="#FFAF82" stop-opacity=".87"/>
+    </linearGradient>
+    <linearGradient id="coralSheen" x1="0" y1=".14" x2="1" y2=".74" gradientUnits="objectBoundingBox">
+      <stop stop-color="#FFFFFF" stop-opacity=".66"/>
+      <stop offset=".15" stop-color="#FFFFFF" stop-opacity=".13"/>
+      <stop offset=".65" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="1" stop-color="#FFF6F0" stop-opacity=".56"/>
+    </linearGradient>
+    <linearGradient id="cyanGlass" x1="0" y1=".16" x2="1" y2=".88" gradientUnits="objectBoundingBox">
+      <stop stop-color="#4569E9" stop-opacity=".84"/>
+      <stop offset=".25" stop-color="#238EEF" stop-opacity=".88"/>
+      <stop offset=".63" stop-color="#6CE9FA" stop-opacity=".77"/>
+      <stop offset="1" stop-color="#70E9BE" stop-opacity=".78"/>
+    </linearGradient>
+    <linearGradient id="cyanSheen" x1=".12" y1=".02" x2=".93" y2=".94" gradientUnits="objectBoundingBox">
+      <stop stop-color="#FFFFFF" stop-opacity=".78"/>
+      <stop offset=".26" stop-color="#FFFFFF" stop-opacity=".08"/>
+      <stop offset=".75" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="1" stop-color="#E9FFFF" stop-opacity=".68"/>
+    </linearGradient>
+    <linearGradient id="edgeViolet" x1="0" y1="0" x2="1" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#FF7EC0"/>
+      <stop offset=".5" stop-color="#3B54C3"/>
+      <stop offset="1" stop-color="#5DD9FF"/>
+    </linearGradient>
+    <linearGradient id="edgeCoral" x1="0" y1="0" x2="1" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#FFBD75"/>
+      <stop offset=".55" stop-color="#EF578A"/>
+      <stop offset="1" stop-color="#FFA477"/>
+    </linearGradient>
+    <linearGradient id="edgeCyan" x1="0" y1="0" x2="1" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#2667DB"/>
+      <stop offset=".44" stop-color="#168ED9"/>
+      <stop offset="1" stop-color="#5BDFB1"/>
+    </linearGradient>
+    <filter id="tileShadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="18" stdDeviation="23" flood-color="#304065" flood-opacity=".16"/>
+    </filter>
+    <filter id="paneShadow" x="-30%" y="-30%" width="170%" height="180%">
+      <feDropShadow dx="0" dy="15" stdDeviation="15" flood-color="#28256E" flood-opacity=".17"/>
+    </filter>
+    <filter id="softGlow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="15"/>
+    </filter>
+    <clipPath id="tileClip"><rect x="86" y="86" width="852" height="852" rx="185"/></clipPath>
+    <path id="rearPane" d="M407 293 C407 276 418 266 434 258 L562 186 C597 168 615 170 615 202 L615 672 C615 685 607 692 593 688 L423 649 C413 647 407 639 407 627 Z"/>
+    <path id="leftPane" d="M309 432 C309 416 317 407 330 399 L461 338 C496 323 510 330 510 359 L510 723 C510 739 501 748 484 754 L329 792 C315 795 309 786 309 769 Z"/>
+    <path id="rightPane" d="M518 444 C518 423 528 411 548 401 L714 326 C744 313 757 322 757 349 L757 697 C757 716 746 729 727 733 L540 688 C525 683 518 676 518 657 Z"/>
+  </defs>
+
+  <rect x="86" y="86" width="852" height="852" rx="185" fill="url(#tile)" filter="url(#tileShadow)"/>
+  <g clip-path="url(#tileClip)">
+    <ellipse cx="530" cy="746" rx="320" ry="110" fill="url(#tileTint)" opacity=".67"/>
+    <ellipse cx="527" cy="797" rx="270" ry="35" fill="#A4A3DA" opacity=".11" filter="url(#softGlow)"/>
+    <path d="M432 741 L593 695 L749 740 L534 815 Z" fill="url(#tileTint)" opacity=".36"/>
+
+    <use href="#rearPane" fill="url(#violetGlass)" filter="url(#paneShadow)"/>
+    <use href="#rearPane" fill="url(#violetSheen)"/>
+    <use href="#rearPane" fill="none" stroke="url(#edgeViolet)" stroke-width="6" stroke-linejoin="round"/>
+    <path d="M419 302 C420 284 436 273 456 263 L566 204 C588 193 604 192 607 208" fill="none" stroke="#FFFFFF" stroke-opacity=".78" stroke-width="4" stroke-linecap="round"/>
+    <path d="M603 215 L603 663" fill="none" stroke="#DDF9FF" stroke-opacity=".76" stroke-width="3"/>
+
+    <use href="#leftPane" fill="url(#coralGlass)" filter="url(#paneShadow)"/>
+    <use href="#leftPane" fill="url(#coralSheen)"/>
+    <use href="#leftPane" fill="none" stroke="url(#edgeCoral)" stroke-width="6" stroke-linejoin="round"/>
+    <path d="M323 437 C324 425 337 415 351 408 L465 352 C485 342 500 345 502 358" fill="none" stroke="#FFFFFF" stroke-opacity=".73" stroke-width="4" stroke-linecap="round"/>
+    <path d="M320 448 L320 761 Q320 785 336 781" fill="none" stroke="#FFF6E1" stroke-opacity=".68" stroke-width="3" stroke-linecap="round"/>
+    <path d="M495 364 L495 713" fill="none" stroke="#FFEFF7" stroke-opacity=".56" stroke-width="3"/>
+
+    <use href="#rightPane" fill="url(#cyanGlass)" filter="url(#paneShadow)"/>
+    <use href="#rightPane" fill="url(#cyanSheen)"/>
+    <use href="#rightPane" fill="none" stroke="url(#edgeCyan)" stroke-width="6" stroke-linejoin="round"/>
+    <path d="M533 445 C536 427 557 416 572 408 L714 342 Q741 329 745 347" fill="none" stroke="#FFFFFF" stroke-opacity=".79" stroke-width="4" stroke-linecap="round"/>
+    <path d="M745 361 L745 691 Q745 719 727 721" fill="none" stroke="#E7FFFF" stroke-opacity=".74" stroke-width="3" stroke-linecap="round"/>
+    <path d="M529 664 L726 719" fill="none" stroke="#ECFFFF" stroke-opacity=".62" stroke-width="3" stroke-linecap="round"/>
+
+    <circle cx="515" cy="509" r="62" fill="url(#focusLight)"/>
+    <path d="M514 461 C519 492 524 500 556 508 C526 515 520 522 515 555 C509 523 502 514 472 508 C502 501 508 494 514 461 Z" fill="#FFFFFF" opacity=".84" filter="url(#softGlow)"/>
+    <path d="M514 480 C518 498 524 503 542 508 C523 512 518 517 514 537 C510 518 504 513 486 508 C505 504 510 499 514 480 Z" fill="#FFFFFF"/>
+  </g>
+  <rect x="87" y="87" width="850" height="850" rx="184" fill="none" stroke="#FFFFFF" stroke-opacity=".83" stroke-width="3"/>
+</svg>

@@ -1,0 +1,15 @@
+.DS_Store
+.build/
+build/
+release/
+bin/
+obj/
+*.user
+*.log
+__pycache__/
+*.pyc
+.test-data/
+Windows/Rewind/tessdata/
+Windows/Rewind.Tests/TestResults/
+
+native-runtimes/

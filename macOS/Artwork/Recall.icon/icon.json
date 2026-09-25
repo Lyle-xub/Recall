@@ -1,0 +1,47 @@
+{
+  "fill": {
+    "solid": "display-p3:0.98,0.985,0.99,1.0"
+  },
+  "fill-specializations": [
+    {
+      "appearance": "dark",
+      "value": {
+        "automatic-gradient": "display-p3:0.14,0.16,0.20,1.0"
+      }
+    }
+  ],
+  "groups": [
+    {
+      "name": "Recall halo",
+      "specular": false,
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.08
+      },
+      "layers": [
+        {
+          "name": "Elliptical light halo",
+          "image-name": "Halo.png",
+          "glass": false
+        }
+      ]
+    },
+    {
+      "name": "Dichroic glass",
+      "specular": true,
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.2
+      },
+      "layers": [
+        {
+          "name": "Light through glass",
+          "image-name": "Prism.png"
+        }
+      ]
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}

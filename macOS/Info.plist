@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>Recall</string>
+<key>CFBundleDisplayName</key><string>Recall</string>
+<key>CFBundleIdentifier</key><string>studio.rewind.replica</string>
+<key>CFBundleIconName</key><string>Recall</string>
+<key>CFBundleIconFile</key><string>Recall</string>
+<key>CFBundleExecutable</key><string>Recall</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>0.4.25</string>
+<key>CFBundleVersion</key><string>33</string>
+<key>LSMinimumSystemVersion</key><string>15.0</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>LSUIElement</key><true/>
+<key>NSScreenCaptureUsageDescription</key><string>Record your screen locally so you can search and revisit moments.</string>
+<key>NSMicrophoneUsageDescription</key><string>Record your voice when microphone recording is enabled.</string>
+<key>NSAudioCaptureUsageDescription</key><string>Record meeting and system audio when you enable audio recording.</string>
+</dict></plist>

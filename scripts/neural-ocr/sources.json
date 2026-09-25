@@ -1,0 +1,26 @@
+[
+  {
+    "name": "det-small.onnx",
+    "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx",
+    "sha256": "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f",
+    "bytes": 9929594
+  },
+  {
+    "name": "rec-small.onnx",
+    "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx",
+    "sha256": "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884",
+    "bytes": 21234383
+  },
+  {
+    "name": "ort.tgz",
+    "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.30.0/onnxruntime-osx-arm64-1.30.0.tgz",
+    "sha256": "6ebb5062a934537c352937821f9fe9718e7de1a2db1122a93dd363ffd53a7012",
+    "bytes": 42373116
+  },
+  {
+    "name": "opencv.tar.gz",
+    "url": "https://github.com/opencv/opencv/archive/refs/tags/4.12.0.tar.gz",
+    "sha256": "44c106d5bb47efec04e531fd93008b3fcd1d27138985c5baf4eafac0e1ec9e9d",
+    "bytes": 95254890
+  }
+]

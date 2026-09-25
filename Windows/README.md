@@ -1,0 +1,47 @@
+# Recall for Windows · 原生迁移代码
+
+以 macOS Recall 0.4.25 为基准，采用 WinUI 3、Windows App SDK、Win32 窗口和 Composition。图标、虹彩玻璃纹理、Halo 与开场音效直接使用同一份品牌素材；界面采用 Windows 原生控件。
+
+**当前交付为源码。已通过核心回归检查和 C# 源码编译，尚未在 Windows 真机执行应用、录制与视觉验收，不能当作验收完成的安装包。** 完整范围与未验证项见 [验证记录](../docs/windows-0.4.25-validation.md)。
+
+## 在 Windows 构建
+
+需要 Windows 11 22H2 或更新版本、x64、.NET 10 SDK、Python 3.12+、Microsoft Visual C++ x64 Runtime。可选安装 Inno Setup 6 以生成安装器。在仓库根目录打开 PowerShell：
+
+```powershell
+./scripts/build-windows.ps1
+```
+
+构建时需要联网下载 NuGet 依赖、经过 SHA-256 校验的原生推理引擎与 OCR 权重。内置聊天、语音模型由用户在应用内下载。运行已打包的应用无需 Python 或 .NET SDK。
+
+脚本默认依次执行核心检查、自包含发布和原生 smoke 测试，全部成功后生成：
+
+- `release/recall-windows-x64/Recall.exe`：完整应用目录，不可仅复制 exe。
+- `release/Recall-Windows-x64.zip`：便携包。
+- `release/Recall-Windows-x64-Setup.exe`：安装器，仅安装了 Inno Setup 时生成。
+- `release/windows-smoke/`：测试报告与五个页面的截图。
+
+Windows 安装器尚未配置代码签名证书。`-SkipSmoke` 仅供诊断，不能据此认定可发布。
+
+## 使用
+
+默认 `Ctrl + Shift + Space` 唤起，`Ctrl + Alt + Space` 为备用；托盘菜单也可打开。快捷键、登录启动、任务栏图标、麦克风与系统音频都可在设置中更改。
+
+打开任何 Recall 界面会暂停采集，关闭界面后仅恢复原有录制意愿。已保存媒体的 OCR 与转写继续处理。默认数据目录沿用 `%LOCALAPPDATA%\RewindReplica`，保持旧版数据兼容。测试使用单独的临时库。
+
+## 工程
+
+- `Windows/Recall.WinUI`：界面、窗口、设置、回看、Usage、引导与应用协调。
+- `Windows/Rewind`：由新项目链接的存储、搜索、采集、使用时段和模型服务。完整仓库另有旧 WPF 文件，新入口不引用它们。
+- `Windows/Recall.Ocr`：隔离进程中的 PP-OCRv6 / Tesseract 识别。
+- `Windows/Rewind.Tests`：可在 macOS 执行的核心回归检查。
+- `Windows/Installer`：Windows 安装器。
+
+macOS 上可运行下面的源码检查；它会跳过 Windows manifest/PRI 工具，输出**不能用于发布**：
+
+```sh
+dotnet run --project Windows/Rewind.Tests/Rewind.Tests.csproj
+dotnet build Windows/Recall.WinUI/Recall.WinUI.csproj -p:Platform=x64 -p:RecallSourceCheck=true
+```
+
+`scripts/package-windows-source.py` 可重建精简源码包；其中不包含用户数据、旧 Demo、SDK 缓存或 Mac 发布文件。
