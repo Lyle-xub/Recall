@@ -134,11 +134,17 @@ struct ArchiveStackView: View {
         GeometryReader { geo in
             ZStack {
                 ArchiveGlassRenderer(frames:frames,images:images,appearance:model.settings.appearance,
-                    selected:focusedID,size:geo.size,reduced:reduceMotion) { id in toggle(id) }
+                    selected:focusedID,size:geo.size,reduced:reduceMotion,onSelect:toggle,onRecordAction:recordAction)
                     .accessibilityRepresentation {
                         VStack {
                             ForEach(frames) { frame in
                                 Button("\(focusedID == frame.id ? "收起":"展开") \(frame.title.isEmpty ? frame.appName:frame.title)，\(frame.timestamp.formatted(date:.abbreviated,time:.standard))") { toggle(frame.id) }
+                            }
+                            if let focusedID {
+                                Button("收起卡片") { toggle(focusedID) }
+                                Button("收藏记忆") { recordAction(focusedID,"star") }
+                                Button("复制识别文字") { recordAction(focusedID,"copy") }
+                                Button("回到此刻") { recordAction(focusedID,"rewind") }
                             }
                         }
                     }
@@ -146,14 +152,7 @@ struct ArchiveStackView: View {
                     .init(color:ArchiveTone.base(model.settings.appearance).opacity(0.9),location:0.08),
                     .init(color:.clear,location:0.23)],startPoint:.top,endPoint:.bottom)
                     .allowsHitTesting(false)
-                if let frame = frames.first(where: { $0.id == focusedID }) {
-                    details(frame)
-                        .frame(width:max(190,geo.size.width*0.30-36),height:132,alignment:.bottom)
-                        .position(x:geo.size.width/2,y:geo.size.height/2+geo.size.width*0.182-78)
-                        .transition(.opacity.combined(with:.offset(y:14)))
-                }
             }
-            .animation(reduceMotion ? nil:.easeInOut(duration:0.45),value:focusedID)
             .onChange(of:frames.map(\.id)) { _,ids in
                 if let focusedID,!ids.contains(focusedID) { self.focusedID = nil }
             }
@@ -173,22 +172,14 @@ struct ArchiveStackView: View {
     private func toggle(_ id:String?) {
         focusedID = focusedID == id ? nil:id
     }
-    private func details(_ frame:MemoryFrame)->some View {
-        VStack(alignment:.leading,spacing:8) {
-            HStack {
-                Text(frame.appName.uppercased()).font(.system(size:9,weight:.semibold)).tracking(2)
-                Spacer()
-                Button { focusedID = nil } label: { Image(systemName:"arrow.up.left.and.arrow.down.right").frame(width:26,height:24) }
-                    .help("收起卡片").accessibilityLabel("收起卡片")
-            }.foregroundStyle(.secondary)
-            Text(frame.title.isEmpty ? frame.appName:frame.title).font(.system(size:14,weight:.semibold)).lineLimit(2)
-            Text(frame.timeLabel).font(.system(size:10)).foregroundStyle(.secondary)
-            HStack(spacing:14) {
-                Button { model.star(frame) } label: { Image(systemName:frame.starred ? "star.fill":"star").frame(width:24,height:26) }.help("收藏记忆")
-                Button { model.copy(frame.text) } label: { Image(systemName:"doc.on.doc").frame(width:24,height:26) }.help("复制识别文字")
-                Spacer()
-                Button { model.select(frame) } label: { Label("回到此刻",systemImage:"arrow.up.right").font(.system(size:11,weight:.medium)) }
-            }.font(.system(size:12))
-        }.buttonStyle(.plain)
+    private func recordAction(_ id:String,_ action:String) {
+        guard let frame = frames.first(where: { $0.id == id }) else { return }
+        switch action {
+        case "star":model.star(frame)
+        case "copy":model.copy(frame.text)
+        case "rewind":model.select(frame)
+        case "close":focusedID = nil
+        default:break
+        }
     }
 }

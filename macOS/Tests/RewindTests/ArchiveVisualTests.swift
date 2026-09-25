@@ -53,6 +53,62 @@ final class ArchiveVisualTests: XCTestCase {
         XCTAssertGreaterThan(scene.scrollOffset,0)
         scene.scroll(by:-100000,precise:false)
         XCTAssertEqual(scene.scrollOffset,0,"Scrolling clamps to the first record")
+        // Verify physical motion using exactly the same real records as the UI.
+        let moving = ArchiveGlassScene()
+        let pictures = Dictionary(uniqueKeysWithValues:model.archiveFrames.compactMap { frame -> (String,NSImage)? in
+            guard let image = NSImage(contentsOf:root.appendingPathComponent(frame.imagePath)) else { return nil }
+            return (frame.imagePath,image)
+        })
+        func configure(_ selected:String?) {
+            moving.update(frames:model.archiveFrames,images:pictures,appearance:.warmDay,selected:selected,size:CGSize(width:2000,height:876),reduced:false)
+        }
+        configure(nil)
+        let renderer = SCNRenderer(device:nil,options:nil)
+        renderer.scene = moving.scene;renderer.pointOfView = moving.cameraNode
+        moving.scene.background.contents = NSColor(red:0.90,green:0.89,blue:0.86,alpha:1)
+        func snapshot(_ name:String) throws {
+            let image = renderer.snapshot(atTime:0,with:CGSize(width:2000,height:876),antialiasingMode:.multisampling4X)
+            let data = try XCTUnwrap(image.tiffRepresentation)
+            let bitmap = try XCTUnwrap(NSBitmapImageRep(data:data))
+            try XCTUnwrap(bitmap.representation(using:.png,properties:[:])).write(to:destination.appendingPathComponent(name+".png"))
+        }
+        try snapshot("ridge-idle")
+        moving.pointer(at:CGPoint(x:0.90,y:0.35))
+        for _ in 0..<100 { moving.advance(dt:1/60) }
+        try snapshot("ridge-wave-right")
+        moving.pointer(at:CGPoint(x:0.10,y:0.65))
+        for _ in 0..<100 { moving.advance(dt:1/60) }
+        try snapshot("ridge-wave-left")
+        moving.hover(nil)
+        for _ in 0..<120 { moving.advance(dt:1/60) }
+        let id = try XCTUnwrap(model.archiveFrames.first?.id)
+        let card = try XCTUnwrap(moving.scene.rootNode.childNode(withName:id,recursively:true))
+        let original = card.simdTransform
+        configure(id)
+        for step in 1...120 {
+            moving.advance(dt:1/60)
+            XCTAssertEqual(card.opacity,1)
+            XCTAssertTrue(moving.scene.rootNode.childNode(withName:id,recursively:true) === card)
+            if [8,16,30,120].contains(step) { try snapshot("extract-\(step)") }
+        }
+        configure(nil)
+        for step in 1...180 {
+            moving.advance(dt:1/60)
+            XCTAssertEqual(card.opacity,1)
+            if [8,16,30,180].contains(step) { try snapshot("return-\(step)") }
+        }
+        XCTAssertEqual(card.position.x,CGFloat(original.columns.3.x),accuracy:0.001)
+        XCTAssertEqual(card.position.y,CGFloat(original.columns.3.y),accuracy:0.001)
+        XCTAssertEqual(card.position.z,CGFloat(original.columns.3.z),accuracy:0.001)
+        // Reverse while extracting: the node and current transform survive.
+        configure(id)
+        for _ in 0..<16 { moving.advance(dt:1/60) }
+        let interrupted = card.simdTransform
+        configure(nil)
+        XCTAssertEqual(card.simdTransform,interrupted)
+        for _ in 0..<180 { moving.advance(dt:1/60) }
+        XCTAssertEqual(card.position.y,CGFloat(original.columns.3.y),accuracy:0.001)
+        moving.stopMotion()
         try JSONEncoder().encode(model.settings).write(to:root.appendingPathComponent("settings.json"))
         let window = NSWindow(contentRect:NSRect(x:0,y:0,width:1600,height:900),styleMask:[.borderless],backing:.buffered,defer:false)
         window.isReleasedWhenClosed = false
