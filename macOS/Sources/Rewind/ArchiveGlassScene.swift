@@ -53,6 +53,10 @@ private final class ArchiveRecordControl: SCNNode {
     private var layoutRevision = 0
     private var navigationRevision = -1
     private var imageKeys:[String:ObjectIdentifier] = [:]
+    private struct ShapeKey:Equatable { let width:CGFloat;let height:CGFloat;let aspect:CGFloat }
+    private var shapeKeys:[String:ShapeKey] = [:]
+    private(set) var shapeUpdateCount = 0
+    private(set) var positionUpdateCount = 0
     private(set) var surfaceBuildCount = 0
     private(set) var textureUpdateCount = 0
     private(set) var layoutUpdateCount = 0
@@ -181,7 +185,7 @@ private final class ArchiveRecordControl: SCNNode {
         }
         let ids = Set(entries.map { $0.0 })
         for id in Array(nodes.keys) where !ids.contains(id) {
-            nodes.removeValue(forKey:id)?.removeFromParentNode();slots[id] = nil;heights[id] = nil;depths[id] = nil;extractions[id] = nil;surfaceKeys[id] = nil;imageAspects[id] = nil;imageKeys[id] = nil
+            nodes.removeValue(forKey:id)?.removeFromParentNode();slots[id] = nil;heights[id] = nil;depths[id] = nil;extractions[id] = nil;surfaceKeys[id] = nil;imageAspects[id] = nil;imageKeys[id] = nil;shapeKeys[id] = nil
         }
         maxScroll = max(0,CGFloat(rowCount)-3)
         scrollOffset = min(scrollOffset,maxScroll)
@@ -194,6 +198,7 @@ private final class ArchiveRecordControl: SCNNode {
             let surfaceKey = "\(frame?.imagePath ?? "empty")|\(frame?.starred ?? false)|\(night)|\(lane)"
             guard surfaceKeys[id] != surfaceKey else { continue }
             surfaceKeys[id] = surfaceKey
+            shapeKeys[id] = nil
             surfaceBuildCount += 1
             let surface = makeSheet(frame:frame,image:image,side:lane != 0,lane:lane)
             imageKeys[id] = image.map(ObjectIdentifier.init)
@@ -240,15 +245,46 @@ private final class ArchiveRecordControl: SCNNode {
     }
     func pointer(at point:CGPoint) {
         guard !reducedMotion,currentID == nil else { return }
-        // Continuous input between card boundaries avoids a stepped hover wave.
-        crestTarget = Double(scrollOffset)+Double(point.x-0.46)*8+Double(0.54-point.y)*5
-        acrossTarget = Double(point.x-0.5)*3
+        // Intersect the camera ray with the crest's top plane. Screen-space
+        // guesses drift away from the mouse as the camera scrolls sideways.
+        let span = CGFloat(cameraNode.camera?.orthographicScale ?? 4.5)*2
+        let x = (point.x-0.5)*span*viewport.width/max(1,viewport.height)
+        let y = (point.y-0.5)*span
+        let near = cameraNode.convertPosition(SCNVector3(x,y,-0.1),to:nil)
+        let far = cameraNode.convertPosition(SCNVector3(x,y,-100),to:nil)
+        pointer(rayNear:near,rayFar:far)
+    }
+    func pointer(rayNear near:SCNVector3,rayFar far:SCNVector3) {
+        guard !reducedMotion,currentID == nil,abs(far.y-near.y) > 0.0001 else { return }
+        let t = (5.9-near.y)/(far.y-near.y)
+        let x = near.x+(far.x-near.x)*t,z = near.z+(far.z-near.z)*t
+        acrossTarget = max(-2,min(2,Double(x/(x < 0 ? 5.65:6.25))))
+        crestTarget = max(-5.5,min(Double(maxScroll)+3,Double(z+5)))
         wake()
+    }
+    func viewportRecords(in renderer:SCNSceneRenderer)->ArchiveViewportRecords {
+        let visible = Set(framesByID.keys.filter { id in
+            guard let node = nodes[id] else { return false }
+            return renderer.isNode(node,insideFrustumOf:cameraNode)
+        })
+        let visibleSlots = visible.compactMap { slots[$0] }
+        guard let first = visibleSlots.map(\.depth).min(),let last = visibleSlots.map(\.depth).max() else {
+            return ArchiveViewportRecords(visible:visible)
+        }
+        let lanes = Set(visibleSlots.map(\.lane))
+        let nearby = Set(framesByID.keys.filter { id in
+            guard let slot = slots[id] else { return false }
+            return lanes.contains(slot.lane) && slot.depth >= first-5 && slot.depth <= last+5
+        })
+        return ArchiveViewportRecords(visible:visible,nearby:nearby)
     }
     private func placeCamera() {
         let dx = horizontalOffset*0.894,dz = scrollOffset+horizontalOffset*0.447
-        cameraNode.position = SCNVector3(cameraHome.x+dx,cameraHome.y,cameraHome.z+dz)
-        cameraNode.look(at:SCNVector3(target.x+dx,target.y,target.z+dz))
+        let position = SCNVector3(cameraHome.x+dx,cameraHome.y,cameraHome.z+dz)
+        if abs(cameraNode.position.x-position.x)+abs(cameraNode.position.z-position.z) > 0.00001 {
+            cameraNode.position = position
+            // Translation leaves the view direction unchanged.
+        }
     }
     func scroll(by delta:CGFloat,horizontal:CGFloat = 0,precise:Bool) {
         guard currentID == nil,extractions.isEmpty else { return }
@@ -305,7 +341,10 @@ private final class ArchiveRecordControl: SCNNode {
                 if immediate { depth = ArchiveMotionSpring(value:Double(slot.z)) }
                 else { depth.step(to:Double(slot.z),frequency:9,dt:dt) }
                 depths[id] = depth
-                node.position = SCNVector3(slot.x,CGFloat(height.value),CGFloat(depth.value))
+                let position = SCNVector3(slot.x,CGFloat(height.value),CGFloat(depth.value))
+                if abs(node.position.x-position.x)+abs(node.position.y-position.y)+abs(node.position.z-position.z) > 0.00001 {
+                    node.position = position;positionUpdateCount += 1
+                }
                 active = active || !depth.settled(at:Double(slot.z))
                 active = active || !height.settled(at:wanted)
                 heights[id] = height
@@ -344,8 +383,8 @@ private final class ArchiveRecordControl: SCNNode {
             focalDistance.step(to:desiredDistance,frequency:12,dt:dt)
             aperture.step(to:desiredAperture,frequency:12,dt:dt)
         }
-        cameraNode.camera?.focusDistance = focalDistance.value
-        cameraNode.camera?.fStop = CGFloat(aperture.value)
+        if abs((cameraNode.camera?.focusDistance ?? 0)-focalDistance.value) > 0.00001 { cameraNode.camera?.focusDistance = focalDistance.value }
+        if abs((cameraNode.camera?.fStop ?? 0)-CGFloat(aperture.value)) > 0.00001 { cameraNode.camera?.fStop = CGFloat(aperture.value) }
         active = active || !focalDistance.settled(at:desiredDistance) || !aperture.settled(at:desiredAperture)
         onPresentationChanged?()
         if !active { stopMotion() }
@@ -369,6 +408,9 @@ private final class ArchiveRecordControl: SCNNode {
         let t = CGFloat(ArchiveExtractionPath.smooth((progress-0.3)/0.7))
         let open = ArchiveCardMetrics.expanded(aspect:aspect,viewport:viewport,verticalSpan:CGFloat(cameraNode.camera?.orthographicScale ?? 4.5)*2)
         let width = 5.35+(open.width-5.35)*t,height = 6.5+(open.height-6.5)*t
+        let key = ShapeKey(width:width,height:height,aspect:aspect)
+        guard shapeKeys[id] != key else { return }
+        shapeKeys[id] = key;shapeUpdateCount += 1
         let layout = ArchiveCardMetrics.make(width:width,height:height,aspect:aspect)
         if let body = node.childNode(withName:"glass",recursively:false)?.geometry as? SCNBox { body.width = width;body.height = height }
         if let art = node.childNode(withName:"artwork",recursively:false),let plane = art.geometry as? SCNPlane {
@@ -505,7 +547,7 @@ private final class ArchiveRecordControl: SCNNode {
     }
 }
 
-private final class ArchiveSceneView: SCNView {
+final class ArchiveSceneView: SCNView {
     let textOverlay = IndexedTextOverlay()
     var selectedRegions:[TextRegion] = []
     weak var archive:ArchiveGlassScene?
@@ -514,7 +556,39 @@ private final class ArchiveSceneView: SCNView {
         textOverlay.isHidden = true;addSubview(textOverlay)
     }
     required init?(coder:NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override func layout() { super.layout();updateTextSelection() }
+    override func layout() { super.layout();updateTextSelection();refreshViewport(force:true) }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow();window?.acceptsMouseMovedEvents = true }
+    var onViewportChange:((ArchiveViewportRecords)->Void)?
+    private var lastViewport = ArchiveViewportRecords()
+    private var lastViewportTime:TimeInterval = 0
+    private var viewportDelivery:Task<Void,Never>?
+    private var viewportRefresh:Task<Void,Never>?
+    func refreshViewport(force:Bool = false) {
+        guard bounds.width > 0,bounds.height > 0,let archive else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        if !force,now-lastViewportTime < 0.1 {
+            // Keep a trailing check: the final sliver of a card can enter the
+            // viewport after the last throttled check, just as the wave settles.
+            if viewportRefresh == nil {
+                let delay = 0.1-(now-lastViewportTime)
+                viewportRefresh = Task { @MainActor [weak self] in
+                    do { try await Task.sleep(for:.seconds(delay)) } catch { return }
+                    self?.viewportRefresh = nil;self?.refreshViewport(force:true)
+                }
+            }
+            return
+        }
+        viewportRefresh?.cancel();viewportRefresh = nil
+        lastViewportTime = now
+        let records = archive.viewportRecords(in:self)
+        guard records != lastViewport else { return }
+        lastViewport = records
+        viewportDelivery?.cancel()
+        viewportDelivery = Task { @MainActor [weak self] in
+            guard !Task.isCancelled else { return }
+            self?.onViewportChange?(records)
+        }
+    }
     func updateTextSelection() {
         guard let (frame,art,rect) = archive?.selectionSurface() else { textOverlay.isHidden = true;return }
         let a = projectPoint(art.convertPosition(SCNVector3(rect.minX,rect.minY,0),to:nil))
@@ -527,20 +601,26 @@ private final class ArchiveSceneView: SCNView {
     }
     var onSelect: ((String?)->Void)?
     var onHover: ((String?)->Void)?
-    var onPointer: ((CGPoint)->Void)?
+    var onPointer: ((SCNVector3,SCNVector3)->Void)?
     var onAction: ((SCNHitTestResult)->Bool)?
     var onScroll: ((CGFloat,CGFloat,Bool)->Void)?
     private var pressPoint: CGPoint?
     private var dragged = false
+    private var pointerTracking:NSTrackingArea?
+    private var lastHitTime:TimeInterval = 0
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach { removeTrackingArea($0) }
-        addTrackingArea(NSTrackingArea(rect:bounds,options:[.mouseMoved,.mouseEnteredAndExited,.activeInKeyWindow,.inVisibleRect],owner:self,userInfo:nil))
+        guard pointerTracking == nil else { return }
+        let area = NSTrackingArea(rect:.zero,options:[.mouseMoved,.mouseEnteredAndExited,.activeAlways,.inVisibleRect],owner:self,userInfo:nil)
+        pointerTracking = area;addTrackingArea(area)
     }
+    override func mouseEntered(with event:NSEvent) { mouseMoved(with:event) }
     override func mouseMoved(with event:NSEvent) {
         let p = convert(event.locationInWindow,from:nil)
-        onPointer?(CGPoint(x:p.x/max(1,bounds.width),y:p.y/max(1,bounds.height)))
-        onHover?(memoryID(at:p))
+        onPointer?(unprojectPoint(SCNVector3(p.x,p.y,0)),unprojectPoint(SCNVector3(p.x,p.y,1)))
+        // High-rate mice should not run a geometry hit test for every event.
+        let now = ProcessInfo.processInfo.systemUptime
+        if now-lastHitTime >= 1/60 { lastHitTime = now;onHover?(memoryID(at:p)) }
     }
     override func mouseExited(with event:NSEvent) { onHover?(nil) }
     override func scrollWheel(with event:NSEvent) {
@@ -587,18 +667,22 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
     let onSelect:(String?)->Void
     let onRecordAction:(String,String)->Void
     var onHoverRecord:((String?)->Void)? = nil
+    var onViewportChange:((ArchiveViewportRecords)->Void)? = nil
     func makeCoordinator()->ArchiveGlassScene { ArchiveGlassScene() }
     func makeNSView(context:Context)->SCNView {
         let view = ArchiveSceneView(frame:.zero)
         view.archive = context.coordinator
-        context.coordinator.onPresentationChanged = { [weak view] in view?.updateTextSelection() }
+        context.coordinator.onPresentationChanged = { [weak view] in
+            view?.updateTextSelection();view?.refreshViewport();view?.needsDisplay = true
+        }
         view.scene = context.coordinator.scene;view.pointOfView = context.coordinator.cameraNode
         view.backgroundColor = .clear;view.antialiasingMode = .multisampling4X
         view.preferredFramesPerSecond = 60
-        view.rendersContinuously = false;view.isPlaying = true
+        view.rendersContinuously = false;view.isPlaying = false
+        view.onViewportChange = onViewportChange
         view.onSelect = onSelect
         view.onHover = { [weak coordinator = context.coordinator] id in coordinator?.hover(id);onHoverRecord?(id) }
-        view.onPointer = { [weak coordinator = context.coordinator] point in coordinator?.pointer(at:point) }
+        view.onPointer = { [weak coordinator = context.coordinator] near,far in coordinator?.pointer(rayNear:near,rayFar:far) }
         view.onAction = { [weak coordinator = context.coordinator] hit in
             guard let (id,action) = coordinator?.action(at:hit) else { return false }
             onRecordAction(id,action);return true
@@ -609,6 +693,7 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
     static func dismantleNSView(_ view:SCNView,coordinator:ArchiveGlassScene) { coordinator.stopMotion();coordinator.onPresentationChanged = nil }
     func updateNSView(_ view:SCNView,context:Context) {
         (view as? ArchiveSceneView)?.onSelect = onSelect
+        (view as? ArchiveSceneView)?.onViewportChange = onViewportChange
         (view as? ArchiveSceneView)?.selectedRegions = regions
         (view as? ArchiveSceneView)?.onHover = { [weak coordinator = context.coordinator] id in coordinator?.hover(id);onHoverRecord?(id) }
         (view as? ArchiveSceneView)?.onAction = { [weak coordinator = context.coordinator] hit in
@@ -616,5 +701,6 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
             onRecordAction(id,action);return true
         }
         context.coordinator.update(frames:frames,images:images,appearance:appearance,selected:selected,size:size,reduced:reduced,day:day,timelinePosition:timelinePosition)
+        (view as? ArchiveSceneView)?.refreshViewport(force:true)
     }
 }

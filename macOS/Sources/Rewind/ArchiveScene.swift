@@ -100,6 +100,7 @@ struct ThemeTogglePill: View {
 struct ArchiveStackView: View {
     @ObservedObject var model: AppModel
     @Binding var focusedID: String?
+    @State private var viewportRecords = ArchiveViewportRecords()
     @State private var hoveredID:String?
     @StateObject private var imageLoader = ArchiveImageLoader()
     private var images:[String:NSImage] { imageLoader.images }
@@ -110,7 +111,7 @@ struct ArchiveStackView: View {
         GeometryReader { geo in
             ZStack {
                 ArchiveGlassRenderer(frames:frames,images:images,appearance:model.settings.appearance,
-                    selected:focusedID,day:model.archiveDay,timelinePosition:model.archiveTimelinePosition,regions:focusedID.flatMap { recognizedRegions[$0] } ?? [],size:geo.size,reduced:reduceMotion,onSelect:toggle,onRecordAction:recordAction,onHoverRecord:{ if hoveredID != $0 { hoveredID = $0 } })
+                    selected:focusedID,day:model.archiveDay,timelinePosition:model.archiveTimelinePosition,regions:focusedID.flatMap { recognizedRegions[$0] } ?? [],size:geo.size,reduced:reduceMotion,onSelect:toggle,onRecordAction:recordAction,onHoverRecord:{ if hoveredID != $0 { hoveredID = $0 } },onViewportChange:{ viewportRecords = $0 })
                     .accessibilityRepresentation {
                         VStack {
                             ForEach(frames) { frame in
@@ -170,10 +171,14 @@ struct ArchiveStackView: View {
                 let retained = Set(ids)
                 recognizedRegions = recognizedRegions.filter { retained.contains($0.key) }
             }
-            .task(id:frames.map(\.imagePath)) {
-                await imageLoader.load(frames,root:model.store.root,near:model.archiveTimelinePosition ?? model.archiveDay.addingTimeInterval(86399))
-            }
+            .onAppear { requestImages() }
+            .onChange(of:frames.map(\.imagePath)) { _,_ in requestImages() }
+            .onChange(of:viewportRecords) { _,_ in requestImages() }
+            .onDisappear { imageLoader.stop() }
         }
+    }
+    private func requestImages() {
+        imageLoader.request(frames,viewport:viewportRecords,root:model.store.root)
     }
     private func toggle(_ id:String?) {
         model.cancelArchiveExtraction()

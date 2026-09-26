@@ -1,5 +1,7 @@
 import XCTest
 import simd
+import AppKit
+import SceneKit
 @testable import Rewind
 
 final class ArchiveRidgeMotionTests: XCTestCase {
@@ -44,4 +46,40 @@ final class ArchiveRidgeMotionTests: XCTestCase {
             previous = point
         }
     }
+    @MainActor func testSummitFollowsCameraRayAcrossColumnsAndAfterScroll() {
+        let scene = ArchiveGlassScene()
+        scene.update(frames:[],images:[:],appearance:.warmDay,selected:nil,size:CGSize(width:1440,height:900),reduced:false)
+        let rack = scene.scene.rootNode.childNode(withName:"racks",recursively:false)!
+        for x:CGFloat in [-5.65,0,6.25] {
+            scene.pointer(rayNear:SCNVector3(x,15,-1),rayFar:SCNVector3(x,-15,-1))
+            for _ in 0..<180 { scene.advance(dt:1/60) }
+            let summit = rack.childNodes.max { $0.position.y < $1.position.y }!
+            XCTAssertEqual(summit.position.x,x,accuracy:0.01,"The tallest sheet must move to the pointer's column")
+            XCTAssertEqual(summit.position.z,-1,accuracy:0.6)
+        }
+        scene.scroll(by:10,precise:false)
+        scene.pointer(rayNear:SCNVector3(0,15,6),rayFar:SCNVector3(0,-15,6))
+        for _ in 0..<180 { scene.advance(dt:1/60) }
+        let summit = rack.childNodes.max { $0.position.y < $1.position.y }!
+        XCTAssertEqual(summit.position.z,6,accuracy:0.6)
+        for _ in 0..<180 { scene.advance(dt:1/60) }
+        let writes = scene.positionUpdateCount
+        for _ in 0..<60 { scene.advance(dt:1/60) }
+        XCTAssertEqual(scene.positionUpdateCount,writes,"Settled sheets should not keep writing SceneKit transforms")
+        scene.stopMotion()
+    }
+    @MainActor func testSceneTracksPointerWithoutKeyFocusAndKeepsTrackingAreaStable() {
+        let view = ArchiveSceneView(frame:NSRect(x:0,y:0,width:900,height:600))
+        view.updateTrackingAreas()
+        let own = view.trackingAreas.filter { $0.options.contains(.activeAlways) && $0.options.contains(.mouseMoved) }
+        XCTAssertEqual(own.count,1)
+        view.updateTrackingAreas()
+        XCTAssertTrue(view.trackingAreas.contains { $0 === own[0] })
+        var received = 0
+        view.onPointer = { _,_ in received += 1 }
+        let event = NSEvent.mouseEvent(with:.mouseMoved,location:NSPoint(x:450,y:300),modifierFlags:[],timestamp:1,windowNumber:0,context:nil,eventNumber:0,clickCount:0,pressure:0)!
+        view.mouseMoved(with:event)
+        XCTAssertEqual(received,1)
+    }
+
 }

@@ -16,6 +16,11 @@ final class ArchiveVisualTests: XCTestCase {
         return view.subviews.flatMap { materializeMetal(in:$0) }
     }
 
+    @MainActor private func archiveView(in view:NSView)->ArchiveSceneView? {
+        if let archive = view as? ArchiveSceneView { return archive }
+        return view.subviews.compactMap { archiveView(in:$0) }.first
+    }
+
     @MainActor private func selectionOverlay(in view:NSView)->IndexedTextOverlay? {
         if let overlay = view as? IndexedTextOverlay { return overlay }
         return view.subviews.compactMap { selectionOverlay(in:$0) }.first
@@ -177,6 +182,22 @@ final class ArchiveVisualTests: XCTestCase {
                     try await Task.sleep(for:.milliseconds(100))
                 }
             }
+            if !open,name != "archive-disabled",let native = archiveView(in:host),let archive = native.archive {
+                for _ in 0..<60 {
+                    let visible = archive.viewportRecords(in:native).visible
+                    if !visible.isEmpty,visible.allSatisfy({ id in
+                        archive.scene.rootNode.childNode(withName:id,recursively:true)?.childNode(withName:"artwork",recursively:false)?.isHidden == false
+                    }) { break }
+                    try await Task.sleep(for:.milliseconds(100))
+                }
+                let visible = archive.viewportRecords(in:native).visible
+                XCTAssertFalse(visible.isEmpty)
+                XCTAssertTrue(visible.allSatisfy { id in
+                    archive.scene.rootNode.childNode(withName:id,recursively:true)?.childNode(withName:"artwork",recursively:false)?.isHidden == false
+                },"Every real screenshot in the current viewport must have pixels")
+                XCTAssertFalse(native.isPlaying,"The view must not run SceneKit playback continuously while idle")
+                print("ARCHIVE_VIEWPORT: \(name) has \(visible.count) visible real cards, all textured")
+            }
             host.layoutSubtreeIfNeeded()
             // AppKit cacheDisplay omits Metal-backed layers. Snapshot those
             // with SceneKit itself, then include the pixels as a test-only
@@ -191,6 +212,28 @@ final class ArchiveVisualTests: XCTestCase {
             XCTAssertGreaterThan(data.count,10000)
             if name == "archive-desktop" {
                 replacements.forEach { $0.removeFromSuperview() }
+                let native = try XCTUnwrap(archiveView(in:host)),archive = try XCTUnwrap(native.archive)
+                let rack = try XCTUnwrap(archive.scene.rootNode.childNode(withName:"racks",recursively:false))
+                var summits:[CGFloat] = []
+                for (name,point) in [("pointer-left",CGPoint(x:size.width*0.28,y:size.height*0.58)),("pointer-right",CGPoint(x:size.width*0.74,y:size.height*0.58))] {
+                    let windowPoint = native.convert(point,to:nil)
+                    let event = try XCTUnwrap(NSEvent.mouseEvent(with:.mouseMoved,location:windowPoint,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,windowNumber:window.windowNumber,context:nil,eventNumber:0,clickCount:0,pressure:0))
+                    native.mouseMoved(with:event)
+                    try await Task.sleep(for:.seconds(3))
+                    let visible = archive.viewportRecords(in:native).visible
+                    for _ in 0..<40 {
+                        if visible.allSatisfy({ id in archive.scene.rootNode.childNode(withName:id,recursively:true)?.childNode(withName:"artwork",recursively:false)?.isHidden == false }) { break }
+                        try await Task.sleep(for:.milliseconds(100))
+                    }
+                    XCTAssertTrue(visible.allSatisfy { id in archive.scene.rootNode.childNode(withName:id,recursively:true)?.childNode(withName:"artwork",recursively:false)?.isHidden == false },"Cards revealed at the end of the wave also need their cached pixels")
+                    summits.append(try XCTUnwrap(rack.childNodes.max { $0.position.y < $1.position.y }).position.x)
+                    let capture = materializeMetal(in:host)
+                    let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in:host.bounds))
+                    host.cacheDisplay(in:host.bounds,to:bitmap)
+                    try XCTUnwrap(bitmap.representation(using:.png,properties:[:])).write(to:destination.appendingPathComponent(name+".png"))
+                    capture.forEach { $0.removeFromSuperview() }
+                }
+                XCTAssertGreaterThan(summits[1],summits[0],"Moving the native mouse right must move the summit right")
                 let target = try XCTUnwrap(model.archiveFrames.sorted { $0.timestamp < $1.timestamp }.dropFirst(8).first)
                 model.beginTimelineDrag();model.scrub(to:target.timestamp)
                 await model.waitForPendingLoads()

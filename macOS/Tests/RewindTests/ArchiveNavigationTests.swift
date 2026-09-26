@@ -78,41 +78,51 @@ final class ArchiveNavigationTests:XCTestCase {
         model.prepareToQuit();await model.shutDownRecording();await model.storageOptimizer.stop()
     }
 
-    @MainActor func testProgressiveThumbnailsSurviveCancellationAndPrioritizeCursor() async throws {
-        let loader = ArchiveImageLoader(),items = records(count:5)
-        let pixels = try XCTUnwrap(CGContext(data:nil,width:80,height:50,bitsPerComponent:8,bytesPerRow:0,
-            space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage())
-        var decoded:[String] = []
-        let task = Task { @MainActor in
-            await loader.load(items,root:URL(fileURLWithPath:"/"),near:items[3].timestamp) { url in
-                decoded.append(url.lastPathComponent)
-                if decoded.count > 1 { try? await Task.sleep(for:.seconds(10)) }
-                return pixels
-            }
-        }
-        while decoded.count < 2 { await Task.yield() }
-        XCTAssertEqual(decoded.first,"3.png")
-        XCTAssertNotNil(loader.images[items[3].imagePath],"First image is visible while the batch is still loading")
-        task.cancel();await task.value
-        let completed = Set(loader.images.keys)
-        XCTAssertGreaterThanOrEqual(completed.count,1)
-        var retryCount = 0
-        await loader.load(items,root:URL(fileURLWithPath:"/"),near:items[0].timestamp) { _ in retryCount += 1;return pixels }
-        XCTAssertEqual(retryCount,items.count-completed.count,"Cancellation must not cause completed decodes to repeat")
-        XCTAssertEqual(loader.images.count,items.count)
+    @MainActor func testVisibleCohortPublishesTogetherAndNearbyCardsAreWarm() async throws {
+        let probe = ArchiveDecodeProbe(),items = records(count:12)
+        let loader = ArchiveImageLoader(decode:{ await probe.decode($0) })
+        let viewport = ArchiveViewportRecords(visible:Set(items.prefix(8).map(\.id)),nearby:Set(items.suffix(4).map(\.id)))
+        loader.request(items,viewport:viewport,root:URL(fileURLWithPath:"/"))
+        try await Task.sleep(for:.milliseconds(20))
+        XCTAssertTrue(loader.images.isEmpty,"Do not reveal the first decoded card before the visible cohort is ready")
+        await loader.waitUntilIdle()
+        XCTAssertEqual(loader.publicationCount,1,"Eight visible screenshots should arrive in one UI update")
+        XCTAssertEqual(Set(loader.images.keys),Set(items.prefix(8).map(\.imagePath)))
+        let concurrency = await probe.maximumActive
+        XCTAssertEqual(concurrency,4,"Decode concurrently with a hard limit, not a serial actor or an unbounded task per card")
+        let decodes = loader.decodeCount
+        loader.request(items,viewport:.init(visible:Set(items.suffix(4).map(\.id))),root:URL(fileURLWithPath:"/"))
+        XCTAssertEqual(loader.publicationCount,2)
+        XCTAssertEqual(loader.decodeCount,decodes,"Scrolling into the prefetched region should need no disk reads")
+        XCTAssertEqual(loader.images.count,12)
         let detail = try XCTUnwrap(CGContext(data:nil,width:320,height:200,bitsPerComponent:8,bytesPerRow:0,
             space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage())
         for frame in items.prefix(3) { loader.showDetail(detail,for:frame.imagePath) }
         XCTAssertEqual(loader.images.values.filter { $0.size.width == 320 }.count,2)
-        XCTAssertEqual(loader.images[items[0].imagePath]?.size.width,80,"Evicted detail must fall back to its thumbnail, never a blank card")
-        await loader.load([items[0]],root:URL(fileURLWithPath:"/"),near:nil) { _ in pixels }
-        XCTAssertEqual(Set(loader.images.keys),[items[0].imagePath],"Leaving a day releases its retained images")
+        XCTAssertEqual(loader.images[items[0].imagePath]?.size.width,80)
+        loader.request([items[0]],viewport:.init(visible:[items[0].id]),root:URL(fileURLWithPath:"/"))
+        XCTAssertEqual(Set(loader.images.keys),[items[0].imagePath])
+    }
+    @MainActor func testMovingViewportReprioritizesWithoutPublishingStalePartialBatch() async throws {
+        let probe = ArchiveDecodeProbe(),items = records(count:12)
+        let loader = ArchiveImageLoader(decode:{ await probe.decode($0) })
+        loader.request(items,viewport:.init(visible:Set(items.prefix(8).map(\.id))),root:URL(fileURLWithPath:"/"))
+        while await probe.started < 4 { await Task.yield() }
+        loader.request(items,viewport:.init(visible:Set(items.suffix(4).map(\.id))),root:URL(fileURLWithPath:"/"))
+        await loader.waitUntilIdle()
+        XCTAssertEqual(Set(loader.images.keys),Set(items.suffix(4).map(\.imagePath)))
+        XCTAssertEqual(loader.publicationCount,1)
+        XCTAssertEqual(loader.decodeCount,8,"Complete only the four in-flight reads before prioritizing the new viewport")
+        loader.stop()
+        loader.request(items,viewport:.init(visible:Set(items.suffix(4).map(\.id))),root:URL(fileURLWithPath:"/"))
+        await loader.waitUntilIdle()
+        XCTAssertEqual(loader.decodeCount,8,"Remounting keeps the completed batch cached")
     }
 
     @MainActor func testImageArrivalDoesNotRebuildGlassOrLabels() throws {
         let scene = ArchiveGlassScene(),items = records(count:48),size = CGSize(width:1440,height:900)
         scene.update(frames:items,images:[:],appearance:.warmDay,selected:nil,size:size,reduced:true,day:day)
-        let builds = scene.surfaceBuildCount
+        let builds = scene.surfaceBuildCount,shapes = scene.shapeUpdateCount
         let dates = try XCTUnwrap(scene.scene.rootNode.childNode(withName:"dates",recursively:false))
         let record = try XCTUnwrap(scene.scene.rootNode.childNode(withName:items[0].id,recursively:true))
         let glass = try XCTUnwrap(record.childNode(withName:"glass",recursively:false))
@@ -123,6 +133,7 @@ final class ArchiveNavigationTests:XCTestCase {
         }
         XCTAssertEqual(scene.surfaceBuildCount,builds,"48 arriving textures must build zero extra glass surfaces")
         XCTAssertEqual(scene.layoutUpdateCount,1)
+        XCTAssertEqual(scene.shapeUpdateCount,shapes,"Same-aspect image arrivals must not retessellate glass geometry")
         XCTAssertEqual(scene.textureUpdateCount,48)
         XCTAssertTrue(dates === scene.scene.rootNode.childNode(withName:"dates",recursively:false))
         XCTAssertTrue(glass === record.childNode(withName:"glass",recursively:false))
@@ -130,4 +141,17 @@ final class ArchiveNavigationTests:XCTestCase {
         scene.stopMotion()
     }
 
+}
+
+private actor ArchiveDecodeProbe {
+    private var active = 0
+    private(set) var maximumActive = 0
+    private(set) var started = 0
+    func decode(_ url:URL) async -> CGImage? {
+        active += 1;started += 1;maximumActive = max(maximumActive,active)
+        try? await Task.sleep(for:.milliseconds(60))
+        active -= 1
+        return CGContext(data:nil,width:80,height:50,bitsPerComponent:8,bytesPerRow:0,
+            space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage()
+    }
 }

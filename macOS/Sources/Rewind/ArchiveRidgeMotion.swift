@@ -5,7 +5,7 @@ import simd
 /// Moving the crest translates the whole height field, not just the hit card.
 enum ArchiveRidgeProfile {
     static func height(lane:Double,depth:Double,crest:Double,across:Double = 0)->Double {
-        let x = lane-across*0.20
+        let x = lane-across
         let d = depth-crest-abs(lane-across)*0.42
         let shoulder = 2.1*exp(-x*x/2)*exp(-d*d/(2*5.3*5.3))
         let summit = 1.9*exp(-x*x/0.48)*exp(-d*d/(2*0.85*0.85))
