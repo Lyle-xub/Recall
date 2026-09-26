@@ -6,6 +6,7 @@ import CryptoKit
 struct SharedOCR:Codable {
     var regions:[TextRegion]
     var meetingRegions:[TextRegion]
+    init(regions:[TextRegion],meetingRegions:[TextRegion]) {self.regions=regions;self.meetingRegions=meetingRegions}
     init(_ frame:MemoryFrame) {
         regions = frame.regions;meetingRegions = frame.meetingRegions
         for i in regions.indices { regions[i].id = String(i) }

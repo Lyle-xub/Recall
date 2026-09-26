@@ -31,7 +31,10 @@ final class NeuralOCR: @unchecked Sendable {
         let worker = Process(),inPipe = Pipe(),outPipe = Pipe()
         worker.executableURL = root.appendingPathComponent("recall-ocr");worker.arguments = [root.path]
         worker.standardInput = inPipe;worker.standardOutput = outPipe;worker.standardError = FileHandle.nullDevice
-        worker.qualityOfService = .background
+        // Utility still yields to foreground work, without background process
+        // throttling turning a two-second frame into a growing source backlog.
+        // Keep the two-thread ceiling and the inter-job recovery budget.
+        worker.qualityOfService = .utility
         // Bound Accelerate helpers too; ONNX's own pool is capped in the worker.
         worker.environment = ProcessInfo.processInfo.environment.merging(["VECLIB_MAXIMUM_THREADS":"2"]) { _,limit in limit }
         try worker.run();process = worker;input = inPipe.fileHandleForWriting;output = outPipe.fileHandleForReading
@@ -72,8 +75,8 @@ final class NeuralOCR: @unchecked Sendable {
                 let regions = try JSONDecoder().decode(Reply.self,from:response).regions.filter {
                     !$0.text.isEmpty && $0.x.isFinite && $0.y.isFinite && $0.width.isFinite && $0.height.isFinite && $0.x >= 0 && $0.y >= 0 && $0.width > 0 && $0.height > 0 && $0.x+$0.width <= 1.001 && $0.y+$0.height <= 1.001
                 }
-                let indexed = regions.map {row in
-                    TextRegion(id:ImageArchive.digest(Data("\(row.text)|\(row.x)|\(row.y)|\(row.width)|\(row.height)".utf8)),text:row.text,x:row.x,y:row.y,width:row.width,height:row.height)
+                let indexed = regions.enumerated().map {index,row in
+                    TextRegion(id:"r\(index)",text:row.text,x:row.x,y:row.y,width:row.width,height:row.height)
                 }
                 return (indexed.map(\.text).joined(separator:"\n"),indexed)
             } catch {

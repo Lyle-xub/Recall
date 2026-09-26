@@ -174,6 +174,16 @@ import ServiceManagement
             if selected?.id == frame.id { selected = frame }
             if searchPresented { reloadSearch() }
         }
+        capture.onArchived = { [weak self] archived in
+            guard let self else {return}
+            let updates=Dictionary(uniqueKeysWithValues:archived.map {($0.id,$0)})
+            archiveFrames=archiveFrames.map {updates[$0.id] ?? $0}
+            frames=frames.map {updates[$0.id] ?? $0}
+            for frame in archived where frameCache[frame.id] != nil {cache(frame)}
+            if let id=selected?.id,let frame=updates[id] {selected=frame}
+            if searchPresented {reloadSearch()}
+        }
+        storageOptimizer.onFramesArchived = capture.onArchived
         capture.onError = { [weak self] text in self?.error = text }
         capture.onIndexingIssue = { [weak self] text in self?.indexingIssue = text }
         capture.onFrameRecognition = { [weak self] id,state in self?.recognitionActivity.set(state,for:.image(id)) }

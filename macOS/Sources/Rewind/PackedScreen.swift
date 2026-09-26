@@ -108,6 +108,7 @@ struct PackedScreen:Codable,Sendable {
 
 enum StoredImage {
     static func load(_ url:URL,maxPixels:Int? = nil)->CGImage? {
+        if url.pathExtension == VisualArchive.fileExtension {return try? VisualArchive.load(url,maxPixels:maxPixels)}
         if url.pathExtension == PackedScreen.fileExtension {return try? PackedScreen.load(url,maxPixels:maxPixels)}
         guard let reader=CGImageSourceCreateWithURL(url as CFURL,[kCGImageSourceShouldCache:false] as CFDictionary) else {return nil}
         if let maxPixels {

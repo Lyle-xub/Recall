@@ -40,9 +40,9 @@ final class BackgroundPerformanceTests:XCTestCase {
         }
         let capture = CaptureEngine(store:store),finished = expectation(description:"All saved captures indexed")
         finished.expectedFulfillmentCount = ids.count
-        var received = Set<String>(),commits:[Date] = []
+        var received = Set<String>(),commits:[Date] = [],captureTimes:[Date] = []
         capture.onIndexed = { frame in
-            received.insert(frame.id);commits.append(Date())
+            received.insert(frame.id);commits.append(Date());captureTimes.append(frame.timestamp)
             XCTAssertTrue(frame.indexingComplete == true)
             XCTAssertTrue(frame.text.contains("81742"))
             finished.fulfill()
@@ -51,6 +51,7 @@ final class BackgroundPerformanceTests:XCTestCase {
         capture.resumePendingIndexing()
         await fulfillment(of:[finished],timeout:25)
         XCTAssertEqual(received,ids)
+        XCTAssertEqual(captureTimes,captureTimes.sorted(),"Adjacent captures should reuse OCR line caches without starving older frames")
         XCTAssertTrue(try store.pendingIndexFrames().isEmpty)
         for (previous,next) in zip(commits,commits.dropFirst()) {
             XCTAssertGreaterThanOrEqual(next.timeIntervalSince(previous),0.12,"Even a cache hit must yield between background jobs")

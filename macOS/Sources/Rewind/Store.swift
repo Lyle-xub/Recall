@@ -51,6 +51,7 @@ final class MemoryStore: @unchecked Sendable {
         try recoverPendingCleanups()
         try recoverVideoArchives()
         try recoverImageArchives()
+        try recoverInterruptedVisualSessions()
     }
     deinit { sqlite3_close(db) }
 
@@ -310,6 +311,7 @@ final class MemoryStore: @unchecked Sendable {
             var paths = try expandedImagePaths(removed.flatMap{[$0.imagePath,$0.meetingImagePath].compactMap{$0}}).subtracting(keptPaths)
             let removedSessions = Set(removed.compactMap(\.sessionID)).subtracting(Set(remaining.compactMap(\.sessionID)))
             for id in removedSessions {if let session = try session(id),session.endedAt != nil {paths.formUnion([session.videoPath,session.systemAudioPath,session.microphoneAudioPath].compactMap{$0});paths.insert("recordings/\(id).wav");paths.insert("recordings/\(id).m4a")}}
+            paths.subtract(keptPaths)
             try execute("BEGIN IMMEDIATE")
             do {
                 // External-content FTS is maintained by row triggers.
@@ -329,15 +331,17 @@ final class MemoryStore: @unchecked Sendable {
         var exported = Set<String>(),copies = frames
         for i in copies.indices {
             func exportImage(_ name:String) throws -> String {
-                let output = name.hasSuffix("."+PackedScreen.fileExtension) ? String(name.dropLast(PackedScreen.fileExtension.count))+"png":name
-                if exported.insert(output).inserted {
-                    let source = root.appendingPathComponent(name),target = destination.appendingPathComponent(output)
-                    if name.hasSuffix("."+PackedScreen.fileExtension) {
+                let container = [PackedScreen.fileExtension,VisualArchive.fileExtension].contains(URL(fileURLWithPath:name).pathExtension)
+                let output = container ? URL(fileURLWithPath:name).deletingPathExtension().lastPathComponent+".png":name
+                let relative = container ? "frames/"+output:output
+                if exported.insert(relative).inserted {
+                    let source = root.appendingPathComponent(name),target = destination.appendingPathComponent(relative)
+                    if container {
                         guard let image = StoredImage.load(source) else {throw RewindError.message("A screenshot could not be exported.")}
                         try ScreenArchive.encode(image,type:.png).write(to:target,options:.atomic)
                     } else if FileManager.default.fileExists(atPath:source.path) {try FileManager.default.copyItem(at:source,to:target)}
                 }
-                return output
+                return relative
             }
             copies[i].imagePath = try exportImage(copies[i].imagePath)
             if let meeting = copies[i].meetingImagePath {copies[i].meetingImagePath = try exportImage(meeting)}
@@ -481,7 +485,7 @@ extension MemoryStore {
     }
     private func expandedImagePaths(_ paths:[String]) throws -> Set<String> {
         var result = Set(paths)
-        for path in paths where path.hasSuffix("."+PackedScreen.fileExtension) {
+        for path in paths where path.hasSuffix("."+PackedScreen.fileExtension) || path.hasSuffix("."+VisualArchive.fileExtension) {
             result.formUnion(try jsonRows("SELECT json_quote(tile) FROM image_tiles WHERE image=?",[path],as:String.self))
         }
         return result
@@ -491,6 +495,10 @@ extension MemoryStore {
         try execute("DELETE FROM image_tiles WHERE image NOT IN (SELECT json_extract(json,'$.imagePath') FROM frames UNION SELECT json_extract(json,'$.meetingImagePath') FROM frames WHERE json_extract(json,'$.meetingImagePath') IS NOT NULL)")
     }
     private func archiveIsComplete(_ path:String,data:Data)->Bool {
+        if path.hasSuffix("."+VisualArchive.fileExtension) {
+            guard let reference=try? JSONDecoder().decode(VisualArchive.self,from:data),let file=try? reference.validate(root:root) else {return false}
+            return ((try? CleanupFiles.size(file)) ?? 0)>0
+        }
         guard path.hasSuffix("."+PackedScreen.fileExtension) else {return true}
         guard let manifest = try? PackedScreen.manifest(data) else {return false}
         return manifest.tiles.allSatisfy {tile in
@@ -557,6 +565,8 @@ extension MemoryStore {
             )
             SELECT json_quote(path) FROM images WHERE path IS NOT NULL AND path!=''
                 AND path NOT LIKE 'frames/pack1-%.recallframe'
+                AND path NOT LIKE 'frames/%.recallvideo'
+                AND NOT EXISTS(SELECT 1 FROM frames WHERE json_extract(json,'$.imagePath')=path AND json_extract(json,'$.visualTime') IS NOT NULL)
                 AND NOT EXISTS(SELECT 1 FROM image_archives WHERE source=path AND version>=?)
                 AND NOT EXISTS(SELECT 1 FROM frames WHERE json_extract(json,'$.imagePath')=path
                     AND json_extract(json,'$.indexingComplete')=0)
@@ -773,10 +783,12 @@ extension MemoryStore {
             try save(saved)
             if let archive,saved.imagePath == archive.path {try finishArchive(archive)}
             if saved.imagePath != original { removeUnreferencedImage(original) }
-            return saved
+            return try finalizeVisualFrame(saved)
         }
     }
     private func removeUnreferencedImage(_ path:String) {
+        if path.hasPrefix("recordings/"),
+           ((try? sessions().contains {$0.videoPath==path || $0.systemAudioPath==path || $0.microphoneAudioPath==path}) ?? true) {return}
         guard let matches = try? jsonRows("SELECT json_quote(id) FROM frames WHERE json_extract(json,'$.imagePath')=? OR json_extract(json,'$.meetingImagePath')=? LIMIT 1",[path,path],as:String.self),matches.isEmpty,
               let users = try? jsonRows("SELECT json_quote(image) FROM image_tiles WHERE tile=? LIMIT 1",[path],as:String.self),users.isEmpty,
               let url = try? CleanupFiles.ownedURL(path,root:root) else {return}
@@ -794,6 +806,78 @@ extension MemoryStore {
             var frame = frame;frame.imagePath = archive.path
             try save(frame);try finishArchive(archive)
         }
+    }
+    /// Only a finalized native capture can replace the OCR spool. These paths
+    /// also participate in shared-media cleanup via image_tiles.
+    private func finalizeVisualFrame(_ source:MemoryFrame)throws->MemoryFrame {
+        guard source.indexingComplete == true,!source.imagePath.hasSuffix("."+VisualArchive.fileExtension),
+              let time=source.visualTime,let width=source.visualWidth,let height=source.visualHeight,
+              let id=source.sessionID,let session=try session(id),session.visualArchiveReady == true,let end=session.endedAt,
+              time.isFinite,time>=0,time<end.timeIntervalSince(session.startedAt)+0.01 else {return source}
+        let reference=VisualArchive(video:session.videoPath,time:time,width:width,height:height)
+        let video=try reference.validate(root:root)
+        guard (try CleanupFiles.size(video))>0 else {return source}
+        let path="frames/visual-\(source.id)."+VisualArchive.fileExtension
+        let file=try CleanupFiles.ownedURL(path,root:root),data=try encoder.encode(reference),digest=ImageArchive.digest(data)
+        try execute("INSERT OR REPLACE INTO image_archive_staging VALUES(?,?)",[path,digest])
+        try data.write(to:file,options:.atomic)
+        let handle=try FileHandle(forWritingTo:file);defer {try? handle.close()};try handle.synchronize()
+        try execute("BEGIN IMMEDIATE")
+        do {
+            try execute("INSERT OR IGNORE INTO image_tiles VALUES(?,?)",[path,session.videoPath])
+            try execute("UPDATE frames SET json=json_set(json,'$.imagePath',?) WHERE id=?",[path,source.id])
+            try execute("INSERT OR REPLACE INTO image_archives VALUES(?,?,?,?)",[source.imagePath,path,digest,ImageArchive.policyVersion])
+            try execute("DELETE FROM image_archive_staging WHERE destination=?",[path])
+            try execute("COMMIT")
+        } catch {try? execute("ROLLBACK");throw error}
+        removeUnreferencedImage(source.imagePath)
+        var saved=source;saved.imagePath=path;return saved
+    }
+    func finalizeVisualSession(_ id:String)throws->[MemoryFrame] {
+        try synchronized {
+            if try session(id)?.visualArchiveReady == false {
+                try execute("UPDATE frames SET json=json_remove(json,'$.visualTime','$.visualWidth','$.visualHeight') WHERE json_extract(json,'$.sessionID')=?",[id])
+            }
+            let frames=try jsonRows("SELECT json FROM frames WHERE json_extract(json,'$.sessionID')=? AND deleted IS NULL",[id],as:MemoryFrame.self)
+            return try frames.compactMap { source in
+                try Task.checkCancellation()
+                let saved=try finalizeVisualFrame(hydrate(source))
+                return saved.imagePath == source.imagePath ? nil:saved
+            }
+        }
+    }
+    func unfinishedVisualSessions()throws->[String] {
+        try jsonRows("""
+            SELECT DISTINCT json_quote(s.id) FROM sessions s JOIN frames f
+            ON json_extract(f.json,'$.sessionID')=s.id WHERE json_extract(s.json,'$.visualArchiveReady')=1
+            AND f.deleted IS NULL AND json_extract(f.json,'$.indexingComplete')=1
+            AND json_extract(f.json,'$.visualTime') IS NOT NULL
+            AND json_extract(f.json,'$.imagePath') NOT LIKE '%.recallvideo'
+            """,as:String.self)
+    }
+    /// An interrupted open movie is never trusted as a replacement for original
+    /// OCR pixels. Preserve it for recovery/playback and use ordinary image
+    /// archives for that unfinished segment. Fully committed segments stay shared.
+    private func recoverInterruptedVisualSessions()throws {
+        for var session in try sessions() where session.unifiedVisualArchive == true && session.endedAt == nil {
+            let frames=try jsonRows("SELECT json FROM frames WHERE json_extract(json,'$.sessionID')=?",[session.id],as:MemoryFrame.self)
+            session.endedAt=frames.map {$0.endTimestamp ?? $0.timestamp}.max() ?? session.startedAt
+            session.visualArchiveReady=false
+            try execute("BEGIN IMMEDIATE")
+            do {
+                try saveSession(session)
+                try execute("UPDATE frames SET json=json_remove(json,'$.visualTime','$.visualWidth','$.visualHeight') WHERE json_extract(json,'$.sessionID')=?",[session.id])
+                try execute("COMMIT")
+            } catch {try? execute("ROLLBACK");throw error}
+        }
+    }
+    func interruptedVisualImages()throws->[String] {
+        try jsonRows("""
+            SELECT DISTINCT json_quote(json_extract(f.json,'$.imagePath')) FROM frames f JOIN sessions s
+            ON json_extract(f.json,'$.sessionID')=s.id WHERE json_extract(s.json,'$.unifiedVisualArchive')=1
+            AND json_extract(s.json,'$.visualArchiveReady')=0 AND json_extract(f.json,'$.indexingComplete')=1
+            AND json_extract(f.json,'$.imagePath') LIKE 'frames/source-%.png'
+            """,as:String.self)
     }
     func updateMeetingIndex(frameID:String,result:ScreenIndexResult) throws -> MemoryFrame? {
         try synchronized {
@@ -862,25 +946,27 @@ extension MemoryStore {
         let text:String,payload:SharedOCR
         if let cached = ocrCache[key] { (text,payload) = cached }
         else {
-            guard let loaded = try jsonRows("SELECT json FROM ocr_payloads WHERE key=?",[key],as:SharedOCR.self).first,
+            guard let encoded = try jsonRows("SELECT json_quote(json) FROM ocr_payloads WHERE key=?",[key],as:String.self).first,
                   let value = try jsonRows("SELECT json_quote(text) FROM ocr_payloads WHERE key=?",[key],as:String.self).first else {
                 throw RewindError.message("A shared text index is missing. The screenshot is still saved.")
             }
+            let loaded = try CompactOCR.payload(encoded)
             text = value;payload = loaded;ocrCache[key] = (value,loaded);ocrCacheOrder.append(key)
             while ocrCacheOrder.count > 32 { ocrCache.removeValue(forKey:ocrCacheOrder.removeFirst()) }
         }
         var frame = source;frame.text = text;frame.regions = payload.regions;frame.meetingRegions = payload.meetingRegions
-        if let ids = frame.ocrRegionIDs,ids.count == frame.regions.count { for i in ids.indices { frame.regions[i].id = ids[i] } }
-        if let ids = frame.ocrMeetingRegionIDs,ids.count == frame.meetingRegions.count { for i in ids.indices { frame.meetingRegions[i].id = ids[i] } }
+        if let ids = try CompactOCR.regionIDs(frame.compactRegionIDs) ?? frame.ocrRegionIDs,ids.count == frame.regions.count { for i in ids.indices { frame.regions[i].id = ids[i] } }
+        if let ids = try CompactOCR.regionIDs(frame.compactMeetingRegionIDs) ?? frame.ocrMeetingRegionIDs,ids.count == frame.meetingRegions.count { for i in ids.indices { frame.meetingRegions[i].id = ids[i] } }
         return frame
     }
     private func saveSharedFrame(_ source:MemoryFrame)throws {
         let encoder = JSONEncoder();encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(SharedOCR(source)),key = SharedOCR.key(text:source.text,data:data)
-        try execute("INSERT OR IGNORE INTO ocr_payloads (key,text,json) VALUES (?,?,?)",[key,source.text,String(decoding:data,as:UTF8.self)])
+        try execute("INSERT OR IGNORE INTO ocr_payloads (key,text,json) VALUES (?,?,?)",[key,source.text,try CompactOCR.payload(data)])
         var frame = source;frame.ocrKey = key
-        frame.ocrRegionIDs = source.regions.isEmpty ? nil:source.regions.map(\.id)
-        frame.ocrMeetingRegionIDs = source.meetingRegions.isEmpty ? nil:source.meetingRegions.map(\.id)
+        frame.compactRegionIDs = try CompactOCR.regionIDs(source.regions.map(\.id))
+        frame.compactMeetingRegionIDs = try CompactOCR.regionIDs(source.meetingRegions.map(\.id))
+        frame.ocrRegionIDs = nil;frame.ocrMeetingRegionIDs = nil
         frame.text = "";frame.regions = [];frame.meetingRegions = []
         try execute("""
             INSERT INTO frames (id,time,app,text,starred,deleted,demo,json) VALUES (?,?,?,?,?,?,?,?)

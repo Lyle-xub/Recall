@@ -34,6 +34,11 @@ struct MemoryFrame: Codable, Identifiable, Hashable, Sendable {
     var ocrKey:String? = nil
     var ocrRegionIDs:[String]? = nil
     var ocrMeetingRegionIDs:[String]? = nil
+    var compactRegionIDs:Data? = nil
+    var compactMeetingRegionIDs:Data? = nil
+    var visualTime:Double? = nil
+    var visualWidth:Int? = nil
+    var visualHeight:Int? = nil
     var timeLabel: String { timestamp.recallFormatted(date: .abbreviated, time: .shortened) }
 }
 
@@ -56,6 +61,8 @@ struct RecordingSession: Codable, Identifiable, Sendable {
     var supersededVideoPath: String? = nil
     var usesExternalAudio:Bool? = nil
     var audioSources:[String]? = nil
+    var unifiedVisualArchive:Bool? = nil
+    var visualArchiveReady:Bool? = nil
 }
 
 struct TranscriptLine: Codable, Identifiable, Hashable, Sendable {

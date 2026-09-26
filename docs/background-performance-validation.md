@@ -1,5 +1,7 @@
 # Background processing performance — 2026-09-26
 
+Follow-up: the [unified visual archive validation](unified-visual-archive-validation.md) replaces the OCR worker's background QoS with utility QoS after real capture exposed severe throttling/backlog. The thread ceiling, original-pixel recognition, thermal pacing, and hidden-renderer fixes below remain in place.
+
 The running Recall process was sampled during a reported system slowdown. A process snapshot showed approximately 94% CPU in Recall and 237% in its local OCR worker (100% represents one logical CPU). The three-second native sample put the main application's busy background stack in screenshot tile encoding, including HEIC and repeated crop decoding/conversion. The main UI thread was mostly waiting on the event loop.
 
 ## Changes

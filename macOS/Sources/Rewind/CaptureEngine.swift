@@ -11,9 +11,9 @@ enum NativeOCR {
     private static var lastBackend = "vision"
     static var backendLabel:String {labelLock.withLock {lastBackend}}
     static func recognize(_ image: CGImage,source:URL? = nil) throws -> (String,[TextRegion]) {
-        if NeuralOCR.root != nil,let result = try? NeuralOCR.shared.recognize(image,source:source) {labelLock.withLock {lastBackend = "ppocr-v6-small"};return result}
+        if NeuralOCR.root != nil,let result = try? NeuralOCR.shared.recognize(image,source:source) {labelLock.withLock {lastBackend = "ppocr-v6-small"};return CompactOCR.identified(result)}
         try Task.checkCancellation()
-        return try recovery.recognize(primary:{try perform(image,compatible:false)},compatible:{try perform(image,compatible:true)})
+        return CompactOCR.identified(try recovery.recognize(primary:{try perform(image,compatible:false)},compatible:{try perform(image,compatible:true)}))
     }
     static func perform(_ image:CGImage,compatible:Bool) throws -> (String,[TextRegion]) {
         if compatible {labelLock.withLock {lastBackend = "local-lstm"};return try LocalOCR.recognize(image)}
@@ -45,6 +45,7 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
     let queue = DispatchQueue(label:"studio.rewind.frames",qos:.utility)
     let interval: Double
     var onImage: ((CGImage,Date) -> Void)?
+    var onTimedImage:((CGImage,Date,CMTime)->Void)?
     var onVideoSample: ((CMSampleBuffer) -> Void)?
     var onUnavailable: (() -> Void)?
     private let context = CIContext(options:[.cacheIntermediates:false])
@@ -52,6 +53,7 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
     private var requestGeneration = 0
     private var consumedGeneration = 0
     private var latestBuffer: CVPixelBuffer?
+    private var latestPresentationTime:CMTime?
     private var last = Date.distantPast
     private var heartbeat: DispatchSourceTimer?
     init(interval: Double) { self.interval = interval }
@@ -74,11 +76,12 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
         onVideoSample?(sampleBuffer)
         let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer,createIfNecessary:false) as? [[SCStreamFrameInfo:Any]]
         let status = (attachments?.first?[.status] as? Int).flatMap(SCFrameStatus.init(rawValue:)) ?? .complete
+        if status == .complete {latestPresentationTime=sampleBuffer.presentationTimeStamp}
         consume(sampleBuffer.imageBuffer,status:status,time:time)
     }
     func consume(_ buffer:CVPixelBuffer?,status:SCFrameStatus,time now:Date) {
         guard status == .complete || status == .idle else {
-            latestBuffer = nil; onUnavailable?(); return
+            latestBuffer = nil;latestPresentationTime=nil;onUnavailable?(); return
         }
         // Retain the newest surface even between OCR intervals; the final change
         // before a screen becomes idle must be the image used by its heartbeat.
@@ -94,6 +97,7 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
         guard let image = context.createCGImage(pixels,from:pixels.extent) else { return }
         consumedGeneration = generation; last = now
         onImage?(image,now)
+        if let time=latestPresentationTime {onTimedImage?(image,now,time)}
     }
 }
 
@@ -127,6 +131,7 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
     private var screenAvailable = true
     var onUsageChanged: (() -> Void)?
     var onIndexed: ((MemoryFrame) -> Void)?
+    var onArchived:(([MemoryFrame])->Void)?
     var onFrame: ((MemoryFrame) -> Void)?
     var onFrameExtended: ((String,Date) -> Void)?
     var onError: ((String) -> Void)?
@@ -201,7 +206,7 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
     }
     static func displays() async throws -> [SCDisplay] { try await SCShareableContent.excludingDesktopWindows(false,onScreenWindowsOnly:true).displays }
     func resumePendingIndexing() {
-        ocrQueue += ((try? store.pendingIndexFrames()) ?? []).reversed()
+        ocrQueue += (try? store.pendingIndexFrames()) ?? []
         publishRecognitionProgress()
         if !ocrQueue.isEmpty { startOCRIfNeeded() }
     }
@@ -233,12 +238,11 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
             config.queueDepth = 3; config.showsCursor = true
             config.capturesAudio = settings.systemAudio; config.captureMicrophone = settings.microphone
             config.excludesCurrentProcessAudio = true; config.sampleRate = 48000; config.channelCount = 2
-            let session = RecordingSession(startedAt:Date(),videoPath:"recordings/\(UUID().uuidString).mp4",appName:NSWorkspace.shared.frontmostApplication?.localizedName ?? "Screen",hasAudio:settings.systemAudio || settings.microphone,storagePolicy:2,videoOptimizationChecked:true,videoOptimizationVersion:VideoArchive.policyVersion,usesExternalAudio:true,audioSources:[settings.systemAudio ? "system":nil,settings.microphone ? "microphone":nil].compactMap{$0})
+            let session = RecordingSession(startedAt:Date(),videoPath:"recordings/\(UUID().uuidString).mp4",appName:NSWorkspace.shared.frontmostApplication?.localizedName ?? "Screen",hasAudio:settings.systemAudio || settings.microphone,storagePolicy:3,videoOptimizationChecked:true,videoOptimizationVersion:VideoArchive.policyVersion,usesExternalAudio:true,audioSources:[settings.systemAudio ? "system":nil,settings.microphone ? "microphone":nil].compactMap{$0},unifiedVisualArchive:true)
             let hostStart = CMClockGetTime(CMClockGetHostTimeClock())
             let stream = SCStream(filter:filter,configuration:config,delegate:self)
             let sink = FrameSink(interval:settings.captureInterval)
             continuityID = UUID().uuidString
-            sink.onImage = { [weak self] image,time in Task { @MainActor in self?.receive(image,time:time,sessionID:session.id) } }
             sink.onUnavailable = { [weak self] in Task { @MainActor in
                 guard let self, self.current?.id == session.id else { return }
                 self.continuityID = UUID().uuidString
@@ -247,7 +251,12 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
             try stream.addStreamOutput(sink,type:.screen,sampleHandlerQueue:sink.queue)
             if settings.systemAudio {let track = AudioTrackSink(root:store.root,path:"recordings/\(session.id)-system.m4a",start:session.startedAt,hostStart:hostStart);try stream.addStreamOutput(track,type:.audio,sampleHandlerQueue:track.queue);systemTrack = track}
             if settings.microphone {let track = AudioTrackSink(root:store.root,path:"recordings/\(session.id)-microphone.m4a",start:session.startedAt,hostStart:hostStart);try stream.addStreamOutput(track,type:.microphone,sampleHandlerQueue:track.queue);microphoneTrack = track}
-            let video = try LightweightVideoSink(url:store.root.appendingPathComponent(session.videoPath),width:pixels.width,height:pixels.height,startedAt:session.startedAt,hostStart:hostStart)
+            let video = try LightweightVideoSink(url:store.root.appendingPathComponent(session.videoPath),width:pixels.width,height:pixels.height,startedAt:session.startedAt,hostStart:hostStart,nativeArchive:true)
+            sink.onTimedImage = { [weak self,weak video] image,time,sourceTime in
+                video?.archiveFrame(image,sourceTime:sourceTime) { offset in
+                    Task { @MainActor in self?.receive(image,time:time,sessionID:session.id,visualTime:offset) }
+                }
+            }
             video.onError = { [weak self] error in Task { @MainActor in
                 guard let self,self.current?.id == session.id else { return }
                 _ = try? await self.stop();self.onStopped?();self.onError?("Recording failed: \(error.localizedDescription)")
@@ -285,7 +294,7 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
             throw error
         }
     }
-    private func receive(_ image: CGImage, time: Date, sessionID: String) {
+    private func receive(_ image: CGImage, time: Date, sessionID: String,visualTime:Double? = nil) {
         guard !interfaceVisible,capturing,let session = current, session.id == sessionID else { return }
         // Capture provenance before asynchronous encoding/OCR, not after the user switches apps.
         let app = NSWorkspace.shared.frontmostApplication
@@ -297,6 +306,7 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
         }
         var frame = MemoryFrame(timestamp:time,appName:target.name,bundleID:bundleID,title:target.title,imagePath:"frames/source-\(UUID().uuidString).png",text:"",regions:[],sessionID:session.id)
         frame.continuityID = continuityID
+        frame.visualTime = visualTime;frame.visualWidth = image.width;frame.visualHeight = image.height
         frame.indexingComplete = false
         let token = UUID()
         captureTasks[token] = Task(priority:.utility) { [self] in
@@ -307,7 +317,9 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
                 if let captured = saved.frame {
                     diagnostics.write("Frame saved; session=\(session.id); size=\(image.width)x\(image.height)")
                     onFrame?(captured)
-                    if captured.indexingComplete != true { ocrQueue.insert(captured,at:0);publishRecognitionProgress();startOCRIfNeeded() }
+                    // Recognize adjacent captures in time order so unchanged
+                    // lines reuse exact pixel results and older work cannot starve.
+                    if captured.indexingComplete != true { ocrQueue.append(captured);publishRecognitionProgress();startOCRIfNeeded() }
                 }
             } catch { diagnostics.write("Frame save failed; code=\((error as NSError).code)");onError?("Screen capture: \(error.localizedDescription)") }
         }
@@ -333,14 +345,14 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
                 defer { processingFrame = false; recognizingText = false; publishRecognitionProgress();onFrameRecognition?(frame.id,issue) }
                 do {
                     let url = store.root.appendingPathComponent(frame.imagePath), started = Date()
-                    let result = try await indexProcessor.process(url)
+                    let result = try await indexProcessor.process(url,archiveImage:frame.visualTime == nil)
                     // Saving the index is part of the same operation; do not
                     // flash a queued state between recognition and commit.
                     // A delayed OCR result must not resurrect a trashed/deleted frame or undo a star.
                     try Task.checkCancellation()
                     let database = store
                     let saved = try await Task.detached(priority:.utility) {
-                        try database.updateIndex(frameID:frame.id,text:result.text,regions:result.regions,archive:result.archive,sourceURL:result.sourceURL)
+                        try database.updateIndex(frameID:frame.id,text:result.text,regions:result.regions,archive:frame.visualTime == nil ? result.archive:nil,sourceURL:result.sourceURL)
                     }.value
                     nextIndexingAllowed = .now.advanced(by:.seconds(BackgroundProcessingPolicy.recoveryInterval(after:Date().timeIntervalSince(started))))
                     guard let saved else { continue }
@@ -423,11 +435,15 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
         if settings.systemAudio,session.systemAudioPath == nil { stopError = stopError ?? RewindError.message("The system audio track could not be saved. Other captured media is retained.") }
         if settings.microphone,session.microphoneAudioPath == nil { stopError = stopError ?? RewindError.message("The microphone track could not be saved. Other captured media is retained.") }
         session.hasAudio = session.systemAudioPath != nil || session.microphoneAudioPath != nil
-        do { try await videoTrack?.finish(at:stoppedAt) } catch { stopError = stopError ?? error }
+        do {try await videoTrack?.finish(at:stoppedAt);session.visualArchiveReady=true} catch {session.visualArchiveReady=false;stopError = stopError ?? error}
         self.stream = nil;sink = nil;videoTrack = nil
         session.endedAt = stoppedAt
         let database = store,finishedSession = session
-        try await Task.detached(priority:.utility) { try database.saveSession(finishedSession) }.value
+        let archived = try await Task.detached(priority:.utility) {
+            try database.saveSession(finishedSession)
+            return try database.finalizeVisualSession(finishedSession.id)
+        }.value
+        if !archived.isEmpty {onArchived?(archived)}
         diagnostics.write("Session saved; id=\(session.id); duration=\(session.endedAt!.timeIntervalSince(session.startedAt))")
         if let stopError {onError?(stopError.localizedDescription)}
         return session

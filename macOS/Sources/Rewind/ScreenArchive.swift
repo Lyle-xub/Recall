@@ -53,18 +53,29 @@ struct ScreenIndexResult:Sendable {
 /// One Vision request at a time with a small bounded cache. Reuse is exact,
 /// never perceptual: even a one-character pixel change gets fresh recognition.
 actor ScreenIndexProcessor {
-    private var cache:[String:ScreenIndexResult] = [:]
+    private struct Cached {
+        let recognition:(String,[TextRegion])
+        let archive:ScreenArchive?
+    }
+    private var cache:[String:Cached] = [:]
     private var order:[String] = []
-    func process(_ url:URL) throws -> ScreenIndexResult {
+    private var cachedBytes = 0
+    func process(_ url:URL,archiveImage:Bool = true) throws -> ScreenIndexResult {
         let data = try Data(contentsOf:url)
-        let key = SHA256.hash(data:data).map { String(format:"%02x",$0) }.joined()
-        if let result = cache[key] { return result }
+        let key = (archiveImage ? "tiles:":"visual:")+SHA256.hash(data:data).map { String(format:"%02x",$0) }.joined()
+        if let cached = cache[key] {
+            return ScreenIndexResult(text:cached.recognition.0,regions:cached.recognition.1,archive:cached.archive ?? ScreenArchive(data:data,fileExtension:"png"))
+        }
         guard let source = CGImageSourceCreateWithData(data as CFData,nil),let image = CGImageSourceCreateImageAtIndex(source,0,nil) else { throw RewindError.message("Could not read captured frame.") }
         let recognition = try NativeOCR.recognize(image,source:url)
-        let archive = try ScreenArchive.pack(image)
-        let result = ScreenIndexResult(text:recognition.0,regions:recognition.1,archive:archive)
-        cache[key] = result;order.append(key)
-        while order.count > 6 { cache.removeValue(forKey:order.removeFirst()) }
-        return result
+        let archive = archiveImage ? try ScreenArchive.pack(image):nil
+        // Video-backed recognition only caches text. Do not retain six full
+        // lossless screenshots after their durable spools have been released.
+        cache[key] = Cached(recognition:recognition,archive:archive);order.append(key)
+        cachedBytes += archive?.totalBytes ?? 0
+        while order.count > 6 || cachedBytes > 32*1024*1024 {
+            cachedBytes -= cache.removeValue(forKey:order.removeFirst())?.archive?.totalBytes ?? 0
+        }
+        return ScreenIndexResult(text:recognition.0,regions:recognition.1,archive:archive ?? ScreenArchive(data:data,fileExtension:"png"))
     }
 }

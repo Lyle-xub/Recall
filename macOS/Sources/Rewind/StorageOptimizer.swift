@@ -7,7 +7,7 @@ import Combine
     @Published private(set) var status = "New screenshots and completed recordings optimize automatically."
     @Published private(set) var savedBytes:Int64 = 0
     private let store:MemoryStore
-    private enum Job:Hashable,Sendable { case image(String),video(String),index,tileStorage }
+    private enum Job:Hashable,Sendable { case image(String),video(String),visual(String),index,tileStorage }
     private var pending:[Job] = []
     private var scheduled = Set<Job>()
     private var includeExisting = false
@@ -16,6 +16,7 @@ import Combine
     @Published private(set) var checkedIndexes = 0
     @Published private(set) var totalItems = 0
     var onImageArchived:((String,String)->Void)?
+    var onFramesArchived:(([MemoryFrame])->Void)?
     private var worker:Task<Void,Never>?
     private var tileMigration:Task<MemoryStore.TileStorageBatch,Error>?
     private var indexCompaction:Task<Int64,Error>?
@@ -42,7 +43,9 @@ import Combine
         }
         if store.needsIndexCompaction { add(.index);startWorker() }
         if store.needsTileStorageOptimization {add(.tileStorage);startWorker()}
-        for session in ((try? store.sessions()) ?? []) where session.storagePolicy == 1 && session.endedAt != nil && session.videoOptimizationVersion != VideoArchive.policyVersion { enqueue(session.id) }
+        for id in (try? store.unfinishedVisualSessions()) ?? [] {add(.visual(id));startWorker()}
+        for path in (try? store.interruptedVisualImages()) ?? [] {add(.image(path));startWorker()}
+        for session in ((try? store.sessions()) ?? []) where session.unifiedVisualArchive != true && session.storagePolicy == 1 && session.endedAt != nil && session.videoOptimizationVersion != VideoArchive.policyVersion { enqueue(session.id) }
     }
     func continueWhileOpen() { userInitiated = true;waitingForInterface = false;workGate.setSuspended(false) }
     func optimizeExisting() {
@@ -52,6 +55,7 @@ import Combine
     }
     func enqueue(_ id:String) {
         guard !paused else { return }
+        for path in (try? store.interruptedVisualImages()) ?? [] {add(.image(path))}
         add(.video(id));startWorker()
     }
     private func add(_ job:Job) {
@@ -70,7 +74,7 @@ import Combine
                 let store = self.store
                 do {
                     let plan = try await Task.detached(priority:.utility) {
-                        (try store.imageArchiveCandidates(),try store.sessions().filter { $0.endedAt != nil && $0.videoOptimizationVersion != VideoArchive.policyVersion }.sorted { $0.startedAt > $1.startedAt }.map(\.id))
+                        (try store.imageArchiveCandidates(),try store.sessions().filter { $0.unifiedVisualArchive != true && $0.endedAt != nil && $0.videoOptimizationVersion != VideoArchive.policyVersion }.sorted { $0.startedAt > $1.startedAt }.map(\.id))
                     }.value
                     try Task.checkCancellation()
                     add(.index)
@@ -87,6 +91,17 @@ import Combine
                 let started = Date()
                 let job = pending.removeFirst()
                 switch job {
+                case .visual(let id):
+                    status = "Finalizing recorded cards…"
+                    let database=store
+                    let work=Task.detached(priority:.utility) {try database.finalizeVisualSession(id)}
+                    do {
+                        let frames=try await withTaskCancellationHandler(operation:{try await work.value},onCancel:{work.cancel()})
+                        if !frames.isEmpty {onFramesArchived?(frames)}
+                        checkedImages += frames.count
+                    } catch {
+                        if !Task.isCancelled {failed += 1}
+                    }
                 case .tileStorage:
                     status = "Compacting screenshot storage… \(StorageUsage.formatted(max(0,savedBytes))) saved"
                     let database = store
@@ -142,7 +157,7 @@ import Combine
                     }
                     checkedImages += 1
                 case .video(let id):
-                    guard let session = try? store.session(id),session.endedAt != nil,session.videoOptimizationVersion != VideoArchive.policyVersion else { checkedVideos += 1;continue }
+                    guard let session = try? store.session(id),session.unifiedVisualArchive != true,session.endedAt != nil,session.videoOptimizationVersion != VideoArchive.policyVersion else { checkedVideos += 1;continue }
                     status = "Optimizing video \(checkedVideos+1) · \(pending.count) waiting · \(StorageUsage.formatted(savedBytes)) saved"
                     let path = "recordings/archive-work-"+UUID().uuidString+".mp4",root = store.root
                     let candidate = root.appendingPathComponent(path)
