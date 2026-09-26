@@ -31,8 +31,8 @@ for relative in (
     "docs/windows-0.4.25-validation.md", "docs/local-models.md",
 ):
     files.add(ROOT / relative)
-for folder in ("shared/models", "shared/licenses"):
-    files.update(p for p in (ROOT / folder).rglob("*") if p.is_file() and p.name != ".DS_Store")
+for folder in ("shared/models", "shared/licenses", "Core"):
+    files.update(p for p in (ROOT / folder).rglob("*") if p.is_file() and p.name != ".DS_Store" and not {"bin", "obj"}.intersection(p.relative_to(ROOT).parts))
 
 OUTPUT.parent.mkdir(exist_ok=True)
 hashes = []

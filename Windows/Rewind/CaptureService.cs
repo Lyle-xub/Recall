@@ -27,6 +27,7 @@ public sealed class CaptureService : IDisposable
     private volatile bool privacyPaused;
     private MemoryFrame? previous;
     private readonly Channel<string> indexing = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
+    private readonly HashSet<string> queuedIndex = [];
     private readonly CancellationTokenSource lifetime = new();
     private readonly Task indexingWorker;
     private RecordingSession? stoppedSession;
@@ -42,7 +43,11 @@ public sealed class CaptureService : IDisposable
         this.store = store;
         indexingWorker = Task.Run(IndexLoop);
         foreach (var frame in store.PendingFrames())
-            indexing.Writer.TryWrite(frame.Id);
+            QueueIndex(frame.Id);
+    }
+    private void QueueIndex(string id)
+    {
+        lock (queuedIndex) { if (queuedIndex.Add(id) && !indexing.Writer.TryWrite(id)) queuedIndex.Remove(id); }
     }
     private async Task IndexLoop()
     {
@@ -51,8 +56,7 @@ public sealed class CaptureService : IDisposable
             if (lifetime.IsCancellationRequested)
                 break;
             var frame = store.Frame(id);
-            if (frame == null)
-                continue;
+            if (frame == null) { lock (queuedIndex) queuedIndex.Remove(id); continue; }
             var original = Path.Combine(store.Root, "frames", id + ".ocr.png");
             try
             {
@@ -111,6 +115,7 @@ public sealed class CaptureService : IDisposable
             }
             catch (OperationCanceledException) { store.Recognition(id, RecognitionState.Pending); break; }
             catch (Exception ex) { store.Recognition(id, RecognitionState.Failed, ex.Message); }
+            lock (queuedIndex) queuedIndex.Remove(id);
             if (store.Frame(id) is { } updated)
                 FrameAdded?.Invoke(updated);
         }
@@ -126,15 +131,19 @@ public sealed class CaptureService : IDisposable
             SaveJpeg(bitmap, Path.Combine(store.Root, relative), .5);
             var frame = new MemoryFrame { Id = id, AppName = "Imported", Title = Path.GetFileNameWithoutExtension(file), ImagePath = relative, ImageQuality = .5, TextState = RecognitionState.Pending };
             store.Save(frame);
-            indexing.Writer.TryWrite(id);
+            QueueIndex(id);
             FrameAdded?.Invoke(frame);
             return frame;
         });
     }
     public void Retry(MemoryFrame frame)
     {
-        store.Recognition(frame.Id, RecognitionState.Pending);
-        indexing.Writer.TryWrite(frame.Id);
+        lock (queuedIndex)
+        {
+            if (queuedIndex.Contains(frame.Id)) return;
+            store.Recognition(frame.Id, RecognitionState.Pending);
+            QueueIndex(frame.Id);
+        }
     }
     public async Task Start(AppSettings settings)
     {
@@ -420,7 +429,7 @@ public sealed class CaptureService : IDisposable
         previous = frame;
         FrameAdded?.Invoke(frame);
         if (shared == null)
-            indexing.Writer.TryWrite(frame.Id);
+            QueueIndex(frame.Id);
         return Task.CompletedTask;
     }
     private string? CaptureMeetingCrop(Bitmap screen, System.Drawing.Rectangle bounds, string id)

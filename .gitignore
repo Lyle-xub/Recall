@@ -12,4 +12,4 @@ __pycache__/
 Windows/Rewind/tessdata/
 Windows/Rewind.Tests/TestResults/
 
-native-runtimes/
+native-runtimes

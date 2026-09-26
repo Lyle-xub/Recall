@@ -18,9 +18,18 @@ public sealed class MemoryStore : IDisposable
         lock (mediaGate)
             action();
     }
-    public MemoryStore(string root)
+    public MemoryStore(string root, bool readOnly = false, bool initialize = true)
     {
         Root = Path.GetFullPath(root);
+        var format = LibraryFormats.Detect(Root);
+        if (format is LibraryFormat.MacOS or LibraryFormat.Unknown)
+            throw new InvalidDataException("This database requires its original platform adapter; no schema changes were made.");
+        if (readOnly || !initialize)
+        {
+            db = new(new SqliteConnectionStringBuilder { DataSource = Path.Combine(Root, "memory.sqlite"), Mode = readOnly ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWrite, DefaultTimeout = 15, Pooling = false }.ToString());
+            db.Open();
+            return;
+        }
         Directory.CreateDirectory(Root);
         foreach (var dir in new[] { "frames", "recordings", "icons" })
             Directory.CreateDirectory(Path.Combine(Root, dir));
@@ -342,6 +351,7 @@ public sealed class MemoryStore : IDisposable
     }
     public List<MemoryFrame> MetadataFrames() => Rows<MemoryFrame>("SELECT json FROM frames");
     public List<MemoryFrame> PendingFrames() => Rows<MemoryFrame>("SELECT json FROM frames WHERE json_extract(json,'$.TextState') IN (0,1)");
+    public List<MemoryFrame> IndexCandidates(int limit = 100) => ReadFrames(SelectFrame + "WHERE f.demo=0 AND f.deleted IS NULL AND json_extract(f.json,'$.TextState') IN (0,4) ORDER BY f.time,f.id LIMIT $p0", Math.Clamp(limit, 1, 10000));
     public List<MemoryFrame> AllFrames() => ReadFrames(SelectFrame);
     public int EmptyTrash() => Cleanup(CleanupPreview(CleanupScope.Trash, true));
     public CleanupPlan CleanupPreview(CleanupScope scope, bool keepStarred, DateTimeOffset? now = null)
@@ -412,10 +422,35 @@ public sealed class MemoryStore : IDisposable
     }
     public string? SafePath(string relative)
     {
-        if (Path.IsPathRooted(relative))
-            return null;
-        var path = Path.GetFullPath(Path.Combine(Root, relative));
-        return path.StartsWith(Root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ? path : null;
+        if (string.IsNullOrWhiteSpace(relative) || Path.IsPathRooted(relative)) return null;
+        try
+        {
+            var path = Path.GetFullPath(Path.Combine(Root, relative));
+            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            if (!path.StartsWith(Path.TrimEndingDirectorySeparator(Root) + Path.DirectorySeparatorChar, comparison)) return null;
+            var cursor = Root;
+            foreach (var part in Path.GetRelativePath(Root, path).Split(Path.DirectorySeparatorChar))
+            {
+                cursor = Path.Combine(cursor, part);
+                if ((File.Exists(cursor) || Directory.Exists(cursor)) && (File.GetAttributes(cursor) & FileAttributes.ReparsePoint) != 0) return null;
+            }
+            return path;
+        }
+        catch (Exception error) when (error is ArgumentException or IOException or UnauthorizedAccessException) { return null; }
+    }
+    public string CheckIntegrity()
+    {
+        lock (gate) { using var command = Command("PRAGMA quick_check"); return Convert.ToString(command.ExecuteScalar()) ?? "unknown"; }
+    }
+    public void CompactIndex()
+    {
+        lock (gate)
+        {
+            Execute("INSERT INTO ocr_fts(ocr_fts,rank) VALUES('integrity-check',1)");
+            Execute("PRAGMA wal_checkpoint(PASSIVE)");
+            Execute("VACUUM");
+            Execute("PRAGMA wal_checkpoint(TRUNCATE)");
+        }
     }
     private IEnumerable<string> Media(MemoryFrame f)
     {

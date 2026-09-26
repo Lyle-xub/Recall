@@ -129,6 +129,59 @@ import ServiceManagement
     private var toastTask: Task<Void,Never>?
     var configureShortcuts: ((ShortcutConfiguration) throws -> Void)?
     var window: NSWindow?
+    private var cliControl:NativeCLIControl?
+
+    func enableCLIControl(lease:CoreCLILease) throws {
+        cliControl = try NativeCLIControl(lease:lease) { [weak self] operation,args in
+            guard let self else { throw CoreCLIError(code:"service_unavailable",message:"Recall is shutting down.") }
+            switch operation {
+            case "recording-start","recording-stop","recording-status":
+                if operation == "recording-start" { await startRecording() }
+                if operation == "recording-stop" { await stopRecording() }
+                if operation == "recording-start",!recording,!recordingAutomaticallyPaused,let error { throw CoreCLIError(code:"capture_failed",message:error) }
+                return ["available":true,"requested":recordingRequested,"active":recording,"automaticallyPaused":recordingAutomaticallyPaused,"owner":"desktop"]
+            case "tasks-status": return ["indexing":indexingStatus,"optimizing":storageOptimizer.running,"optimizationStatus":storageOptimizer.status,"clearing":storageClearing]
+            case "index":
+                let frame = args["id"] is String ? try NativeCoreCLI.required(args,store:store):nil
+                await capture.suspendIndexing()
+                do {
+                    if var frame { frame.indexingComplete = false;try store.save(frame) }
+                } catch { await capture.resumeIndexingAfterCleanup();throw error }
+                await capture.resumeIndexingAfterCleanup()
+                return ["accepted":true,"owner":"desktop"]
+            case "optimize": storageOptimizer.optimizeExisting();return ["accepted":true,"owner":"desktop","running":storageOptimizer.running]
+            case "cleanup":
+                guard args["confirmed"] as? Bool == true else { throw CoreCLIError(code:"confirmation_required",message:"Permanent cleanup requires --yes.") }
+                return NativeCoreCLI.cleanupResult(try await clearStorage(NativeCoreCLI.cleanupPlan(args,store:store)))
+            case "compact":
+                guard !storageOptimizer.running,!storageClearing else { throw CoreCLIError(code:"busy",message:"Desktop storage maintenance is already running.") }
+                storageClearing = true
+                recordingCoordinator.setInterfaceVisible(true)
+                await recordingCoordinator.waitUntilSettled()
+                await storageOptimizer.beginCleanup()
+                await capture.suspendIndexing()
+                defer {
+                    storageClearing = false
+                    recordingCoordinator.setInterfaceVisible(interfaceVisible)
+                    storageOptimizer.endCleanup()
+                    storageUsage.refresh(force:true)
+                }
+                let database = store
+                do { try await Task.detached(priority:.utility) { try database.compactIndex() }.value }
+                catch { await capture.resumeIndexingAfterCleanup();throw error }
+                await capture.resumeIndexingAfterCleanup()
+                return ["compacted":true]
+            default:
+                guard NativeCoreCLI.writes.contains(operation),operation != "init",operation != "index-offline" else { throw CoreCLIError(code:"unsupported",message:"Unsupported desktop control operation.") }
+                let database = store
+                let result = try await Task.detached(priority:.utility) { try NativeCoreCLI.execute(operation,args:args,store:database) }.value
+                // Fresh reader also invalidates shared OCR cache entries in selected views.
+                reload();if let id = selected?.id { selected = try MemoryStore(root:store.root,readOnly:true).frame(id) }
+                return result
+            }
+        }
+    }
+    func stopCLIControl() async { await cliControl?.stop();cliControl = nil }
 
     init(root: URL? = nil) throws {
         let root = root ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("RewindReplica")

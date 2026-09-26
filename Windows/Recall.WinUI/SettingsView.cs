@@ -227,7 +227,7 @@ internal sealed class SettingsView : Grid
         var keep = true;
         content.Children.Add(Row("Clear", Choice(["Trash", "Older than 30 days", "Older than 7 days", "All memories"], 0, i => scope = (CleanupScope)i)));
         content.Children.Add(Row("Keep starred memories", Toggle(true, v => keep = v)));
-        content.Children.Add(Design.Button("Review cleanup", async () => { var plan = await Task.Run(() => runtime.Store.CleanupPreview(scope, keep)); if (plan.Ids.Length == 0) { message.Text = "No memories match this cleanup."; return; } if (await Confirm("Clear these memories?", $"{plan.Ids.Length} memories · up to {Design.Size(plan.Bytes)}. This permanently removes their unshared files and text. Active recordings and saved models are kept.", "Clear memories")) { var removed = await Task.Run(() => runtime.Store.Cleanup(plan)); message.Text = $"Cleared {removed} memories"; await Measure(true); } }));
+        content.Children.Add(Design.Button("Review cleanup", async () => { try { var plan = await Task.Run(() => runtime.Store.CleanupPreview(scope, keep)); if (plan.Ids.Length == 0) { message.Text = "No memories match this cleanup."; return; } if (await Confirm("Clear these memories?", $"{plan.Ids.Length} memories · up to {Design.Size(plan.Bytes)}. This permanently removes their unshared files and text. Active recordings and saved models are kept.", "Clear memories")) { var removed = await StorageService.Maintain(() => Task.Run(() => runtime.Store.Cleanup(plan))); message.Text = $"Cleared {removed} memories"; await Measure(true); } } catch (Exception ex) { message.Text = ex.Message; } }));
         return Section("Storage", content);
     }
     static Microsoft.UI.Xaml.Shapes.Path Arc(double angle, double sweep, Color color)

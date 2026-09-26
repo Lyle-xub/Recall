@@ -41,6 +41,7 @@ internal sealed class RecallWindow : Window
         root.KeyDown += Keys;
         runtime.Error += message => DispatcherQueue.TryEnqueue(() => notice.Text = message);
         runtime.Changed += () => DispatcherQueue.TryEnqueue(UpdateStatus);
+        runtime.LibraryChanged += () => DispatcherQueue.TryEnqueue(() => { if (mode == "search") _ = Search(); else if (mode == "home") _ = archive.Refresh(); detail?.RefreshStatus(); });
         statusTimer = DispatcherQueue.CreateTimer();
         statusTimer.Interval = TimeSpan.FromMilliseconds(800);
         statusTimer.Tick += (_, _) => { if (IsShown) detail?.RefreshStatus(); };

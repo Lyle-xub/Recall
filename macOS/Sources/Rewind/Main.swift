@@ -5,6 +5,7 @@ import Combine
 
 @main struct RewindApplication {
     static func main() {
+        if CommandLine.arguments.contains("--core-service") { exit(NativeCoreCLI.run()) }
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
@@ -26,6 +27,7 @@ import Combine
     private var findItem: NSMenuItem?
     private var showItem: NSMenuItem?
     private var recordingObserver: AnyCancellable?
+    private var cliLease:CoreCLILease?
     func applicationDidFinishLaunching(_ notification: Notification) {
         let args = CommandLine.arguments
         let dataRoot: URL? = args.firstIndex(of:"--data-dir").flatMap {args.indices.contains($0+1) ? URL(fileURLWithPath:args[$0+1]):nil}
@@ -35,7 +37,12 @@ import Combine
             if let url = running.bundleURL { NSWorkspace.shared.openApplication(at:url,configuration:NSWorkspace.OpenConfiguration()) }
             NSApp.terminate(nil); return
         }
-        do {model = try AppModel(root:dataRoot)} catch {let alert = NSAlert();alert.messageText = "Recall could not open your library";alert.informativeText = error.localizedDescription;alert.runModal();NSApp.terminate(nil);return}
+        do {
+            let root = dataRoot ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("RewindReplica")
+            cliLease = try CoreCLILease(root:root)
+            model = try AppModel(root:root)
+            try model.enableCLIControl(lease:cliLease!)
+        } catch {let alert = NSAlert();alert.messageText = "Recall could not open your library";alert.informativeText = error.localizedDescription;alert.runModal();NSApp.terminate(nil);return}
         responseWatchdog = UIResponseWatchdog(root:model.store.root)
         NSApp.setActivationPolicy(model.settings.showDockIcon ? .regular:.accessory)
         window = RewindOverlayWindow(contentRect:NSScreen.main?.frame ?? NSRect(x:0,y:0,width:1240,height:820),styleMask:[.borderless,.fullSizeContentView],backing:.buffered,defer:false)
@@ -107,7 +114,7 @@ import Combine
         model.prepareToQuit()
         shortcut.unregister()
         window?.orderOut(nil)
-        Task {await model.shutDownRecording();await model.storageOptimizer.stop();await LocalInference.shared.stop();NSApp.reply(toApplicationShouldTerminate:true)}
+        Task {await model.stopCLIControl();await model.shutDownRecording();await model.storageOptimizer.stop();await LocalInference.shared.stop();NSApp.reply(toApplicationShouldTerminate:true)}
         return .terminateLater
     }
     private func setupMenu() {

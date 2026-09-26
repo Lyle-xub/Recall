@@ -1,0 +1,51 @@
+name: Shared library CLI
+on:
+  push:
+    branches: [feat/cross-platform-cli]
+  pull_request:
+    paths: ['Core/**', 'CLI/**', 'CLI.Tests/**', 'macOS/**', 'Windows/**', 'scripts/build-cli.py', '.github/workflows/cli.yml']
+  workflow_dispatch:
+jobs:
+  cli:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Linux OCR
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+      - name: Install Mac OCR
+        if: runner.os == 'macOS'
+        run: brew list tesseract || brew install tesseract
+      - name: Shared core regression
+        run: dotnet run --project Windows/Rewind.Tests/Rewind.Tests.csproj
+      - name: Mac desktop and native adapter integration
+        if: runner.os == 'macOS'
+        run: swift test --package-path macOS --filter 'NativeCLIIntegrationTests|StorageCleanupTests'
+      - name: Build self-contained distribution
+        run: python scripts/build-cli.py
+      - name: Test packaged CLI and desktop interoperability
+        shell: pwsh
+        run: |
+          $exe = if ($IsWindows) { 'recall.exe' } else { 'recall' }
+          $bundle = Get-ChildItem release -Directory -Filter 'Recall-CLI-*' | Select-Object -First 1
+          $env:RECALL_CLI_BINARY = Join-Path $bundle.FullName $exe
+          if (!$IsWindows) { $env:RECALL_OCR_FIXTURE = Join-Path $pwd 'docs/macos-visual-reference/fixtures/frames/parity-2-0.png' }
+          if ($IsMacOS) { $env:RECALL_MAC_CORE = Join-Path $bundle.FullName 'recall-macos-core' }
+          dotnet run --project CLI.Tests/Recall.Cli.Tests.csproj
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Recall-CLI-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            release/Recall-CLI-*.tar.gz
+            release/Recall-CLI-*.zip
+            release/Recall-CLI-*.sha256

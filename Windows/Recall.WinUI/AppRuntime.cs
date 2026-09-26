@@ -28,6 +28,7 @@ internal sealed class AppRuntime
     }
     public BuiltinModels Models => BuiltinModels.Shared;
     public event Action? Changed;
+    public event Action? LibraryChanged;
     public event Action<string>? Error;
     private readonly CancellationTokenSource lifetime = new();
     private readonly Channel<RecordingSession> speech = Channel.CreateUnbounded<RecordingSession>(new() { SingleReader = true });
@@ -35,8 +36,13 @@ internal sealed class AppRuntime
     private readonly Task usageWorker, speechWorker;
     private bool suspended;
     private readonly object settingsGate = new();
+    private readonly LibraryControlHost cliControl;
+    private Task? cliOptimization;
+    private string? cliTaskError;
+    private string? captureError;
     public AppRuntime()
     {
+        var ownership = new LibraryLease(AppPaths.DataRoot);
         Directory.CreateDirectory(AppPaths.DataRoot);
         var path = Path.Combine(AppPaths.DataRoot, "settings.json");
         try
@@ -50,7 +56,7 @@ internal sealed class AppRuntime
         Capture = new(Store);
         Recording = new(async () => await Capture.Start(Settings), async () => { var segment = await Capture.Stop(); if (segment != null) QueueSpeech(segment); });
         Recording.Changed += state => { if (!state.Terminated && Settings.RecordingRequested != state.Requested) { Settings.RecordingRequested = state.Requested; _ = Task.Run(() => { try { PersistSettings(); } catch (Exception ex) { Error?.Invoke(ex.Message); } }); } Changed?.Invoke(); };
-        Recording.Failed += ex => Error?.Invoke(ex.Message);
+        Recording.Failed += ex => { captureError = ex.Message; Error?.Invoke(ex.Message); };
         Capture.Error += message => Error?.Invoke(message);
         Capture.Interrupted += _ => Recording.Request(false);
         Capture.FrameAdded += _ => { HasMemories = true; Changed?.Invoke(); };
@@ -62,8 +68,38 @@ internal sealed class AppRuntime
         foreach (var session in Store.Sessions().Where(s => s.EndedAt != null && s.HasAudio && s.SpeechState is RecognitionState.Pending or RecognitionState.Working))
             QueueSpeech(session);
         Store.Retain(Settings.RetentionDays);
+        cliControl = new(Store.Root, "windows", Control, ownership);
         if (Settings.RecordingRequested)
             Recording.Request(true);
+    }
+    private async Task<object> Control(string operation, JsonElement args)
+    {
+        switch (operation)
+        {
+            case "recording-start": case "recording-stop": case "recording-status":
+                if (operation != "recording-status") { captureError = null; Recording.Request(operation == "recording-start"); await Recording.Settled(); }
+                if (operation == "recording-start" && !Recording.State.Requested) throw new RecallException("capture_failed", captureError ?? "Capture did not start.");
+                return new { available = true, requested = Recording.State.Requested, active = Recording.State.Active, automaticallyPaused = Recording.State.Requested && Recording.State.InterfaceVisible, owner = "desktop" };
+            case "tasks-status": return new { optimizing = StorageService.IsOptimizing, indexing = Store.PendingFrames().Count, error = cliTaskError };
+            case "index":
+            {
+                var frames = args.Text("id") is { } id ? new List<MemoryFrame> { Store.Frame(id) ?? throw new RecallException("not_found", "Memory not found.") } : Store.IndexCandidates(10000);
+                foreach (var frame in frames) Capture.Retry(frame);
+                return new { accepted = true, count = frames.Count, owner = "desktop" };
+            }
+            case "optimize":
+                if (!StorageService.IsOptimizing && cliOptimization is not { IsCompleted: false })
+                    cliOptimization = Task.Run(async () => { try { cliTaskError = null; await StorageService.Optimize(Store, new Progress<string>(), lifetime.Token); } catch (Exception e) { cliTaskError = e.Message; } finally { LibraryChanged?.Invoke(); } });
+                return new { accepted = true, owner = "desktop" };
+            default:
+                if (!LibraryCommands.Writes(operation)) throw new RecallException("unsupported", "Unsupported desktop operation.");
+                if (operation is "compact" or "cleanup" && StorageService.IsOptimizing) throw new RecallException("busy", "Storage optimization is already running.");
+                var result = operation is "compact" or "cleanup"
+                    ? await StorageService.Maintain(() => Task.Run(() => LibraryCommands.Execute(Store, operation, args)))
+                    : await Task.Run(() => LibraryCommands.Execute(Store, operation, args));
+                HasMemories = Store.Count > 0; LibraryChanged?.Invoke(); Changed?.Invoke();
+                return result;
+        }
     }
     private void PersistSettings()
     {
@@ -213,15 +249,18 @@ internal sealed class AppRuntime
     }
     public async Task Shutdown()
     {
+        await cliControl.Stop(releaseOwnership: false);
         lifetime.Cancel();
         speech.Writer.TryComplete();
         await Recording.Shutdown();
         await Capture.Shutdown();
         await Task.WhenAll(usageWorker, speechWorker);
+        if (cliOptimization != null) await cliOptimization;
         LocalInference.Stop();
         SystemEvents.SessionSwitch -= SessionSwitch;
         SystemEvents.PowerModeChanged -= PowerChange;
         Store.Dispose();
+        cliControl.ReleaseOwnership();
         lifetime.Dispose();
     }
 }

@@ -263,6 +263,7 @@ final class MemoryStore: @unchecked Sendable {
             """,values,as:CapturedAppMoment.self)
     }
     func frame(_ id: String) throws -> MemoryFrame? { try jsonRows("SELECT json FROM frames WHERE id=?",[id],as:MemoryFrame.self).first }
+    func cliIntegrity() throws -> String { try jsonRows("SELECT json_quote(quick_check) FROM pragma_quick_check",as:String.self).first ?? "unknown" }
     func pendingIndexFrames() throws -> [MemoryFrame] { try jsonRows("SELECT json FROM frames WHERE demo=0 AND deleted IS NULL AND json_extract(json,'$.indexingComplete')=0 ORDER BY time",as:MemoryFrame.self) }
     func session(_ id: String) throws -> RecordingSession? { try jsonRows("SELECT json FROM sessions WHERE id=?",[id],as:RecordingSession.self).first }
     func sessions() throws -> [RecordingSession] { try jsonRows("SELECT json FROM sessions", as: RecordingSession.self) }

@@ -137,6 +137,7 @@ public static class LocalInference
     private static string key = "";
     private static string Runtime(string engine, string executable)
     {
+        if (!OperatingSystem.IsWindows()) executable = Path.GetFileNameWithoutExtension(executable);
         var root = Environment.GetEnvironmentVariable("REWIND_RUNTIME_ROOT") ?? Path.Combine(AppContext.BaseDirectory, "runtimes");
         var file = Path.Combine(root, engine, executable);
         if (!File.Exists(file))

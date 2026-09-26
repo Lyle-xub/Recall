@@ -10,6 +10,13 @@ internal record StorageReport(List<StorageBucket> Buckets, long Free, long Capac
 }
 internal static class StorageService
 {
+    static readonly SemaphoreSlim optimizationGate = new(1, 1);
+    public static bool IsOptimizing => optimizationGate.CurrentCount == 0;
+    public static async Task<T> Maintain<T>(Func<Task<T>> work)
+    {
+        if (!await optimizationGate.WaitAsync(0)) throw new RecallException("busy", "Storage maintenance is already running.");
+        try { return await work(); } finally { optimizationGate.Release(); }
+    }
     static readonly object reportGate = new();
     static readonly Dictionary<string, (DateTime At, Task<StorageReport> Work)> reports = [];
     public static Task<StorageReport> Measure(MemoryStore store, bool refresh = false)
@@ -20,20 +27,8 @@ internal static class StorageService
                 (!recent.Work.IsCompleted || !refresh && recent.Work.IsCompletedSuccessfully && DateTime.UtcNow - recent.At < TimeSpan.FromSeconds(10))) return recent.Work;
             var work = Task.Run(() =>
             {
-                var buckets = new long[6];
-                // Directory enumeration supplies cached metadata. Avoid a
-                // second filesystem query for every file and never follow links.
-                var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = System.IO.FileAttributes.ReparsePoint };
-                foreach (var file in new DirectoryInfo(store.Root).EnumerateFiles("*", options))
-                {
-                    try
-                    {
-                        var relative = Path.GetRelativePath(store.Root, file.FullName); var ext = file.Extension.ToLowerInvariant();
-                        var index = relative.StartsWith("models" + Path.DirectorySeparatorChar) ? 3 : ext is ".jpg" or ".png" or ".heic" or ".recallframe" ? 0 : ext is ".mp4" or ".mov" ? 1 : ext is ".wav" or ".m4a" ? 2 : relative.StartsWith("memory.sqlite") ? 4 : 5;
-                        buckets[index] += file.Length;
-                    }
-                    catch (IOException) { }
-                }
+                var inventory = LibraryStorage.Measure(store.Root);
+                var buckets = new[] { "images", "video", "audio", "models", "index", "other" }.Select(key => inventory.Buckets[key]).ToArray();
                 var drive = new DriveInfo(Path.GetPathRoot(store.Root)!);
                 return new StorageReport(new[] { "Images", "Video", "Audio", "Models", "Search index", "Other" }.Select((name, i) => new StorageBucket(name, buckets[i], Design.Pastels[i])).ToList(), drive.AvailableFreeSpace, drive.TotalSize);
             });
@@ -43,6 +38,9 @@ internal static class StorageService
     }
     public static async Task<long> Optimize(MemoryStore store, IProgress<string> progress, CancellationToken ct)
     {
+        if (!await optimizationGate.WaitAsync(0, ct)) throw new RecallException("busy", "Storage optimization is already running.");
+        try
+        {
         long saved = 0;
         var frames = await Task.Run(store.MetadataFrames, ct);
         var images = frames.Where(f => f.ImageQuality == null || f.ImageQuality > .5).SelectMany(f => new[] { f.ImagePath, f.MeetingImagePath }).Where(x => x != null).Cast<string>().Distinct().ToArray();
@@ -98,5 +96,7 @@ internal static class StorageService
             finally { if (File.Exists(target.Path)) File.Delete(target.Path); }
         }
         return saved;
+        }
+        finally { optimizationGate.Release(); }
     }
 }

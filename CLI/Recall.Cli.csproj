@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>recall</AssemblyName><Version>0.5.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Core/Recall.Core.csproj" />
+    <Compile Include="../Windows/Rewind/SecretStore.cs" Link="Platform/SecretStore.cs" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    <Content Include="../shared/models/catalog.json" Link="models/catalog.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../shared/licenses/**" Link="licenses/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
