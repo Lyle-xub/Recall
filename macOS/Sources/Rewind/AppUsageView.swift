@@ -139,22 +139,27 @@ struct AppUsageView: View {
             }
         }.padding(22).background(cardColor,in:RoundedRectangle(cornerRadius:22))
     }
+    private func weekBar(_ bucket:UsageBucket,category:UsageCategory,seconds:Double) -> some ChartContent {
+        let color:Color = Calendar.current.isDate(bucket.start,inSameDayAs:date) ? category.color:Color(red:0.78,green:0.81,blue:0.85)
+        let label:String = bucket.start.recallFormatted(.dateTime.weekday().month().day()) + ", " + category.rawValue
+        return BarMark(x:.value("Day",bucket.start,unit:.day),y:.value("Hours",seconds/3600))
+            .foregroundStyle(color).cornerRadius(3)
+            .accessibilityLabel(label).accessibilityValue(UsageReport.duration(seconds))
+    }
+    @ChartContentBuilder private func weekMarks(_ report:UsageReport) -> some ChartContent {
+        ForEach(report.days) { bucket in
+            ForEach(categoryBuckets(bucket,identities:report.identities),id:\.0) { category,seconds in
+                weekBar(bucket,category:category,seconds:seconds)
+            }
+        }
+        if report.dailyAverage > 0 {
+            RuleMark(y:.value("Daily average",report.dailyAverage/3600)).lineStyle(StrokeStyle(lineWidth:1,dash:[4,4])).foregroundStyle(.green.opacity(0.65))
+        }
+    }
     private func weekChart(_ report:UsageReport) -> some View {
-        Chart {
-            ForEach(report.days) { bucket in
-                ForEach(categoryBuckets(bucket,identities:report.identities),id:\.0) { category,seconds in
-                    BarMark(x:.value("Day",bucket.start,unit:.day),y:.value("Hours",seconds/3600))
-                        .foregroundStyle(Calendar.current.isDate(bucket.start,inSameDayAs:date) ? category.color:Color(red:0.78,green:0.81,blue:0.85))
-                        .cornerRadius(3)
-                        .accessibilityLabel(bucket.start.recallFormatted(.dateTime.weekday().month().day()) + ", " + category.rawValue)
-                        .accessibilityValue(UsageReport.duration(seconds))
-                }
-            }
-            if report.dailyAverage > 0 {
-                RuleMark(y:.value("Daily average",report.dailyAverage/3600)).lineStyle(StrokeStyle(lineWidth:1,dash:[4,4])).foregroundStyle(.green.opacity(0.65))
-            }
-        }.chartLegend(.hidden).chartXScale(domain:report.week.start...report.week.end)
-            .chartYScale(domain:0...max(1,(report.days.map(\.seconds).max() ?? 0)/3600*1.18))
+        let maximum:Double = max(1,(report.days.map(\.seconds).max() ?? 0)/3600*1.18)
+        return Chart { weekMarks(report) }.chartLegend(.hidden).chartXScale(domain:report.week.start...report.week.end)
+            .chartYScale(domain:0...maximum)
             .chartXAxis { AxisMarks(values:.stride(by:.day)) { AxisValueLabel(format:.dateTime.weekday(.narrow));AxisGridLine().foregroundStyle(.gray.opacity(0.1)) } }
             .chartYAxis { AxisMarks(position:.trailing,values:.automatic(desiredCount:3)) { AxisValueLabel();AxisGridLine().foregroundStyle(.gray.opacity(0.13)) } }
             .chartOverlay { proxy in GeometryReader { geometry in

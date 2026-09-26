@@ -356,27 +356,30 @@ struct MemoryCard: View {
     @State private var hovered = false
     @State private var thumbnail: NSImage?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private func screenshot(size:CGSize) -> some View {
+        let plan = MemorySearchPlan(model.query)
+        return ZStack(alignment:.topLeading) {
+            if let image = thumbnail {
+                Image(nsImage:image).resizable().aspectRatio(contentMode:.fit).frame(width:size.width,height:size.height)
+                    .colorMultiply(ArchiveImageTone.color(night:model.settings.glassArchiveEnabled && model.settings.appearance == .deepNight))
+                let ratio = image.size.width/image.size.height
+                let w = min(size.width,size.height*ratio), h = w/ratio
+                ForEach(frame.regions.filter { plan.highlights($0.text) }) { region in
+                    RoundedRectangle(cornerRadius:3).fill(.yellow.opacity(0.26)).overlay(RoundedRectangle(cornerRadius:3).stroke(.yellow.opacity(0.9),lineWidth:1.5))
+                        .frame(width:CGFloat(region.width)*w,height:CGFloat(region.height)*h)
+                        .offset(x:(size.width-w)/2+CGFloat(region.x)*w,y:(size.height-h)/2+CGFloat(region.y)*h)
+                }
+            }
+            if hovered {
+                VStack {Spacer();HStack {Spacer();Text("Rewind to this moment").font(.system(size:11,weight:.medium)).padding(.horizontal,13).padding(.vertical,8).liquidGlass(radius:18);Spacer()}.padding(.bottom,12)}
+            }
+        }.clipped().clipShape(RoundedRectangle(cornerRadius:19))
+    }
     var body: some View {
         Button {model.select(frame)} label: {
             VStack(alignment:.leading,spacing:12) {
                 GeometryReader { geo in
-                    let plan = MemorySearchPlan(model.query)
-                    ZStack(alignment:.topLeading) {
-                        if let image = thumbnail {
-                            Image(nsImage:image).resizable().aspectRatio(contentMode:.fit).frame(width:geo.size.width,height:geo.size.height)
-                                .colorMultiply(ArchiveImageTone.color(night:model.settings.glassArchiveEnabled && model.settings.appearance == .deepNight))
-                            let ratio = image.size.width/image.size.height
-                            let w = min(geo.size.width,geo.size.height*ratio), h = w/ratio
-                            ForEach(frame.regions.filter { plan.highlights($0.text) }) { region in
-                                RoundedRectangle(cornerRadius:3).fill(.yellow.opacity(0.26)).overlay(RoundedRectangle(cornerRadius:3).stroke(.yellow.opacity(0.9),lineWidth:1.5))
-                                    .frame(width:region.width*w,height:region.height*h)
-                                    .offset(x:(geo.size.width-w)/2+region.x*w,y:(geo.size.height-h)/2+region.y*h)
-                            }
-                        }
-                        if hovered {
-                            VStack {Spacer();HStack {Spacer();Text("Rewind to this moment").font(.system(size:11,weight:.medium)).padding(.horizontal,13).padding(.vertical,8).liquidGlass(radius:18);Spacer()}.padding(.bottom,12)}
-                        }
-                    }.clipped().clipShape(RoundedRectangle(cornerRadius:19))
+                    screenshot(size:geo.size)
                 }.aspectRatio(1.6,contentMode:.fit).background(.black.opacity(0.08),in:RoundedRectangle(cornerRadius:19))
                 HStack(alignment:.center,spacing:10) {
                     AppBadge(name:frame.appName,bundleID:frame.bundleID,size:29)
