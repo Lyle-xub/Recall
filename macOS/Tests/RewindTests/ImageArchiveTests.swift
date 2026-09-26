@@ -96,7 +96,7 @@ final class ImageArchiveTests:XCTestCase {
         XCTAssertEqual(second.savedBytes,result.sourceBytes)
         XCTAssertEqual(try store.frame(a.id)?.imagePath,try store.frame(b.id)?.imagePath)
         XCTAssertEqual(try store.count(),2);XCTAssertTrue(try store.imageArchiveCandidates().isEmpty)
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath:root.appendingPathComponent("frames").path).filter { $0 != "tiles" }.count,1)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath:root.appendingPathComponent("frames").path).filter { !["tiles","packs"].contains($0) }.count,1)
         try store.moveToTrash(a);_ = try store.emptyTrash()
         XCTAssertTrue(FileManager.default.fileExists(atPath:root.appendingPathComponent(result.archive.path).path))
     }
@@ -136,7 +136,7 @@ final class ImageArchiveTests:XCTestCase {
         optimizer.optimizeExisting()
         let deadline = Date().addingTimeInterval(20)
         while optimizer.running,Date() < deadline { try await Task.sleep(for:.milliseconds(20)) }
-        XCTAssertFalse(optimizer.running);XCTAssertEqual(optimizer.checkedImages,1);XCTAssertEqual(optimizer.checkedIndexes,1);XCTAssertEqual(optimizer.totalItems,2)
+        XCTAssertFalse(optimizer.running);XCTAssertEqual(optimizer.checkedImages,1);XCTAssertEqual(optimizer.checkedIndexes,1);XCTAssertEqual(optimizer.totalItems,3)
         XCTAssertTrue(try store.imageArchiveCandidates().isEmpty)
         optimizer.optimizeExisting()
         while optimizer.running { try await Task.sleep(for:.milliseconds(20)) }

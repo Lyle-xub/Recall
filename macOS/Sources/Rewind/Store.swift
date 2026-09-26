@@ -10,6 +10,10 @@ final class MemoryStore: @unchecked Sendable {
     private var ocrCache:[String:(String,SharedOCR)] = [:]
     private var ocrCacheOrder:[String] = []
     private(set) var needsIndexCompaction = false
+    private var packedTileStore:TilePackStore?
+    private var legacyTileIterator:FileManager.DirectoryEnumerator?
+    private var legacyTilesFinished = false
+    private var segmentMaintenance:[Int]?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     init(root: URL, readOnly:Bool = false) throws {
@@ -39,7 +43,9 @@ final class MemoryStore: @unchecked Sendable {
         try execute("CREATE INDEX IF NOT EXISTS app_usage_time ON app_usage(start,end)")
         try execute("CREATE TABLE IF NOT EXISTS image_archives (source TEXT PRIMARY KEY, destination TEXT NOT NULL, digest TEXT NOT NULL, version INTEGER NOT NULL)")
         try execute("CREATE TABLE IF NOT EXISTS image_tiles (image TEXT NOT NULL, tile TEXT NOT NULL, PRIMARY KEY(image,tile))")
-        try execute("CREATE INDEX IF NOT EXISTS image_tiles_tile ON image_tiles(tile)")
+        if try jsonRows("SELECT json_quote(type) FROM sqlite_master WHERE name='image_tiles'",as:String.self).first == "table" {
+            try execute("CREATE INDEX IF NOT EXISTS image_tiles_tile ON image_tiles(tile)")
+        }
         try execute("CREATE TABLE IF NOT EXISTS image_archive_staging (destination TEXT PRIMARY KEY, digest TEXT NOT NULL)")
         try migrateSharedOCR()
         try recoverPendingCleanups()
@@ -312,6 +318,7 @@ final class MemoryStore: @unchecked Sendable {
                 try execute("COMMIT")
             } catch {try? execute("ROLLBACK");throw error}
             for path in paths {let url = root.appendingPathComponent(path).standardizedFileURL;if url.path.hasPrefix(root.standardizedFileURL.path + "/"),FileManager.default.fileExists(atPath:url.path) {try FileManager.default.removeItem(at:url)}}
+            try removePackedTiles(Array(paths))
             try pruneTileReferences()
             try execute("PRAGMA wal_checkpoint(TRUNCATE)");return removed.count
         }
@@ -346,6 +353,132 @@ final class MemoryStore: @unchecked Sendable {
 }
 
 extension MemoryStore {
+    private func tilePacks()throws->TilePackStore {
+        if let packedTileStore {return packedTileStore}
+        let store = try TilePackStore(root:root,writable:true);packedTileStore = store;return store
+    }
+    private func removePackedTiles(_ paths:[String])throws {
+        let tiles=paths.filter {TilePackStore.key($0) != nil}
+        guard !tiles.isEmpty,FileManager.default.fileExists(atPath:root.appendingPathComponent("frames/packs/catalog.sqlite").path) else {return}
+        try tilePacks().remove(tiles)
+    }
+    func imageBytes(_ path:String)throws->Data? {
+        try synchronized {
+            if TilePackStore.key(path) != nil,let data = try tilePacks().read(path) {return data}
+            let url = try CleanupFiles.ownedURL(path,root:root)
+            return FileManager.default.fileExists(atPath:url.path) ? try Data(contentsOf:url):nil
+        }
+    }
+    private func imageStorageBytes(_ path:String)throws->Int64 {
+        let url = try CleanupFiles.ownedURL(path,root:root)
+        if FileManager.default.fileExists(atPath:url.path) {return try CleanupFiles.size(url)}
+        return TilePackStore.key(path) == nil ? 0:try tilePacks().size(path)
+    }
+    var needsTileStorageOptimization:Bool {
+        (try? jsonRows("SELECT json_quote(type) FROM sqlite_master WHERE name='image_tiles'",as:String.self).first) == "table"
+            || FileManager.default.fileExists(atPath:root.appendingPathComponent("frames/tiles").path)
+            || FileManager.default.fileExists(atPath:root.appendingPathComponent("frames/packs").path)
+    }
+    /// Keep the public SQL shape for existing cleanup/recovery queries, but
+    /// store long names once and use integer IDs in both association indexes.
+    private func compactTileReferences(reclaim:Bool = true)throws {
+        try execute("CREATE TABLE IF NOT EXISTS storage_maintenance(key TEXT PRIMARY KEY,value INTEGER NOT NULL)")
+        if try jsonRows("SELECT json_quote(type) FROM sqlite_master WHERE name='image_tiles'",as:String.self).first == "table" {
+            try execute("BEGIN IMMEDIATE")
+            do {
+                try execute("CREATE TABLE image_paths(id INTEGER PRIMARY KEY,path TEXT NOT NULL UNIQUE)")
+                try execute("CREATE TABLE tile_links(image INTEGER NOT NULL,tile INTEGER NOT NULL,PRIMARY KEY(image,tile)) WITHOUT ROWID")
+                try execute("CREATE INDEX tile_links_tile ON tile_links(tile)")
+                try execute("""
+                    CREATE TRIGGER prune_image_paths AFTER DELETE ON tile_links BEGIN
+                        DELETE FROM image_paths WHERE id IN(OLD.image,OLD.tile)
+                            AND NOT EXISTS(SELECT 1 FROM tile_links WHERE image=image_paths.id)
+                            AND NOT EXISTS(SELECT 1 FROM tile_links WHERE tile=image_paths.id);
+                    END
+                    """)
+                try execute("INSERT INTO image_paths(path) SELECT image FROM image_tiles UNION SELECT tile FROM image_tiles")
+                try execute("INSERT INTO tile_links SELECT i.id,t.id FROM image_tiles old JOIN image_paths i ON i.path=old.image JOIN image_paths t ON t.path=old.tile")
+                try execute("DROP TABLE image_tiles")
+                try execute("CREATE VIEW image_tiles AS SELECT i.path AS image,t.path AS tile FROM tile_links l JOIN image_paths i ON i.id=l.image JOIN image_paths t ON t.id=l.tile")
+                try execute("""
+                    CREATE TRIGGER insert_image_tile INSTEAD OF INSERT ON image_tiles BEGIN
+                        INSERT OR IGNORE INTO image_paths(path) VALUES(NEW.image),(NEW.tile);
+                        INSERT OR IGNORE INTO tile_links SELECT i.id,t.id FROM image_paths i,image_paths t WHERE i.path=NEW.image AND t.path=NEW.tile;
+                    END
+                    """)
+                try execute("""
+                    CREATE TRIGGER delete_image_tile INSTEAD OF DELETE ON image_tiles BEGIN
+                        DELETE FROM tile_links WHERE image=(SELECT id FROM image_paths WHERE path=OLD.image) AND tile=(SELECT id FROM image_paths WHERE path=OLD.tile);
+                    END
+                    """)
+                try execute("INSERT OR REPLACE INTO storage_maintenance VALUES('tile-index-vacuum',1)")
+                try execute("COMMIT")
+            } catch {try? execute("ROLLBACK");throw error}
+        }
+        let pending = try jsonRows("SELECT value FROM storage_maintenance WHERE key='tile-index-vacuum'",as:Int.self).first == 1
+        if pending && reclaim {
+            try execute("VACUUM");try execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            try execute("UPDATE storage_maintenance SET value=0 WHERE key='tile-index-vacuum'")
+        }
+    }
+    struct TileStorageBatch:Sendable {let processed:Int;let more:Bool;let savedBytes:Int64}
+    /// Every batch leaves either the original file, or verified durable packed
+    /// bytes, or both. Interruptions require no in-place rewrite or re-encoding.
+    func packLegacyTiles(limit:Int = 128,restartScan:Bool = false)throws->TileStorageBatch {
+        try synchronized {
+            if restartScan {legacyTileIterator = nil;legacyTilesFinished = false;segmentMaintenance = nil}
+            sqlite3_progress_handler(db,4000,{_ in Task.isCancelled ? 1:0},nil)
+            defer {sqlite3_progress_handler(db,0,nil,nil)}
+            do {
+                try Task.checkCancellation()
+                let beforeIndex = try CleanupFiles.size(root.appendingPathComponent("memory.sqlite"))
+                try compactTileReferences()
+                let indexSavings = max(0,beforeIndex-(try CleanupFiles.size(root.appendingPathComponent("memory.sqlite"))))
+                guard FileManager.default.fileExists(atPath:root.appendingPathComponent("frames/tiles").path)
+                        || FileManager.default.fileExists(atPath:root.appendingPathComponent("frames/packs/catalog.sqlite").path) else {
+                    return TileStorageBatch(processed:0,more:false,savedBytes:indexSavings)
+                }
+                let packs = try tilePacks()
+                if !legacyTilesFinished {
+                    if legacyTileIterator == nil {legacyTileIterator = FileManager.default.enumerator(at:root.appendingPathComponent("frames/tiles"),includingPropertiesForKeys:nil,options:[.skipsSubdirectoryDescendants])}
+                    var files:[ScreenTile] = [],allocated:Int64 = 0
+                    while files.count < max(1,limit) {
+                        guard let url = legacyTileIterator?.nextObject() as? URL else {legacyTilesFinished = true;break}
+                        let path = "frames/tiles/"+url.lastPathComponent
+                        guard TilePackStore.key(path) != nil else {continue}
+                        let owned = try CleanupFiles.ownedURL(path,root:root)
+                        guard FileManager.default.fileExists(atPath:owned.path) else {continue}
+                        let data = try Data(contentsOf:owned)
+                        allocated += try CleanupFiles.size(owned);files.append(ScreenTile(path:path,data:data))
+                    }
+                    if !files.isEmpty {
+                        let beforePacks = try packs.allocatedBytes()
+                        try packs.install(files)
+                        for file in files {
+                            try Task.checkCancellation()
+                            guard try packs.read(file.path) == file.data else {throw RewindError.message("Screenshot packing could not be verified. Originals were kept.")}
+                            try FileManager.default.removeItem(at:CleanupFiles.ownedURL(file.path,root:root))
+                        }
+                        let afterPacks = try packs.allocatedBytes()
+                        return TileStorageBatch(processed:files.count,more:true,savedBytes:indexSavings+allocated+beforePacks-afterPacks)
+                    }
+                }
+                if segmentMaintenance == nil {segmentMaintenance = try packs.segmentIDs()}
+                if let id = segmentMaintenance?.first {
+                    try packs.reclaimSegment(id);segmentMaintenance?.removeFirst()
+                    return TileStorageBatch(processed:0,more:true,savedBytes:indexSavings)
+                }
+                let beforePacks = try packs.allocatedBytes()
+                try packs.checkpoint()
+                return TileStorageBatch(processed:0,more:false,savedBytes:indexSavings+beforePacks-(try packs.allocatedBytes()))
+            } catch {
+                sqlite3_progress_handler(db,0,nil,nil)
+                try? execute("ROLLBACK")
+                legacyTileIterator = nil;legacyTilesFinished = false
+                if Task.isCancelled {throw CancellationError()};throw error
+            }
+        }
+    }
     private func expandedImagePaths(_ paths:[String]) throws -> Set<String> {
         var result = Set(paths)
         for path in paths where path.hasSuffix("."+PackedScreen.fileExtension) {
@@ -361,15 +494,14 @@ extension MemoryStore {
         guard path.hasSuffix("."+PackedScreen.fileExtension) else {return true}
         guard let manifest = try? PackedScreen.manifest(data) else {return false}
         return manifest.tiles.allSatisfy {tile in
-            guard let url = try? CleanupFiles.ownedURL(tile.path,root:root),let bytes = try? Data(contentsOf:url) else {return false}
+            guard let bytes = try? imageBytes(tile.path) else {return false}
             return tile.path.contains(ImageArchive.digest(bytes))
         }
     }
     private func archiveAdditionalBytes(_ archive:ScreenArchive) throws -> Int64 {
         try (archive.tiles+[ScreenTile(path:archive.path,data:archive.data)]).reduce(Int64(0)) {sum,file in
-            let url = try CleanupFiles.ownedURL(file.path,root:root)
-            if FileManager.default.fileExists(atPath:url.path) {
-                guard try Data(contentsOf:url) == file.data else {throw RewindError.message("An existing screenshot could not be verified. The original has been kept.")}
+            if let data = try imageBytes(file.path) {
+                guard data == file.data else {throw RewindError.message("An existing screenshot could not be verified. The original has been kept.")}
                 return sum
             }
             return sum+Int64(file.data.count)
@@ -384,13 +516,15 @@ extension MemoryStore {
         }
         _ = try archiveAdditionalBytes(archive)
         let files = archive.tiles+[ScreenTile(path:archive.path,data:archive.data)]
-        let pending = try files.filter { !FileManager.default.fileExists(atPath:try CleanupFiles.ownedURL($0.path,root:root).path) }
+        let pending = try files.filter {try imageBytes($0.path) == nil}
         try execute("BEGIN IMMEDIATE")
         do {
             for file in pending {try execute("INSERT OR REPLACE INTO image_archive_staging VALUES(?,?)",[file.path,ImageArchive.digest(file.data)])}
             try execute("COMMIT")
         } catch {try? execute("ROLLBACK");throw error}
-        for file in pending {
+        let tiles=pending.filter {TilePackStore.key($0.path) != nil}
+        if !tiles.isEmpty {try tilePacks().install(tiles)}
+        for file in pending where TilePackStore.key(file.path) == nil {
             let url = try CleanupFiles.ownedURL(file.path,root:root)
             try FileManager.default.createDirectory(at:url.deletingLastPathComponent(),withIntermediateDirectories:true)
             try file.data.write(to:url,options:.atomic)
@@ -477,7 +611,7 @@ extension MemoryStore {
     private func recoverImageArchives() throws {
         let staged = try jsonRows("SELECT json_object('source',destination,'destination',destination,'digest',digest) FROM image_archive_staging ORDER BY destination",as:ImageReceipt.self)
         for receipt in staged {
-            if let file = try? CleanupFiles.ownedURL(receipt.destination,root:root),let data = try? Data(contentsOf:file),ImageArchive.digest(data) == receipt.digest {
+            if let data = try? imageBytes(receipt.destination),ImageArchive.digest(data) == receipt.digest {
                 removeUnreferencedImage(receipt.destination)
             }
             try execute("DELETE FROM image_archive_staging WHERE destination=?",[receipt.destination])
@@ -527,7 +661,7 @@ extension MemoryStore {
         for path in candidates.sorted() {
             let url = try CleanupFiles.ownedURL(path,root:root)
             guard !protected.contains(url),seen.insert(url).inserted else { continue }
-            bytes += try CleanupFiles.size(url); paths.append(path)
+            bytes += try imageStorageBytes(path); paths.append(path)
         }
         return StorageCleanupPlan(scope:scope,keepStarred:keepStarred,preparedAt:date,frameIDs:ids,sessionIDs:Set(closedSessions.map(\.id)),paths:paths,bytes:bytes,skippedActive:skippedActive,skippedStarred:skippedStarred)
     }
@@ -563,7 +697,7 @@ extension MemoryStore {
                 // If interrupted after commit, the journal lets startup finish
                 // removing quarantined files without touching unrelated content.
                 var pending = false
-                do { try FileManager.default.removeItem(at:folder) } catch { pending = true }
+                do { try removePackedTiles(plan.paths);try FileManager.default.removeItem(at:folder) } catch { pending = true }
                 try? execute("PRAGMA wal_checkpoint(PASSIVE)")
                 return StorageCleanupResult(memories:plan.frameIDs.count,recordings:plan.sessionIDs.count,bytes:pending ? 0:plan.bytes,pendingFileRemoval:pending)
             } catch {
@@ -590,6 +724,8 @@ extension MemoryStore {
                     try FileManager.default.moveItem(at:source,to:destination)
                 }
             }
+        } else {
+            try removePackedTiles(journal.paths)
         }
         try FileManager.default.removeItem(at:folder)
     }
@@ -648,6 +784,7 @@ extension MemoryStore {
         // Remove the manifest before its references. A failed unlink keeps all
         // of its tile data intact; recovery retries the durable staging receipt.
         if FileManager.default.fileExists(atPath:url.path) {do {try FileManager.default.removeItem(at:url)} catch {return}}
+        if TilePackStore.key(path) != nil {do {try removePackedTiles([path])} catch {return}}
         try? execute("DELETE FROM image_tiles WHERE image=?",[path])
         for tile in tiles {removeUnreferencedImage(tile)}
     }
@@ -778,10 +915,21 @@ extension MemoryStore {
     }
     func compactIndex()throws {
         try synchronized {
+            try Task.checkCancellation()
+            sqlite3_progress_handler(db,4000,{_ in Task.isCancelled ? 1:0},nil)
+            defer {sqlite3_progress_handler(db,0,nil,nil)}
+            // Fold layout migration into this vacuum instead of copying the
+            // database once for each optimizer job.
+            try compactTileReferences(reclaim:false)
             try execute("DELETE FROM ocr_payloads WHERE key NOT IN (SELECT json_extract(json,'$.ocrKey') FROM frames WHERE json_extract(json,'$.ocrKey') IS NOT NULL)")
             try execute("INSERT INTO frame_fts(frame_fts,rank) VALUES('integrity-check',1)")
             try execute("INSERT INTO ocr_fts(ocr_fts,rank) VALUES('integrity-check',1)")
-            try execute("PRAGMA wal_checkpoint(PASSIVE)");try execute("VACUUM");try execute("PRAGMA wal_checkpoint(TRUNCATE)");needsIndexCompaction = false
+            try execute("PRAGMA wal_checkpoint(PASSIVE)")
+            let freePages = try jsonRows("PRAGMA freelist_count",as:Int.self).first ?? 0
+            if freePages > 128 || needsIndexCompaction {try execute("VACUUM")}
+            try execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            try execute("UPDATE storage_maintenance SET value=0 WHERE key='tile-index-vacuum'")
+            needsIndexCompaction = false
         }
     }
     func extendCapture(_ id:String,through date:Date)throws->Bool {

@@ -77,8 +77,9 @@ struct PackedScreen:Codable,Sendable {
         }
         return value
     }
-    static func load(_ url:URL,maxPixels:Int? = nil) throws -> CGImage {
+    static func load(_ url:URL,maxPixels:Int? = nil,useCache:Bool = true) throws -> CGImage {
         let value=try manifest(Data(contentsOf:url)),root=url.deletingLastPathComponent().deletingLastPathComponent()
+        let packs = TilePackReader.cached(root:root)
         let scale=maxPixels.map {min(1,Double($0)/Double(max(value.width,value.height)))} ?? 1
         let width=max(1,Int(Double(value.width)*scale)),height=max(1,Int(Double(value.height)*scale))
         guard let context=CGContext(data:nil,width:width,height:height,bitsPerComponent:8,bytesPerRow:width*4,space:CGColorSpace(name:CGColorSpace.sRGB)!,bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue) else {throw RewindError.message("Could not display the screenshot.")}
@@ -87,10 +88,14 @@ struct PackedScreen:Codable,Sendable {
             try Task.checkCancellation()
             let file=try CleanupFiles.ownedURL(tile.path,root:root),key=file.path as NSString
             let image:CGImage
-            if let cached=decodedCache.object(forKey:key) {image=cached.image}
+            if useCache,let cached=decodedCache.object(forKey:key) {image=cached.image}
             else {
-                guard let reader=CGImageSourceCreateWithURL(file as CFURL,nil),let decoded=CGImageSourceCreateImageAtIndex(reader,0,nil),decoded.width==tile.width,decoded.height==tile.height else {throw RewindError.message("A screenshot tile could not be read.")}
-                image=decoded;decodedCache.setObject(Decoded(image),forKey:key,cost:image.bytesPerRow*image.height)
+                let reader:CGImageSource?
+                if FileManager.default.fileExists(atPath:file.path),let legacy=CGImageSourceCreateWithURL(file as CFURL,nil) {reader=legacy}
+                else if let data = try packs?.read(tile.path) {reader=CGImageSourceCreateWithData(data as CFData,nil)}
+                else {reader=nil}
+                guard let reader,let decoded=CGImageSourceCreateImageAtIndex(reader,0,nil),decoded.width==tile.width,decoded.height==tile.height else {throw RewindError.message("A screenshot tile could not be read.")}
+                image=decoded;if useCache {decodedCache.setObject(Decoded(image),forKey:key,cost:image.bytesPerRow*image.height)}
             }
             let x0=Int(Double(tile.x)*scale),x1=Int(Double(tile.x+tile.width)*scale)
             let y0=Int(Double(tile.y)*scale),y1=Int(Double(tile.y+tile.height)*scale)

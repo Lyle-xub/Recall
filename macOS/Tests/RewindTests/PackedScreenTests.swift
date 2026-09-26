@@ -44,12 +44,12 @@ final class PackedScreenTests:XCTestCase {
         let shared = Set(a.tiles.map(\.path)).intersection(b.tiles.map(\.path))
         XCTAssertFalse(shared.isEmpty);XCTAssertNotEqual(first.imagePath,second.imagePath)
         try store.moveToTrash(first);_ = try store.emptyTrash()
-        for tile in shared {XCTAssertTrue(FileManager.default.fileExists(atPath:root.appendingPathComponent(tile).path))}
+        for tile in shared {XCTAssertNotNil(try store.imageBytes(tile))}
         XCTAssertNotNil(StoredImage.load(root.appendingPathComponent(second.imagePath)))
         let plan = try store.cleanupPlan(scope:.all,keepStarred:false)
         XCTAssertTrue(shared.isSubset(of:Set(plan.paths)))
         _ = try store.clearStorage(plan)
-        for tile in Set(a.tiles.map(\.path)+b.tiles.map(\.path)) {XCTAssertFalse(FileManager.default.fileExists(atPath:root.appendingPathComponent(tile).path))}
+        for tile in Set(a.tiles.map(\.path)+b.tiles.map(\.path)) {XCTAssertNil(try store.imageBytes(tile))}
     }
     func testExportMaterializesPortablePNGAndPreservesText() throws {
         let (frame,_) = try save(picture()),destination = root.appendingPathComponent("export")
@@ -103,6 +103,7 @@ final class PackedScreenTests:XCTestCase {
         XCTAssertEqual(sqlite3_open(root.appendingPathComponent("memory.sqlite").path,&database),SQLITE_OK)
         for file in pending {
             let url = root.appendingPathComponent(file.path)
+            try FileManager.default.createDirectory(at:url.deletingLastPathComponent(),withIntermediateDirectories:true)
             if !FileManager.default.fileExists(atPath:url.path) {try file.data.write(to:url)}
             XCTAssertEqual(sqlite3_exec(database,"INSERT OR REPLACE INTO image_archive_staging VALUES('\(file.path)','\(ImageArchive.digest(file.data))')",nil,nil,nil),SQLITE_OK)
         }
@@ -110,8 +111,8 @@ final class PackedScreenTests:XCTestCase {
         sqlite3_close(database);store = nil;store = try MemoryStore(root:root)
         XCTAssertNotNil(StoredImage.load(root.appendingPathComponent(frame.imagePath)))
         XCTAssertFalse(FileManager.default.fileExists(atPath:root.appendingPathComponent(b.path).path))
-        for tile in a.tiles {XCTAssertTrue(FileManager.default.fileExists(atPath:root.appendingPathComponent(tile.path).path))}
-        for tile in b.tiles where !Set(a.tiles.map(\.path)).contains(tile.path) {XCTAssertFalse(FileManager.default.fileExists(atPath:root.appendingPathComponent(tile.path).path))}
+        for tile in a.tiles {XCTAssertNotNil(try store.imageBytes(tile.path))}
+        for tile in b.tiles where !Set(a.tiles.map(\.path)).contains(tile.path) {XCTAssertNil(try store.imageBytes(tile.path))}
     }
     func testConsecutiveRealScreenshotsStorage() throws {
         guard let directory = ProcessInfo.processInfo.environment["RECALL_PACKED_SAMPLES"] else {throw XCTSkip("Opt-in private local storage benchmark")}

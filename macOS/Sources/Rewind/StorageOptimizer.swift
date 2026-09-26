@@ -7,7 +7,7 @@ import Combine
     @Published private(set) var status = "New screenshots and completed recordings optimize automatically."
     @Published private(set) var savedBytes:Int64 = 0
     private let store:MemoryStore
-    private enum Job:Hashable,Sendable { case image(String),video(String),index }
+    private enum Job:Hashable,Sendable { case image(String),video(String),index,tileStorage }
     private var pending:[Job] = []
     private var scheduled = Set<Job>()
     private var includeExisting = false
@@ -17,12 +17,16 @@ import Combine
     @Published private(set) var totalItems = 0
     var onImageArchived:((String,String)->Void)?
     private var worker:Task<Void,Never>?
+    private var tileMigration:Task<MemoryStore.TileStorageBatch,Error>?
+    private var indexCompaction:Task<Int64,Error>?
+    private var packedTiles = 0
     private var paused = false
     private var interfaceVisible = false
     private var userInitiated = false
     private let workGate = BackgroundWorkGate()
     func setInterfaceVisible(_ visible:Bool) {
         interfaceVisible = visible;waitingForInterface = visible && !userInitiated && running;workGate.setSuspended(visible && !userInitiated)
+        if visible && !userInitiated {tileMigration?.cancel();indexCompaction?.cancel()}
     }
     init(store:MemoryStore) { self.store = store }
     func resume() {
@@ -37,6 +41,7 @@ import Combine
             }
         }
         if store.needsIndexCompaction { add(.index);startWorker() }
+        if store.needsTileStorageOptimization {add(.tileStorage);startWorker()}
         for session in ((try? store.sessions()) ?? []) where session.storagePolicy == 1 && session.endedAt != nil && session.videoOptimizationVersion != VideoArchive.policyVersion { enqueue(session.id) }
     }
     func continueWhileOpen() { userInitiated = true;waitingForInterface = false;workGate.setSuspended(false) }
@@ -55,11 +60,11 @@ import Combine
     }
     private func startWorker() {
         guard worker == nil else { return }
-        running = true;waitingForInterface = interfaceVisible && !userInitiated;checkedImages = 0;checkedVideos = 0;checkedIndexes = 0;totalItems = pending.count
+        running = true;waitingForInterface = interfaceVisible && !userInitiated;checkedImages = 0;checkedVideos = 0;checkedIndexes = 0;packedTiles = 0;totalItems = pending.count
         worker = Task { [weak self] in
             guard let self else { return }
             defer { worker = nil;running = false;waitingForInterface = false;scheduled.removeAll();pending.removeAll();userInitiated = false;workGate.setSuspended(interfaceVisible) }
-            var failed = 0,keptVideos = 0
+            var failed = 0,keptVideos = 0,tileScanStarted = false
             if includeExisting {
                 includeExisting = false;status = "Preparing images and videos…"
                 let store = self.store
@@ -69,6 +74,7 @@ import Combine
                     }.value
                     try Task.checkCancellation()
                     add(.index)
+                    if store.needsTileStorageOptimization {add(.tileStorage)}
                     for path in plan.0 { add(.image(path)) }
                     for id in plan.1 { add(.video(id)) }
                 } catch {
@@ -81,19 +87,40 @@ import Combine
                 let started = Date()
                 let job = pending.removeFirst()
                 switch job {
+                case .tileStorage:
+                    status = "Compacting screenshot storage… \(StorageUsage.formatted(max(0,savedBytes))) saved"
+                    let database = store
+                    let restartScan = !tileScanStarted;tileScanStarted = true
+                    let work = Task.detached(priority:.background) {try database.packLegacyTiles(restartScan:restartScan)}
+                    tileMigration = work
+                    do {
+                        let batch = try await withTaskCancellationHandler(operation:{try await work.value},onCancel:{work.cancel()})
+                        packedTiles += batch.processed;savedBytes += batch.savedBytes
+                        if batch.more {pending.append(.tileStorage)}
+                    } catch {
+                        if work.isCancelled && !Task.isCancelled {pending.append(.tileStorage)}
+                        else if !Task.isCancelled {failed += 1;CaptureDiagnostics(root:store.root).write("Screenshot packing deferred; originals retained; code=\((error as NSError).code)")}
+                    }
+                    tileMigration = nil
                 case .index:
                     status = "Compacting shared text index…"
                     let database = store
+                    let work = Task.detached(priority:.background) {
+                        let url = database.root.appendingPathComponent("memory.sqlite")
+                        let before = (try? CleanupFiles.size(url)) ?? 0
+                        try database.compactIndex()
+                        return max(0,before-((try? CleanupFiles.size(url)) ?? before))
+                    }
+                    indexCompaction = work
                     do {
-                        let released = try await Task.detached(priority:.utility) {
-                            let url = database.root.appendingPathComponent("memory.sqlite")
-                            let before = (try? CleanupFiles.size(url)) ?? 0
-                            try database.compactIndex()
-                            return max(0,before-((try? CleanupFiles.size(url)) ?? before))
-                        }.value
+                        let released = try await withTaskCancellationHandler(operation:{try await work.value},onCancel:{work.cancel()})
                         savedBytes += released
-                    } catch { failed += 1 }
-                    checkedIndexes += 1
+                        checkedIndexes += 1
+                    } catch {
+                        if work.isCancelled && !Task.isCancelled {pending.append(.index)}
+                        else if !Task.isCancelled {failed += 1;checkedIndexes += 1}
+                    }
+                    indexCompaction = nil
 
                 case .image(let path):
                     status = "Optimizing image \(checkedImages+1) · \(pending.count) waiting · \(StorageUsage.formatted(savedBytes)) saved"
@@ -145,7 +172,7 @@ import Combine
                     try? await Task.sleep(for:.seconds(BackgroundProcessingPolicy.recoveryInterval(after:Date().timeIntervalSince(started))))
                 }
             }
-            let summary = "\(checkedImages) images · \(checkedVideos) videos · \(StorageUsage.formatted(savedBytes)) saved"
+            let summary = "\(checkedImages) images · \(checkedVideos) videos\(packedTiles > 0 ? " · screenshot storage compacted":"") · \(StorageUsage.formatted(max(0,savedBytes))) saved"
             status = Task.isCancelled ? "Paused · \(summary)":"Checked \(summary)\(keptVideos > 0 ? " · \(keptVideos) original videos kept":"")\(failed > 0 ? " · \(failed) items kept for retry":"")"
         }
     }
