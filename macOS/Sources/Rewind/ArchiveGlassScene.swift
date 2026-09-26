@@ -34,7 +34,6 @@ private final class ArchiveRecordControl: SCNNode {
     var onPresentationChanged:(()->Void)?
     private(set) var dayColumns:[ArchiveDayColumn] = []
     private var currentID:String?
-    private let hoverOutline = SCNNode()
     private(set) var hoveredID:String?
     private var focalDistance = ArchiveMotionSpring(value:33.5)
     private var aperture = ArchiveMotionSpring(value:5.8)
@@ -75,14 +74,6 @@ private final class ArchiveRecordControl: SCNNode {
     private var target = SCNVector3(-1.9,5.4,0.2)
 
     init() {
-        hoverOutline.name = "hover-outline";hoverOutline.categoryBitMask = 2
-        let material = SCNMaterial();material.lightingModel = .constant
-        material.writesToDepthBuffer = false;material.readsFromDepthBuffer = true
-        for (width,height,x,y) in [(5.37,0.035,0.0,3.25),(5.37,0.035,0.0,-3.25),(0.035,6.5,-2.675,0.0),(0.035,6.5,2.675,0.0)] {
-            let edge = SCNNode(geometry:SCNBox(width:width,height:height,length:0.015,chamferRadius:0))
-            edge.geometry?.materials = [material];edge.position = SCNVector3(x,y,0.095);edge.categoryBitMask = 2
-            hoverOutline.addChildNode(edge)
-        }
         let camera = SCNCamera()
         camera.usesOrthographicProjection = true
         camera.orthographicScale = 4.5
@@ -159,7 +150,6 @@ private final class ArchiveRecordControl: SCNNode {
         if resized,!extractions.isEmpty {
             if reducedMotion { advance(dt:1,immediate:true) } else { wake() }
         }
-        updateHoverOutline()
         onPresentationChanged?()
     }
 
@@ -273,18 +263,8 @@ private final class ArchiveRecordControl: SCNNode {
         let next = currentID == nil ? id.flatMap { framesByID[$0] == nil ? nil:$0 }:nil
         guard hoveredID != next else { return }
         hoveredID = next
-        updateHoverOutline()
         // Focus is useful even when Reduce Motion disables the wave.
         if reducedMotion { advance(dt:1,immediate:true) } else { wake() }
-    }
-    private func updateHoverOutline() {
-        guard currentID == nil,let id = hoveredID,let node = nodes[id] else {
-            hoverOutline.removeFromParentNode();return
-        }
-        if hoverOutline.parent !== node { hoverOutline.removeFromParentNode();node.addChildNode(hoverOutline) }
-        hoverOutline.childNodes.first?.geometry?.firstMaterial?.diffuse.contents = night
-            ? NSColor(red:0.62,green:0.91,blue:1,alpha:1)
-            : NSColor(red:0.04,green:0.35,blue:0.40,alpha:1)
     }
     func pointer(at point:CGPoint) {
         guard !reducedMotion,currentID == nil else { return }
@@ -706,7 +686,7 @@ final class ArchiveSceneView: SCNView {
             updatePointer(at:p)
         } else {
             // Deliver the final sample even when a fast mouse stops between
-            // ticks. Otherwise the highlight can remain on the previous card.
+            // ticks. Otherwise the summit can remain on the previous card.
             pendingPointer = p
             if pointerDelivery == nil {
                 let delay = max(0,1/60-(now-lastHitTime))
@@ -751,7 +731,7 @@ final class ArchiveSceneView: SCNView {
             let hit = hitTest(point,options:[.searchMode:SCNHitTestSearchMode.closest.rawValue,.categoryBitMask:1]).first
             if let hit,onAction?(hit) == true { } else {
                 // The wave can move geometry beneath a stationary mouse. Click
-                // the highlighted sheet, not a newly exposed neighbour.
+                // the hovered sheet, not a newly exposed neighbour.
                 let stable = aimPoint.map { hypot(point.x-$0.x,point.y-$0.y) <= 8 } ?? false
                 let aimed = aimedID.flatMap { archive?.hoveredID == $0 && archive?.recordIDs.contains($0) == true ? $0:nil }
                 onSelect?(stable ? aimed ?? memoryID(at:point):memoryID(at:point))

@@ -225,12 +225,12 @@ final class ArchiveVisualTests: XCTestCase {
                     if let hitID {
                         let summit = try XCTUnwrap(rack.childNodes.max { $0.position.y < $1.position.y })
                         XCTAssertEqual(summit.name,hitID,"The visible summit must be the record under the pointer")
-                        XCTAssertNotNil(summit.childNode(withName:"hover-outline",recursively:false))
+                        XCTAssertNil(rack.childNode(withName:"hover-outline",recursively:true))
                         var clicked:String?
                         let originalSelect = native.onSelect;native.onSelect = { clicked = $0 }
                         native.mouseDown(with:event);native.mouseUp(with:event)
                         native.onSelect = originalSelect
-                        XCTAssertEqual(clicked,hitID,"Click the highlighted record after geometry has moved")
+                        XCTAssertEqual(clicked,hitID,"Click the hovered record after geometry has moved")
                     }
                     let visible = archive.viewportRecords(in:native).visible
                     for _ in 0..<40 {

@@ -24,7 +24,7 @@ final class ArchiveReadabilityTests:XCTestCase {
             }
         }
     }
-    @MainActor func testHitCardOwnsSummitFocusAndHighlight() throws {
+    @MainActor func testHitCardOwnsSummitFocusWithoutOutline() throws {
         let day = Calendar.current.startOfDay(for:Date())
         let frames = (0..<16).map { index in
             MemoryFrame(timestamp:day.addingTimeInterval(Double(index)*60),appName:"Hit target",bundleID:"test",title:"",imagePath:"\(index).png",text:"",regions:[])
@@ -38,14 +38,14 @@ final class ArchiveReadabilityTests:XCTestCase {
         let summit = try XCTUnwrap(rack.childNodes.max { $0.position.y < $1.position.y })
         XCTAssertEqual(summit.name,target.id)
         XCTAssertEqual(scene.hoveredID,target.id)
-        XCTAssertNotNil(summit.childNode(withName:"hover-outline",recursively:false))
+        XCTAssertNil(rack.childNode(withName:"hover-outline",recursively:true))
         XCTAssertEqual(scene.cameraNode.camera!.focusDistance,Double(-scene.cameraNode.convertPosition(summit.worldPosition,from:nil).z),accuracy:0.01)
         scene.hover(nil)
         XCTAssertNil(rack.childNode(withName:"hover-outline",recursively:true))
         scene.stopMotion()
     }
 
-    @MainActor func testNativeClickKeepsHighlightedRecordAfterWaveMoves() throws {
+    @MainActor func testNativeClickKeepsHoveredRecordAfterWaveMoves() throws {
         let day = Calendar.current.startOfDay(for:Date())
         let frames = (0..<24).map { index in
             MemoryFrame(timestamp:day.addingTimeInterval(Double(index)*60),appName:"Hit target",bundleID:"test",title:"",imagePath:"\(index).png",text:"",regions:[])
@@ -89,7 +89,7 @@ final class ArchiveReadabilityTests:XCTestCase {
         XCTAssertEqual(clicked,id,"Dragging must not select another card")
         archive.hover(id)
         archive.scroll(by:10,precise:false)
-        XCTAssertNil(archive.hoveredID,"Camera scrolling invalidates the old summit highlight")
+        XCTAssertNil(archive.hoveredID,"Camera scrolling invalidates the old summit target")
     }
 
     @MainActor func testFinalPointerSampleIsDeliveredAndExitCancelsPendingSample() async throws {
