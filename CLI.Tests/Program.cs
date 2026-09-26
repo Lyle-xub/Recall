@@ -108,7 +108,7 @@ try
         Assert((await Run(windows, 0, "records", "get", candidate.Text("id")!)).Text("text")?.Contains("Aurora", StringComparison.OrdinalIgnoreCase) == true, "Indexed OCR persists into shared desktop store");
     }
     var unknown = Path.Combine(root, "unknown"); Directory.CreateDirectory(unknown);
-    using (var database = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + Path.Combine(unknown, "memory.sqlite"))) { database.Open(); using var c = database.CreateCommand(); c.CommandText = "CREATE TABLE unrelated(value TEXT)"; c.ExecuteNonQuery(); }
+    using (var database = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = Path.Combine(unknown, "memory.sqlite"), Pooling = false }.ToString())) { database.Open(); using var c = database.CreateCommand(); c.CommandText = "CREATE TABLE unrelated(value TEXT)"; c.ExecuteNonQuery(); }
     var before = File.ReadAllBytes(Path.Combine(unknown, "memory.sqlite"));
     await Run(unknown, 4, "records", "list"); Assert(before.SequenceEqual(File.ReadAllBytes(Path.Combine(unknown, "memory.sqlite"))), "Unknown schema remains byte-for-byte unchanged");
     if (OperatingSystem.IsMacOS() && LibraryClient.MacHelper != null)
