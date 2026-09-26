@@ -17,7 +17,8 @@ internal static class Design
     public static void SetDark(bool dark)
     {
         Dark = dark; inkBrush.Color = Ink; mutedBrush.Color = Muted;
-        GlassBrush.Color = dark ? Color.FromArgb(174, 51, 54, 59) : Color.FromArgb(104, 255, 255, 255);
+        GlassBrush.Color = dark ? Color.FromArgb(100, 70, 74, 82) : Color.FromArgb(80, 255, 255, 255);
+        GlassMaterial.SetDark(dark);
         RimBrush.Color = dark ? Color.FromArgb(62, 255, 255, 255) : Color.FromArgb(135, 255, 255, 255);
     }
     public static readonly Color[] Pastels = [Color.FromArgb(255, 116, 174, 228), Color.FromArgb(255, 144, 205, 195), Color.FromArgb(255, 172, 165, 225), Color.FromArgb(255, 234, 185, 153), Color.FromArgb(255, 201, 188, 222), Color.FromArgb(255, 190, 200, 211)];
@@ -63,10 +64,15 @@ internal static class Design
         p.Orientation = Orientation.Horizontal;
         return p;
     }
-    public static Border Card(UIElement child, double radius = 24, double padding = 22) => new() { Child = child, CornerRadius = new(radius), Padding = new(padding), Background = GlassBrush, BorderBrush = RimBrush, BorderThickness = new(1) };
+    public static Border Card(UIElement child, double radius = 24, double padding = 22)
+    {
+        var card = new Border { Child = child, CornerRadius = new(radius), Padding = new(padding), BorderThickness = new(0) };
+        GlassMaterial.Attach(card, radius); return card;
+    }
     public static Button Button(string title, Action click, bool primary = false)
     {
         var b = new Button { Template = GlassButtonTemplate, Content = Text(title, 14, true, primary ? Microsoft.UI.Colors.White : Ink), MinHeight = 44, Padding = new(20, 10, 20, 10), CornerRadius = new(22), BorderThickness = new(1), BorderBrush = RimBrush, Background = primary ? Brush(Blue) : GlassBrush };
+        if (!primary) GlassMaterial.Attach(b, 22);
         b.Click += (_, _) => click();
         return b;
     }
@@ -131,7 +137,11 @@ internal static class Design
         return new Viewbox { Width = size, Height = size, Child = canvas };
     }
     public static ScrollViewer Scroll(UIElement content) => new() { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, HorizontalContentAlignment = HorizontalAlignment.Stretch, IsVerticalRailEnabled = true };
-    public static TextBox Input(string placeholder, string value = "", double height = 44) => new() { Template = SearchInputTemplate, PlaceholderText = placeholder, PlaceholderForeground = mutedBrush, Text = value, MinHeight = height, VerticalContentAlignment = VerticalAlignment.Center, CornerRadius = new(height / 2), Padding = new(18, 10, 18, 10), BorderThickness = new(1), BorderBrush = RimBrush, Background = GlassBrush, Foreground = inkBrush, FontSize = 15, SelectionHighlightColor = Brush(Color.FromArgb(90, 130, 180, 239)) };
+    public static TextBox Input(string placeholder, string value = "", double height = 44)
+    {
+        var field = new TextBox { Template = SearchInputTemplate, PlaceholderText = placeholder, PlaceholderForeground = mutedBrush, Text = value, MinHeight = height, VerticalContentAlignment = VerticalAlignment.Center, CornerRadius = new(height / 2), Padding = new(18, 10, 18, 10), BorderThickness = new(1), BorderBrush = RimBrush, Background = GlassBrush, Foreground = inkBrush, FontSize = 15, SelectionHighlightColor = Brush(Color.FromArgb(90, 130, 180, 239)) };
+        GlassMaterial.Attach(field, height / 2); return field;
+    }
     public static Image Asset(string name, double width = 64) => new() { Source = new BitmapImage(new Uri(Path.Combine(AppContext.BaseDirectory, "Assets", name))), Width = width, Height = width, Stretch = Stretch.Uniform };
     internal static bool? ValidationMotion;
     public static bool Motion => ValidationMotion ?? new Windows.UI.ViewManagement.UISettings().AnimationsEnabled;
@@ -192,92 +202,6 @@ internal static class Design
     }
     public static string Size(long bytes) => bytes >= 1_000_000_000 ? $"{bytes / 1e9:0.00} GB" : $"{bytes / 1e6:0.#} MB";
     public static string Time(double seconds) => seconds >= 3600 ? $"{(int)(seconds / 3600)} hr {(int)(seconds % 3600 / 60)} min" : $"{Math.Max(0, (int)(seconds / 60))} min";
-}
-internal sealed class ClearBackdrop : SystemBackdrop
-{
-    readonly Windows.UI.Composition.Compositor compositor = new();
-    ICompositionSupportsSystemBackdrop? target;
-    Windows.UI.Composition.CompositionBrush? brush;
-    Windows.UI.Composition.CompositionEffectFactory? maskFactory;
-    string? lastKey; bool full; double width = 1920, height = 1080; Rect search; List<Rect> buttons = [];
-    public void Update(bool full, double width, double height, Rect search, List<Rect> buttons)
-    {
-        var key = $"{full}/{width:0.0}/{height:0.0}/{search}/" + string.Join("/", buttons);
-        if (key == lastKey)
-            return;
-        lastKey = key;
-        this.full = full;
-        this.width = width;
-        this.height = height;
-        this.search = search;
-        this.buttons = buttons;
-        Draw();
-    }
-    protected override void OnTargetConnected(ICompositionSupportsSystemBackdrop target, XamlRoot root)
-    {
-        base.OnTargetConnected(target, root);
-        this.target = target;
-        Draw();
-    }
-    protected override void OnTargetDisconnected(ICompositionSupportsSystemBackdrop target)
-    {
-        target.SystemBackdrop = null;
-        this.target = null;
-        brush?.Dispose();
-        base.OnTargetDisconnected(target);
-    }
-    void Draw()
-    {
-        if (target == null || width <= 0 || height <= 0)
-            return;
-        var maskRoot = compositor.CreateContainerVisual();
-        maskRoot.Size = new((float)width, (float)height);
-        var bottom = compositor.CreateSpriteVisual();
-        bottom.Size = maskRoot.Size;
-        var gradient = compositor.CreateLinearGradientBrush();
-        gradient.StartPoint = new(0, 0);
-        gradient.EndPoint = new(0, 1);
-        gradient.ColorStops.Add(compositor.CreateColorGradientStop(0, full ? Microsoft.UI.Colors.White : Microsoft.UI.Colors.Transparent));
-        for (int i = 0; i <= 12; i++)
-        {
-            float t = i / 12f;
-            float a = full ? 1 : t * t * t * (t * (t * 6 - 15) + 10);
-            gradient.ColorStops.Add(compositor.CreateColorGradientStop((float)Math.Max(0, 1 - 234 / height + 234 / height * t), Color.FromArgb((byte)(a * 255), 255, 255, 255)));
-        }
-        bottom.Brush = gradient;
-        maskRoot.Children.InsertAtBottom(bottom);
-        if (!full)
-            foreach (var rect in buttons.Prepend(search).Where(r => r.Width > 0))
-            {
-                var geometry = compositor.CreateRoundedRectangleGeometry();
-                geometry.Size = new((float)rect.Width, (float)rect.Height);
-                geometry.CornerRadius = new((float)rect.Height / 2);
-                var shape = compositor.CreateSpriteShape(geometry);
-                shape.FillBrush = compositor.CreateColorBrush(Microsoft.UI.Colors.White);
-                var visual = compositor.CreateShapeVisual();
-                visual.Shapes.Add(shape);
-                visual.Size = geometry.Size;
-                visual.Offset = new((float)rect.X, (float)rect.Y, 0);
-                maskRoot.Children.InsertAtTop(visual);
-            }
-        var surface = compositor.CreateVisualSurface();
-        surface.SourceVisual = maskRoot;
-        surface.SourceSize = maskRoot.Size;
-        // Backdrop brushes cannot be a CompositionMaskBrush.Source. An effect
-        // accepts the backdrop and mask as supported source parameters.
-        maskFactory ??= compositor.CreateEffectFactory(new Microsoft.Graphics.Canvas.Effects.AlphaMaskEffect
-        {
-            Source = new Windows.UI.Composition.CompositionEffectSourceParameter("Backdrop"),
-            AlphaMask = new Windows.UI.Composition.CompositionEffectSourceParameter("Mask")
-        });
-        var mask = maskFactory.CreateBrush();
-        mask.SetSourceParameter("Backdrop", compositor.CreateHostBackdropBrush());
-        mask.SetSourceParameter("Mask", compositor.CreateSurfaceBrush(surface));
-        var old = brush;
-        brush = mask;
-        target.SystemBackdrop = mask;
-        old?.Dispose();
-    }
 }
 internal sealed class DesktopBlur : Grid
 {

@@ -51,7 +51,7 @@ internal sealed class RecallWindow : Window
     }
     void Backdrop()
     {
-        if (!IsShown || root.ActualWidth <= 0)
+        if (mode == "material" || !IsShown || root.ActualWidth <= 0)
             return;
         var p = search.TransformToVisual(root).TransformPoint(new(0, 0));
         var rect = new Rect(p.X, p.Y, search.ActualWidth, search.ActualHeight);
@@ -141,7 +141,6 @@ internal sealed class RecallWindow : Window
         search.MaxWidth = 860;
         search.FontSize = 22;
         search.Padding = new(54, 15, 20, 15);
-        search.Background = Design.GlassBrush;
         search.BorderBrush = Design.RimBrush;
         search.BorderThickness = new(1.3);
         search.CornerRadius = new(38);
@@ -221,9 +220,10 @@ internal sealed class RecallWindow : Window
             root.Children.Add(back); root.Children.Add(notice);
         }
         page.Children.Clear();
+        notice.Visibility = Visibility.Visible;
         var night = mode != "settings" && runtime.Settings.DarkAppearance;
         Design.SetDark(night); root.RequestedTheme = night ? ElementTheme.Dark : ElementTheme.Light;
-        root.Background = Design.Brush(night ? Color.FromArgb(215, 17, 20, 26) : Color.FromArgb(1, 255, 255, 255));
+        root.Background = Design.Brush(Color.FromArgb(1, 255, 255, 255));
         var rhine = runtime.Settings.RhineLabMode && mode == "home";
         archive.SetActive(rhine);
         if (rhine) { Expand(); _ = archive.Refresh(); }
@@ -254,6 +254,15 @@ internal sealed class RecallWindow : Window
         if (showTimeline) { timeline.SetActive(true); archive.SetTimeline(true); }
         else archive.SetTimeline(false);
         if (settingsTab != null) page.Children.OfType<SettingsView>().FirstOrDefault()?.SelectTab(settingsTab);
+    }
+    internal void ValidationMaterial(bool dark, bool desktop)
+    {
+        mode = "material"; Design.SetDark(dark); root.RequestedTheme = dark ? ElementTheme.Dark : ElementTheme.Light;
+        archive.SetActive(false); timeline.SetActive(false); page.Children.Clear();
+        toolbar.Visibility = back.Visibility = notice.Visibility = Visibility.Collapsed;
+        root.Background = Design.Brush(Color.FromArgb(1, 255, 255, 255));
+        page.Children.Add(new MaterialReferenceView(desktop));
+        backdrop.Update(desktop, root.ActualWidth, root.ActualHeight, new Rect(), []);
     }
     internal object ValidationDiagnostics => new { mode, query = search.Text, appFilter, rhine = archive.Diagnostics };
     internal void ValidationAction(string? action) { if (action == "collapse") archive.Collapse(); }

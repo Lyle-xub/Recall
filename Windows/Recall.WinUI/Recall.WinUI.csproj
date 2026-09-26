@@ -31,7 +31,9 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Recall.Ocr/Recall.Ocr.csproj"/>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
+    <!-- LiquidGlassWinUI’s native effect ABI is tied to this self-contained runtime. -->
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="[2.2.0]" />
+    <PackageReference Include="LiquidGlassWinUI" Version="[1.0.3]" />
     <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.4.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />

@@ -176,9 +176,9 @@ internal sealed class RhineArchiveView : Grid
                 var frame = row >= 0 && row < frames.Length ? frames[row] : null;
                 var depth = row - (lane == 0 ? 0 : lane < 0 ? 3.5 : 1.5);
                 var root = new Canvas { Width = 0, Height = 0 };
-                var glass = new Border { Width = 535, Height = 650, Background = Design.GlassBrush, BorderBrush = Design.RimBrush, BorderThickness = new(1.5), CornerRadius = new(2) };
+                var glass = new Border { Width = 535, Height = 650, Background = Design.Brush(Design.Dark ? Color.FromArgb(110, 80, 83, 90) : Color.FromArgb(65, 255, 255, 255)), BorderBrush = Design.RimBrush, BorderThickness = new(1.5), CornerRadius = new(2) };
                 var image = new Image { Width = 495, Height = 309.375, Stretch = Stretch.Uniform, Opacity = Design.Dark ? .78 : 1 };
-                var art = new Grid { Width = 495, Height = 309.375, Background = Design.GlassBrush };
+                var art = new Grid { Width = 495, Height = 309.375, Background = Design.Brush(Design.Dark ? Color.FromArgb(110, 80, 83, 90) : Color.FromArgb(65, 255, 255, 255)) };
                 art.Children.Add(image);
                 var footer = new Grid { Width = 495, Height = 100, Background = Design.Brush(Design.Dark ? Color.FromArgb(240, 37, 40, 45) : Color.FromArgb(235, 255, 255, 255)) };
                 var buttons = Design.Row(8);

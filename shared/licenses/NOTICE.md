@@ -15,3 +15,7 @@ This is an independent implementation. It is not an official Rewind product.
 - SQLite — public domain. https://sqlite.org/copyright.html
 
 Additional notices shipped with vendor binary archives, including LLVM/OpenMP notices, are retained alongside the libraries. Model licenses and engine notices are bundled with both applications. OS frameworks are supplied by the operating system.
+
+LiquidGlassWinUI 1.0.3 (MIT), https://github.com/luckyelysia/LiquidGlassWinUI,
+provides the Windows liquid glass effect brush and native effect runtime.
+See LiquidGlassWinUI-MIT.txt. It requires the bundled Windows App SDK 2.2.0 x64.
