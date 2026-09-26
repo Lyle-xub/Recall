@@ -41,12 +41,34 @@ struct ComfortableButtonStyle: ButtonStyle {
     }
 }
 
+private struct GlassArchiveAppearanceKey: EnvironmentKey { static let defaultValue = false }
+extension EnvironmentValues {
+    var glassArchiveAppearance: Bool {
+        get { self[GlassArchiveAppearanceKey.self] }
+        set { self[GlassArchiveAppearanceKey.self] = newValue }
+    }
+}
+
 extension View {
-    /// Ivory frosted sheet. The overlay window is transparent, so the system
-    /// liquid glass would sample the desktop behind the window instead of the
-    /// archive backdrop drawn inside it; this fill keeps the scene coherent.
+    /// Classic mode samples the live desktop using native glass. The opaque
+    /// archive scene uses its own ivory surface so its controls match the cards.
     func liquidGlass(radius: CGFloat = 24, interactive: Bool = true) -> some View {
-        modifier(IvoryGlassModifier(radius:radius))
+        modifier(ModeGlassModifier(radius:radius,interactive:interactive))
+    }
+}
+
+private struct ModeGlassModifier: ViewModifier {
+    let radius: CGFloat
+    let interactive: Bool
+    @Environment(\.glassArchiveAppearance) private var archive
+    func body(content:Content)->some View {
+        if archive {
+            content.modifier(IvoryGlassModifier(radius:radius))
+        } else if #available(macOS 26.0, *) {
+            content.glassEffect(.regular.interactive(interactive),in:RoundedRectangle(cornerRadius:radius,style:.continuous))
+        } else {
+            content.background(.regularMaterial,in:RoundedRectangle(cornerRadius:radius,style:.continuous))
+        }
     }
 }
 
@@ -65,8 +87,12 @@ private struct IvoryGlassModifier: ViewModifier {
 
 struct SearchGlassGroup<Content:View>: View {
     @ViewBuilder var content:()->Content
+    @Environment(\.glassArchiveAppearance) private var archive
     var body:some View {
-        content()
+        if !archive {
+            if #available(macOS 26.0, *) { GlassEffectContainer(spacing:18) { content() } }
+            else { content() }
+        } else { content() }
     }
 }
 
@@ -74,8 +100,12 @@ struct SearchGlassSurface: ViewModifier {
     let id:String
     let namespace:Namespace.ID
     let radius:CGFloat
+    @Environment(\.glassArchiveAppearance) private var archive
     func body(content:Content)->some View {
-        content.liquidGlass(radius:radius)
+        if !archive {
+            if #available(macOS 26.0, *) { content.liquidGlass(radius:radius).glassEffectID(id,in:namespace) }
+            else { content.liquidGlass(radius:radius) }
+        } else { content.liquidGlass(radius:radius) }
     }
 }
 

@@ -93,6 +93,36 @@ final class TimelineTests: XCTestCase {
         XCTAssertEqual(NSApplication.shared.presentationOptions,original)
         XCTAssertFalse(controller.panel.isVisible)
     }
+    @MainActor func testClassicTimelineReturnsAfterSwitchingModesAndSearch() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at:root) }
+        let model = try AppModel(root:root)
+        model.onboardingOpen = false
+        let parent = NSWindow(contentRect:CGRect(x:0,y:0,width:1200,height:800),styleMask:.borderless,backing:.buffered,defer:false)
+        parent.isReleasedWhenClosed = false
+        let controller = TimelinePanelController(parent:parent,model:model)
+        defer { controller.dismiss();parent.orderOut(nil);model.prepareToQuit() }
+        parent.orderFront(nil);controller.present()
+        try await Task.sleep(for:.milliseconds(350))
+        XCTAssertTrue(controller.panel.isVisible,"Classic timeline appears immediately without bottom-edge hover")
+        model.settings.glassArchiveEnabled = true
+        try await Task.sleep(for:.milliseconds(350))
+        XCTAssertFalse(controller.panel.isVisible,"Glass archive keeps the strip out of the resting scene")
+        model.settings.glassArchiveEnabled = false
+        try await Task.sleep(for:.milliseconds(350))
+        XCTAssertTrue(controller.panel.isVisible,"Switching back restores the timeline immediately")
+        model.showSearch()
+        try await Task.sleep(for:.milliseconds(350))
+        XCTAssertFalse(controller.panel.isVisible)
+        model.returnToDesktop()
+        try await Task.sleep(for:.milliseconds(350))
+        XCTAssertFalse(model.searchPresented)
+        XCTAssertTrue(controller.panel.isVisible,"Returning from search must restore the classic timeline")
+        controller.dismiss();controller.present()
+        try await Task.sleep(for:.milliseconds(350))
+        XCTAssertTrue(controller.panel.isVisible,"Reopening classic mode keeps the timeline available")
+        await model.shutDownRecording();await model.storageOptimizer.stop()
+    }
     @MainActor func testBlurMaskExistsBeforeTheFirstWindowLayout() {
         let view = DesktopEffectView(frame:NSRect(x:0,y:0,width:1200,height:220))
         XCTAssertNil(view.window)

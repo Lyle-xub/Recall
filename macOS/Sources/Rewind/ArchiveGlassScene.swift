@@ -34,6 +34,9 @@ private final class ArchiveRecordControl: SCNNode {
     var onPresentationChanged:(()->Void)?
     private(set) var dayColumns:[ArchiveDayColumn] = []
     private var currentID:String?
+    private(set) var hoveredID:String?
+    private var focalDistance = ArchiveMotionSpring(value:33.5)
+    private var aperture = ArchiveMotionSpring(value:5.8)
     private var frameKeys:[String] = []
     private var surfaceKeys:[String:String] = [:]
     private var night = false
@@ -175,11 +178,11 @@ private final class ArchiveRecordControl: SCNNode {
     }
 
     func hover(_ id:String?) {
-        guard !reducedMotion,currentID == nil else { return }
-        if let id,let slot = slots[id] {
-            crestTarget = slot.depth;acrossTarget = Double(slot.lane)
-        } else { crestTarget = Double(scrollOffset);acrossTarget = 0 }
-        wake()
+        let next = id.flatMap { framesByID[$0] == nil ? nil:$0 }
+        guard hoveredID != next else { return }
+        hoveredID = next
+        // Focus is useful even when Reduce Motion disables the wave.
+        if reducedMotion { advance(dt:1,immediate:true) } else { wake() }
     }
     func pointer(at point:CGPoint) {
         guard !reducedMotion,currentID == nil else { return }
@@ -263,8 +266,25 @@ private final class ArchiveRecordControl: SCNNode {
                 } else { extractions[id] = motion }
             }
         }
-        cameraNode.camera?.focusDistance = 33.5-19.5*focus
-        cameraNode.camera?.fStop = 5.8+58.2*focus
+        // Focus in camera space, so the hovered screenshot stays sharp as
+        // the wave moves it or scrolling changes the camera position.
+        let hovered = hoveredID.flatMap { nodes[$0] }
+        let distance = hovered.map { node in
+            Double(-cameraNode.convertPosition(node.worldPosition,from:nil).z)
+        } ?? 33.5
+        let desiredDistance = distance+(14-distance)*focus
+        let idleAperture = hovered == nil ? 5.8:18.0
+        let desiredAperture = idleAperture+(64-idleAperture)*focus
+        if immediate {
+            focalDistance = ArchiveMotionSpring(value:desiredDistance)
+            aperture = ArchiveMotionSpring(value:desiredAperture)
+        } else {
+            focalDistance.step(to:desiredDistance,frequency:12,dt:dt)
+            aperture.step(to:desiredAperture,frequency:12,dt:dt)
+        }
+        cameraNode.camera?.focusDistance = focalDistance.value
+        cameraNode.camera?.fStop = CGFloat(aperture.value)
+        active = active || !focalDistance.settled(at:desiredDistance) || !aperture.settled(at:desiredAperture)
         onPresentationChanged?()
         if !active { stopMotion() }
     }
@@ -458,6 +478,7 @@ private final class ArchiveSceneView: SCNView {
     override func mouseMoved(with event:NSEvent) {
         let p = convert(event.locationInWindow,from:nil)
         onPointer?(CGPoint(x:p.x/max(1,bounds.width),y:p.y/max(1,bounds.height)))
+        onHover?(memoryID(at:p))
     }
     override func mouseExited(with event:NSEvent) { onHover?(nil) }
     override func scrollWheel(with event:NSEvent) {
@@ -502,6 +523,7 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
     let reduced:Bool
     let onSelect:(String?)->Void
     let onRecordAction:(String,String)->Void
+    var onHoverRecord:((String?)->Void)? = nil
     func makeCoordinator()->ArchiveGlassScene { ArchiveGlassScene() }
     func makeNSView(context:Context)->SCNView {
         let view = ArchiveSceneView(frame:.zero)
@@ -512,7 +534,7 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
         view.preferredFramesPerSecond = 60
         view.rendersContinuously = false;view.isPlaying = true
         view.onSelect = onSelect
-        view.onHover = { [weak coordinator = context.coordinator] id in coordinator?.hover(id) }
+        view.onHover = { [weak coordinator = context.coordinator] id in coordinator?.hover(id);onHoverRecord?(id) }
         view.onPointer = { [weak coordinator = context.coordinator] point in coordinator?.pointer(at:point) }
         view.onAction = { [weak coordinator = context.coordinator] hit in
             guard let (id,action) = coordinator?.action(at:hit) else { return false }
@@ -525,6 +547,7 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
     func updateNSView(_ view:SCNView,context:Context) {
         (view as? ArchiveSceneView)?.onSelect = onSelect
         (view as? ArchiveSceneView)?.selectedRegions = regions
+        (view as? ArchiveSceneView)?.onHover = { [weak coordinator = context.coordinator] id in coordinator?.hover(id);onHoverRecord?(id) }
         (view as? ArchiveSceneView)?.onAction = { [weak coordinator = context.coordinator] hit in
             guard let (id,action) = coordinator?.action(at:hit) else { return false }
             onRecordAction(id,action);return true

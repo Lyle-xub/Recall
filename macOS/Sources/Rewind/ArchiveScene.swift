@@ -127,6 +127,7 @@ struct ThemeTogglePill: View {
 struct ArchiveStackView: View {
     @ObservedObject var model: AppModel
     @Binding var focusedID: String?
+    @State private var hoveredID:String?
     @State private var images: [String:NSImage] = [:]
     @State private var recognizedRegions:[String:[TextRegion]] = [:]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -135,7 +136,7 @@ struct ArchiveStackView: View {
         GeometryReader { geo in
             ZStack {
                 ArchiveGlassRenderer(frames:frames,images:images,appearance:model.settings.appearance,
-                    selected:focusedID,day:model.archiveDay,regions:focusedID.flatMap { recognizedRegions[$0] } ?? [],size:geo.size,reduced:reduceMotion,onSelect:toggle,onRecordAction:recordAction)
+                    selected:focusedID,day:model.archiveDay,regions:focusedID.flatMap { recognizedRegions[$0] } ?? [],size:geo.size,reduced:reduceMotion,onSelect:toggle,onRecordAction:recordAction,onHoverRecord:{ hoveredID = $0 })
                     .accessibilityRepresentation {
                         VStack {
                             ForEach(frames) { frame in
@@ -162,6 +163,15 @@ struct ArchiveStackView: View {
                         Button { focusedID = nil;model.moveArchiveDay(by:1) } label: { Image(systemName:"chevron.right").frame(width:30,height:28) }.help("后一天")
                     }.font(.system(size:11,weight:.medium)).buttonStyle(.plain)
                         .padding(.horizontal,12).background(.regularMaterial,in:Capsule()).padding(.bottom,22)
+                }
+            }
+            .task(id:hoveredID) {
+                guard focusedID == nil,let id = hoveredID,let frame = frames.first(where: { $0.id == id }) else { return }
+                // Coalesce pointer sweeps instead of decoding every crossed card.
+                do { try await Task.sleep(for:.milliseconds(100)) } catch { return }
+                guard let pixels = await MemoryImagePipeline.previews.image(at:model.store.root.appendingPathComponent(frame.imagePath),maxPixels:1600),!Task.isCancelled else { return }
+                if CGFloat(pixels.width) > (images[frame.imagePath]?.size.width ?? 0) {
+                    images[frame.imagePath] = NSImage(cgImage:pixels,size:NSSize(width:pixels.width,height:pixels.height))
                 }
             }
             .task(id:focusedID) {

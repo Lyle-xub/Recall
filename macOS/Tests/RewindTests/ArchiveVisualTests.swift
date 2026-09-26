@@ -94,6 +94,15 @@ final class ArchiveVisualTests: XCTestCase {
         for _ in 0..<120 { moving.advance(dt:1/60) }
         let id = try XCTUnwrap(model.archiveFrames.max(by: { $0.timestamp < $1.timestamp })?.id)
         let card = try XCTUnwrap(moving.scene.rootNode.childNode(withName:id,recursively:true))
+        moving.hover(id)
+        for _ in 0..<120 { moving.advance(dt:1/60) }
+        XCTAssertEqual(moving.hoveredID,id)
+        XCTAssertEqual(moving.cameraNode.camera!.focusDistance,Double(-moving.cameraNode.convertPosition(card.worldPosition,from:nil).z),accuracy:0.01)
+        XCTAssertEqual(moving.cameraNode.camera!.fStop,18,accuracy:0.01)
+        try snapshot("ridge-hover-focused")
+        moving.hover(nil)
+        for _ in 0..<120 { moving.advance(dt:1/60) }
+        XCTAssertEqual(moving.cameraNode.camera!.focusDistance,33.5,accuracy:0.01)
         let original = card.simdTransform
         configure(id)
         for step in 1...120 {
@@ -155,12 +164,20 @@ final class ArchiveVisualTests: XCTestCase {
             let host = NSHostingView(rootView:view.frame(width:size.width,height:size.height))
             window.setContentSize(size);window.contentView = host;window.orderFront(nil)
             try await Task.sleep(for:.seconds(4))
+            // GPU contention can delay animation ticks; inspect the settled
+            // state instead of assuming four wall-clock seconds is enough.
+            if open {
+                for _ in 0..<100 {
+                    if let overlay = selectionOverlay(in:host),!overlay.isHidden,overlay.frame.width > size.width*0.5 { break }
+                    try await Task.sleep(for:.milliseconds(100))
+                }
+            }
             host.layoutSubtreeIfNeeded()
             // AppKit cacheDisplay omits Metal-backed layers. Snapshot those
             // with SceneKit itself, then include the pixels as a test-only
             // image subview during the complete native-window capture.
             let replacements = materializeMetal(in:host)
-            if name == "archive-disabled" { XCTAssertTrue(replacements.isEmpty,"Disabled archive must not mount a 3D renderer");XCTAssertTrue(model.searchPresented) }
+            if name == "archive-disabled" { XCTAssertTrue(replacements.isEmpty,"Disabled archive must not mount a 3D renderer");XCTAssertFalse(model.searchPresented,"Classic mode must open the timeline desktop, not search results") }
             defer { replacements.forEach { $0.removeFromSuperview() } }
             let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in:host.bounds))
             host.cacheDisplay(in:host.bounds,to:bitmap)

@@ -145,7 +145,7 @@ struct SettingsView: View {
                     }.labelsHidden().pickerStyle(.segmented).frame(width:154)
                 }
                 Divider().opacity(0.5)
-                SettingsToggle(title:"玻璃档案首页",detail:"按日期浏览玻璃卡片与波浪动效；关闭后使用记忆库。",value:$draft.glassArchiveEnabled)
+                SettingsToggle(title:"玻璃档案首页",detail:"开启：按日期浏览玻璃卡片；关闭：恢复原来的透明桌面与时间线。",value:$draft.glassArchiveEnabled)
                 Divider().opacity(0.5)
                 SettingsToggle(title:"Show Recall in Dock",detail:"Keep an app icon in the Dock and app switcher.",value:$draft.showDockIcon)
                 Text("The menu bar icon and shortcuts remain available either way.").font(.system(size:11)).foregroundStyle(.secondary)

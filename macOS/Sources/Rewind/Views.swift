@@ -43,7 +43,6 @@ struct RootView: View {
     @Namespace private var searchGlassNamespace
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var expanded: Bool { model.searchPresented || model.askOpen || model.inspectorOpen }
-    private var libraryHome: Bool { !model.settings.glassArchiveEnabled && !expanded && model.selected == nil && model.timelineCursor == nil }
     private var compactSearch: Bool { expanded || model.selected != nil }
     private var showSearchActions: Bool { searchEngaged || compactSearch }
     var body: some View {
@@ -74,7 +73,11 @@ struct RootView: View {
         GeometryReader { geo in
             let top = model.desktopInsets.top
             ZStack {
-                ArchiveBackdrop(appearance:model.settings.appearance).ignoresSafeArea().allowsHitTesting(false)
+                if model.settings.glassArchiveEnabled {
+                    ArchiveBackdrop(appearance:model.settings.appearance).ignoresSafeArea().allowsHitTesting(false)
+                } else if expanded {
+                    DesktopBlur().ignoresSafeArea().allowsHitTesting(false)
+                }
                 DesktopClickShield {
                     searchFocused = false
                     if archiveFocusedID != nil {
@@ -103,17 +106,19 @@ struct RootView: View {
                             .font(.system(size:12)).foregroundStyle(.secondary).padding(.horizontal,18).padding(.vertical,12)
                             .liquidGlass(radius:18,interactive:false).position(x:geo.size.width/2,y:geo.size.height*0.425+90)
                     }
-                    archiveCaptions(size:geo.size,top:top)
+                    if model.settings.glassArchiveEnabled { archiveCaptions(size:geo.size,top:top) }
                 }
-                if showSearchActions {
+                if showSearchActions || !model.settings.glassArchiveEnabled {
                     searchToolbar(width:min(1020,geo.size.width-196))
-                        .frame(height:58)
-                        .position(x:geo.size.width/2,y:top+43)
+                        .frame(height:showSearchActions ? 58:72)
+                        .position(x:geo.size.width/2,y:showSearchActions ? top+43:geo.size.height*0.425)
                         .transition(.opacity.combined(with:.scale(scale:0.94)))
                         .zIndex(5)
                 }
                 HStack {
-                    if expanded || model.selected != nil || showSearchActions || archiveFocusedID != nil {
+                    if !model.settings.glassArchiveEnabled {
+                        BareIconButton(symbol:expanded || model.selected != nil ? "arrow.left":"xmark",label:expanded ? "Back to desktop":"Close Recall") { goBack() }
+                    } else if expanded || model.selected != nil || showSearchActions || archiveFocusedID != nil {
                         BareIconButton(symbol:"arrow.left",label:model.settings.glassArchiveEnabled ? "返回档案":"返回记忆库") { goBack() }.frame(width:showSearchActions ? 58:34,height:58)
                     } else {
                         VStack(alignment:.leading,spacing:3) {
@@ -125,23 +130,29 @@ struct RootView: View {
                     Spacer()
                     if !showSearchActions {
                         HStack(spacing:geo.size.width < 1050 ? 9:18) {
-                            archiveNavigation("记忆库",symbol:"folder",compact:geo.size.width < 1050) { model.query = ""; model.showSearch() }
-                            archiveNavigation("搜索",symbol:"magnifyingglass",compact:geo.size.width < 1050) { searchEngaged = true; searchFocused = true }
-                            ThemeTogglePill(appearance:model.settings.appearance) { model.toggleAppearance() }
+                            if model.settings.glassArchiveEnabled {
+                                archiveNavigation("记忆库",symbol:"folder",compact:geo.size.width < 1050) { model.query = ""; model.showSearch() }
+                                archiveNavigation("搜索",symbol:"magnifyingglass",compact:geo.size.width < 1050) { searchEngaged = true; searchFocused = true }
+                                ThemeTogglePill(appearance:model.settings.appearance) { model.toggleAppearance() }
+                            } else {
+                                BareIconButton(symbol:"folder",label:"Browse all memories") { model.query = ""; model.showSearch() }
+                            }
                             BareIconButton(symbol:"slider.horizontal.3",label:"Settings") { model.settingsOpen = true }
                             Rectangle().fill(Color.primary.opacity(0.16)).frame(width:1,height:16)
                             Text("\(model.total)").font(.system(size:13,weight:.medium).monospacedDigit()).fixedSize().foregroundStyle(Color.overlayControl)
                             BareIconButton(symbol:model.recordingRequested ? "pause":"play",label:model.recordingActionTitle,size:13) { model.toggleRecording() }
                             menu
-                            BareIconButton(symbol:"xmark",label:"关闭 Recall",size:11) { model.hideOverlay() }
+                            if model.settings.glassArchiveEnabled { BareIconButton(symbol:"xmark",label:"关闭 Recall",size:11) { model.hideOverlay() } }
                         }.transition(.opacity)
                     }
-                }.padding(.horizontal,34).position(x:geo.size.width/2,y:top+(showSearchActions ? 43:59))
+                }.padding(.horizontal,34).position(x:geo.size.width/2,y:top+(showSearchActions || !model.settings.glassArchiveEnabled ? 43:59))
+                if model.settings.glassArchiveEnabled {
                 Text("● \(model.apps.count) 个应用 · \(model.total) 条记忆 · 本地索引")
                     .font(.system(size:11,weight:.medium)).foregroundStyle(.secondary)
                     .frame(maxWidth:.infinity,alignment:.leading).padding(.horizontal,40)
                     .position(x:geo.size.width/2,y:top+131).allowsHitTesting(false)
                     .opacity(showSearchActions || expanded || model.selected != nil ? 0:1)
+                }
                 if let toast = model.toast {
                     Text(toast).font(.system(size:12,weight:.medium)).padding(.horizontal,19).padding(.vertical,11)
                         .liquidGlass(radius:20).position(x:geo.size.width/2,y:geo.size.height-240).allowsHitTesting(false)
@@ -154,14 +165,11 @@ struct RootView: View {
             .animation(reduceMotion ? nil:.spring(response:0.58,dampingFraction:0.64),value:showSearchActions)
         }
         .font(.system(size:14)).buttonStyle(ComfortableButtonStyle()).controlSize(.large).frame(minWidth:800,minHeight:600)
-        .preferredColorScheme(ArchiveTone.colorScheme(model.settings.appearance))
-        .task(id:libraryHome) {
-            if libraryHome { model.showSearch() }
-        }
+        .preferredColorScheme(model.settings.glassArchiveEnabled ? ArchiveTone.colorScheme(model.settings.appearance):nil)
+        .environment(\.glassArchiveAppearance,model.settings.glassArchiveEnabled)
         .onChange(of:model.settings.glassArchiveEnabled) { _,enabled in
             archiveFocusedID = nil;searchFocused = false;searchEngaged = false
             model.returnToDesktop()
-            if !enabled { model.showSearch() }
         }
         .sheet(isPresented:$model.settingsOpen) { SettingsView(model:model) }
         .sheet(isPresented:$model.usageOpen) { AppUsageView(model:model) }
@@ -169,7 +177,7 @@ struct RootView: View {
         .onChange(of:model.appFilter) { _,_ in model.reload() }
         .onChange(of:model.starredOnly) { _,_ in model.reload() }
         .onChange(of:model.since) { _,_ in model.reload() }
-        .onReceive(NotificationCenter.default.publisher(for:Notification.Name("RewindPrepareSearch"))) { _ in searchEngaged = true; searchFocused = true }
+        .onReceive(NotificationCenter.default.publisher(for:Notification.Name("RewindPrepareSearch"))) { _ in searchEngaged = model.searchPresented; searchFocused = model.searchPresented }
         .onReceive(NotificationCenter.default.publisher(for:Notification.Name("RewindFocusSearch"))) { _ in searchEngaged = true; searchFocused = true }
         .onReceive(NotificationCenter.default.publisher(for:.recallGoBack)) { _ in goBack() }
         .onExitCommand { goBack() }
@@ -179,9 +187,6 @@ struct RootView: View {
         searchFocused = false; searchEngaged = false
         if archiveFocusedID != nil,!expanded,model.selected == nil {
             withAnimation(reduceMotion ? nil:.spring(response:0.76,dampingFraction:0.86)) { archiveFocusedID = nil }
-        }
-        else if !model.settings.glassArchiveEnabled,model.searchPresented,!model.askOpen,!model.inspectorOpen,model.selected == nil,model.query.isEmpty,model.appFilter == nil,model.since == nil,!model.starredOnly,!model.trash {
-            model.hideOverlay()
         }
         else if model.inspectorOpen { model.inspectorOpen = false }
         else if expanded || model.selected != nil { model.returnToDesktop() }

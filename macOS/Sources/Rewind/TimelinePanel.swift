@@ -42,6 +42,7 @@ import Combine
         for notification in [NSWindow.didMoveNotification,NSWindow.didResizeNotification] {
             NotificationCenter.default.publisher(for:notification,object:parent).sink { [weak self] _ in self?.updateFrame() }.store(in:&subscriptions)
         }
+        model.$settings.map(\.glassArchiveEnabled).removeDuplicates().receive(on:RunLoop.main).sink { [weak self] _ in self?.sync() }.store(in:&subscriptions)
         model.$timelineCursor.removeDuplicates().sink { [weak self] _ in self?.sync() }.store(in:&subscriptions)
         NotificationCenter.default.publisher(for:NSApplication.didHideNotification).sink { [weak self] _ in self?.dismiss() }.store(in:&subscriptions)
     }
@@ -53,7 +54,7 @@ import Combine
     }
     private func sync() {
         guard presented, let parent, parent.isVisible,
-              hoverReveal || model.timelineCursor != nil,
+              !model.settings.glassArchiveEnabled || hoverReveal || model.timelineCursor != nil,
               !model.searchPresented, !model.askOpen, !model.inspectorOpen, !model.settingsOpen, !model.usageOpen, !model.onboardingOpen else {
             setVisible(false); return
         }
@@ -97,11 +98,16 @@ private struct AnimatedTimelineStrip: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
         ZStack {
-            ArchiveStripBackground(appearance:model.settings.appearance).allowsHitTesting(false)
+            if model.settings.glassArchiveEnabled {
+                ArchiveStripBackground(appearance:model.settings.appearance).allowsHitTesting(false)
+            } else {
+                DesktopBlur(fadesUpward:true).allowsHitTesting(false)
+            }
             TimelineView(model:model,jumpOpen:Binding(get:{model.timelineJumpOpen},set:{model.timelineJumpOpen = $0}))
                 .offset(y:motion.visible || reduceMotion ? 0:20)
         }.frame(height:TimelinePanelController.height)
-        .preferredColorScheme(ArchiveTone.colorScheme(model.settings.appearance))
+        .preferredColorScheme(model.settings.glassArchiveEnabled ? ArchiveTone.colorScheme(model.settings.appearance):nil)
+        .environment(\.glassArchiveAppearance,model.settings.glassArchiveEnabled)
         .onExitCommand { model.dismissTimeline() }
     }
 }
