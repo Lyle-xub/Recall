@@ -47,6 +47,8 @@ final class ArchiveVisualTests: XCTestCase {
         XCTAssertFalse(records.isEmpty,"Visual verification requires actual recorded screenshots")
         let root = destination.appendingPathComponent("records-"+UUID().uuidString)
         let model = try AppModel(root:root)
+        model.interfaceVisibilityChanged(true)
+        defer { model.interfaceVisibilityChanged(false) }
         model.onboardingOpen = false; model.launchFilmOpen = false
         model.settings.onboardingComplete = true; model.settings.launchFilmSeen = true;model.settings.glassArchiveEnabled = true
         for record in records {

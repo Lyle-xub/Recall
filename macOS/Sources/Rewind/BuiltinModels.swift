@@ -160,8 +160,8 @@ actor LocalInference {
         try await withTaskCancellationHandler(operation:{ try await conversion.value },onCancel:{ conversion.cancel() })
         try Task.checkCancellation()
         let output = temporary.appendingPathComponent("transcript");let process = Process();process.executableURL = executable
-        process.arguments = ["-m",model.path,"-f",wave.path,"-l","auto","-oj","-of",output.path,"-t",String(max(1,min(4,ProcessInfo.processInfo.activeProcessorCount / 2))),"-np"]
-        process.qualityOfService = .utility
+        process.arguments = ["-m",model.path,"-f",wave.path,"-l","auto","-oj","-of",output.path,"-t",String(max(1,min(2,ProcessInfo.processInfo.activeProcessorCount / 2))),"-np"]
+        process.qualityOfService = .background
         process.standardOutput = FileHandle.nullDevice;process.standardError = FileHandle.nullDevice;try process.run();speech = process
         defer {if process.isRunning {process.terminate()};speech = nil}
         let deadline = Date().addingTimeInterval(900)

@@ -31,7 +31,9 @@ final class NeuralOCR: @unchecked Sendable {
         let worker = Process(),inPipe = Pipe(),outPipe = Pipe()
         worker.executableURL = root.appendingPathComponent("recall-ocr");worker.arguments = [root.path]
         worker.standardInput = inPipe;worker.standardOutput = outPipe;worker.standardError = FileHandle.nullDevice
-        worker.qualityOfService = .utility
+        worker.qualityOfService = .background
+        // Bound Accelerate helpers too; ONNX's own pool is capped in the worker.
+        worker.environment = ProcessInfo.processInfo.environment.merging(["VECLIB_MAXIMUM_THREADS":"2"]) { _,limit in limit }
         try worker.run();process = worker;input = inPipe.fileHandleForWriting;output = outPipe.fileHandleForReading
     }
     func recognize(_ image:CGImage,source:URL? = nil) throws -> (String,[TextRegion]) {

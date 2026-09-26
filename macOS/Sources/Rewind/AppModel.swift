@@ -9,6 +9,7 @@ import ServiceManagement
     let capture: CaptureEngine
     let storageOptimizer: StorageOptimizer
     @Published var settings: AppSettings
+    @Published private(set) var interfaceVisible = false
     @Published var frames: [MemoryFrame] = []
     @Published var archiveFrames: [MemoryFrame] = []
     @Published var archiveTimelinePosition:Date?
@@ -537,6 +538,7 @@ import ServiceManagement
     }
     func interfaceVisibilityChanged(_ visible:Bool) {
         // Visibility controls capture, never processing of already saved media.
+        interfaceVisible = visible
         capture.setInterfaceVisible(visible)
         storageOptimizer.setInterfaceVisible(visible)
         recordingCoordinator.setInterfaceVisible(visible)

@@ -13,10 +13,15 @@ struct PackedScreen:Codable,Sendable {
     static let fileExtension = "recallframe"
     private final class Encoded:NSObject {let tile:ScreenTile;init(_ tile:ScreenTile){self.tile=tile}}
     private final class Decoded:NSObject {let image:CGImage;init(_ image:CGImage){self.image=image}}
-    private static let encodedCache:NSCache<NSString,Encoded> = {let c=NSCache<NSString,Encoded>();c.countLimit=256;c.totalCostLimit=32*1024*1024;return c}()
+    private static let encodedCache:NSCache<NSString,Encoded> = {let c=NSCache<NSString,Encoded>();c.countLimit=1024;c.totalCostLimit=32*1024*1024;return c}()
     private static let decodedCache:NSCache<NSString,Decoded> = {let c=NSCache<NSString,Decoded>();c.countLimit=128;c.totalCostLimit=96*1024*1024;return c}()
     static func encode(_ image:CGImage) throws -> ScreenArchive {
         guard image.width > 0,image.height > 0,image.width <= 16000,image.height <= 16000,image.width*image.height <= 40_000_000 else {return try ScreenArchive.make(image)}
+        // Normalize/decode once. Drawing a crop of an ImageIO-backed image for
+        // every tile can repeat decoding and color conversion of its source.
+        guard let context=CGContext(data:nil,width:image.width,height:image.height,bitsPerComponent:8,bytesPerRow:image.width*4,space:CGColorSpace(name:CGColorSpace.sRGB)!,bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue) else {throw RewindError.message("Could not archive this screenshot.")}
+        context.draw(image,in:CGRect(x:0,y:0,width:image.width,height:image.height))
+        guard let pixels=context.data,let normalizedImage=context.makeImage() else {throw RewindError.message("Could not prepare image tiles.")}
         var entries:[Tile]=[],payload:[String:ScreenTile]=[:]
         let side=384
         for y in stride(from:0,to:image.height,by:side) {
@@ -24,20 +29,28 @@ struct PackedScreen:Codable,Sendable {
             for x in stride(from:0,to:image.width,by:side) {
                 let width=min(side,image.width-x),height=min(side,image.height-y)
                 let tile = try autoreleasepool { () throws -> ScreenTile in
-                    guard let crop=image.cropping(to:CGRect(x:x,y:y,width:width,height:height)),
-                          let context=CGContext(data:nil,width:width,height:height,bitsPerComponent:8,bytesPerRow:width*4,space:CGColorSpace(name:CGColorSpace.sRGB)!,bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue) else {throw RewindError.message("Could not archive this screenshot.")}
-                    context.draw(crop,in:CGRect(x:0,y:0,width:width,height:height))
-                    guard let pixels=context.data,let normalized=context.makeImage() else {throw RewindError.message("Could not prepare image tiles.")}
-                    let key="t1-q\(ScreenArchive.compressionQuality)-\(width)-\(height)-"+ImageArchive.digest(Data(bytes:pixels,count:width*height*4))
+                    guard let normalized=normalizedImage.cropping(to:CGRect(x:x,y:y,width:width,height:height)) else {throw RewindError.message("Could not prepare image tiles.")}
+                    var bytes=Data(count:width*height*4)
+                    bytes.withUnsafeMutableBytes { buffer in
+                        for row in 0..<height {
+                            memcpy(buffer.baseAddress!.advanced(by:row*width*4),pixels.advanced(by:(y+row)*image.width*4+x*4),width*4)
+                        }
+                    }
+                    let key="t1-q\(ScreenArchive.compressionQuality)-\(width)-\(height)-"+ImageArchive.digest(bytes)
                     if let cached=encodedCache.object(forKey:key as NSString) {return cached.tile}
                     let png=try ScreenArchive.encode(normalized,type:.png)
-                    let raw=pixels.assumingMemoryBound(to:UInt8.self)
-                    let opaque=stride(from:3,to:width*height*4,by:4).allSatisfy {raw[$0]==255}
-                    let heic=opaque ? try? ScreenArchive.encode(normalized,type:.heic,quality:ScreenArchive.compressionQuality):nil
+                    // Starting a video codec for a tiny flat/text tile costs
+                    // more than the few KB it can save. Keep these lossless;
+                    // photos and other large tiles still use the compact codec.
+                    let tryHEIC=png.count > 16*1024 && bytes.withUnsafeBytes { buffer in
+                        let raw=buffer.bindMemory(to:UInt8.self)
+                        return stride(from:3,to:raw.count,by:4).allSatisfy {raw[$0]==255}
+                    }
+                    let heic=tryHEIC ? try? ScreenArchive.encode(normalized,type:.heic,quality:ScreenArchive.compressionQuality):nil
                     let useHEIC=heic.map { Double($0.count)*1.12 < Double(png.count) } ?? false
-                    let bytes=useHEIC ? heic!:png,ext=useHEIC ? "heic":"png"
-                    let result=ScreenTile(path:"frames/tiles/t1-"+ImageArchive.digest(bytes)+"."+ext,data:bytes)
-                    encodedCache.setObject(Encoded(result),forKey:key as NSString,cost:bytes.count)
+                    let encoded=useHEIC ? heic!:png,ext=useHEIC ? "heic":"png"
+                    let result=ScreenTile(path:"frames/tiles/t1-"+ImageArchive.digest(encoded)+"."+ext,data:encoded)
+                    encodedCache.setObject(Encoded(result),forKey:key as NSString,cost:encoded.count)
                     return result
                 }
                 payload[tile.path]=tile

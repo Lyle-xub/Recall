@@ -51,7 +51,9 @@ class Engine {
     }
 public:
     explicit Engine(const std::string& root) {
-        cv::setNumThreads(1);options.SetIntraOpNumThreads(4);options.SetInterOpNumThreads(1);
+        // Leave cores available for WindowServer, capture and foreground apps.
+        // Thread count changes scheduling only, not models or input resolution.
+        cv::setNumThreads(1);options.SetIntraOpNumThreads(2);options.SetInterOpNumThreads(1);
         options.DisableCpuMemArena();options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         options.AddConfigEntry("session.intra_op.allow_spinning","0");options.AddConfigEntry("session.inter_op.allow_spinning","0");
         det=Ort::Session(env,(root+"/det.onnx").c_str(),options);rec=Ort::Session(env,(root+"/rec.onnx").c_str(),options);

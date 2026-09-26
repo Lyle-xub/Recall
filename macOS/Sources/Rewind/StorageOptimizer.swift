@@ -78,6 +78,7 @@ import Combine
             }
             while !pending.isEmpty,!Task.isCancelled {
                 do { try await workGate.wait() } catch { break }
+                let started = Date()
                 let job = pending.removeFirst()
                 switch job {
                 case .index:
@@ -140,7 +141,9 @@ import Combine
                     checkedVideos += 1
                 }
                 // Leave room for capture/OCR and UI work between encodes.
-                try? await Task.sleep(for:.milliseconds(40))
+                if !pending.isEmpty {
+                    try? await Task.sleep(for:.seconds(BackgroundProcessingPolicy.recoveryInterval(after:Date().timeIntervalSince(started))))
+                }
             }
             let summary = "\(checkedImages) images · \(checkedVideos) videos · \(StorageUsage.formatted(savedBytes)) saved"
             status = Task.isCancelled ? "Paused · \(summary)":"Checked \(summary)\(keptVideos > 0 ? " · \(keptVideos) original videos kept":"")\(failed > 0 ? " · \(failed) items kept for retry":"")"

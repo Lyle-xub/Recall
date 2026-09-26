@@ -114,6 +114,7 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
     private var activationObserver: NSObjectProtocol?
     private var capturing = false
     private var interfaceVisible = false
+    private var nextIndexingAllowed = ContinuousClock.now
     private var starting = false
     private let diagnostics: CaptureDiagnostics
     private var meetingWindow: SCWindow?
@@ -318,6 +319,10 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
             defer { ocrTask = nil; recognizingText = false; processingFrame = false; publishRecognitionProgress() }
             var failures = 0
             while !ocrQueue.isEmpty,!Task.isCancelled {
+                // Retain the deadline even when the queue briefly empties, so
+                // incoming captures cannot bypass the background work budget.
+                do { try await ContinuousClock().sleep(until:nextIndexingAllowed) }
+                catch { break }
                 let queued = ocrQueue.removeFirst(),database = store
                 guard let frame = try? await Task.detached(priority:.utility,operation:{ try database.frame(queued.id) }).value,
                       frame.deletedAt == nil else { continue }
@@ -337,6 +342,7 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
                     let saved = try await Task.detached(priority:.utility) {
                         try database.updateIndex(frameID:frame.id,text:result.text,regions:result.regions,archive:result.archive,sourceURL:result.sourceURL)
                     }.value
+                    nextIndexingAllowed = .now.advanced(by:.seconds(BackgroundProcessingPolicy.recoveryInterval(after:Date().timeIntervalSince(started))))
                     guard let saved else { continue }
                     try Task.checkCancellation()
                     onIndexed?(saved)
