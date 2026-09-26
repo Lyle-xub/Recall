@@ -9,7 +9,7 @@ Work is paused at the user's request on `feat/windows-visual-parity`. This is an
 - Windows RDP validation was interrupted by another session taking over the desktop (error 0x5). No final screenshots or performance measurements establish the behavior of this new material. The measurements in `windows-visual-parity.md` describe the earlier implementation at `cd94476`.
 - Remaining work: verify material fallback and host-backdrop failure handling, tune blur/tint/refraction against the Mac reference, test both appearance modes in actual application pages, then measure idle and pointer-motion CPU/memory and GPU presentation on the Windows console.
 - `VisualParitySession` is opt-in via `--visual-parity <directory>`. Its optional `transport.json` currently targets the previous development machine's fixed private endpoint. On a new machine, omit that file and use the existing local `control.json` workflow, or deliberately reconfigure the transport. The normal application never opens this transport.
-- `.test-data/`, `release/`, local SDK/NuGet caches, recordings and connection credentials are not part of Git. Recreate the SDK/runtime dependencies on the new machine; do not assume the previous machine's test binaries or captures are available. The earlier portable ZIP does not contain this material checkpoint.
+- `.test-data/`, `release/`, local SDK/NuGet caches, recordings and connection credentials are not part of Git. Recreate the SDK/runtime dependencies on the new machine. The Mac reference captures and shared synthetic fixtures are now available in [the committed reference bundle](macos-visual-reference.md); other local test artifacts remain excluded. The earlier portable ZIP does not contain this material checkpoint.
 
 Build on Windows with .NET 10 x64:
 
@@ -43,6 +43,8 @@ NuGet 1.0.3 was built from upstream commit `77d9ff9d99a7c388c67e07d8c15755e79618
 - Existing bounded image caches, lazy image decoding and retained spring transforms remain in place.
 
 ## Reproducible validation
+
+Downloadable Mac captures, color-normalized references, all 16 application layout baselines and the 60 shared fixture images are committed under `docs/macos-visual-reference/`. See [Mac visual references](macos-visual-reference.md) for previews, provenance and Windows setup commands.
 
 `macOS/Tools/MaterialReference.swift` is a separate native AppKit/SwiftUI reference. It uses the same public liquid-glass API as the Mac application over a deterministic striped pattern. `MaterialReferenceView.cs` uses the same geometry and pattern with the real Windows production brushes. Neither harness opens a real recording library.
 

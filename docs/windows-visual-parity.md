@@ -10,6 +10,10 @@ applications, anchored at September 26, 2026. The same manifest and image bytes
 feed macOS and Windows. Tests never open the user's recording library or start
 recording.
 
+The [committed Mac reference bundle](macos-visual-reference.md) includes all 16
+layout captures, the 60 shared fixture images and separate onscreen native-glass
+references, with setup instructions for another machine.
+
 The opt-in macOS export renders actual SwiftUI/AppKit views and inserts SceneKit
 snapshots before `cacheDisplay`. Its 16 captures provide layout/artwork evidence;
 compositor-owned glass is not faithfully captured by that API. They must not be
@@ -78,8 +82,9 @@ continue honoring reduced motion.
 The [first-round results](windows-visual-parity-evidence/round1-results.png) retain
 the original wrapping defect for comparison. Raw sample metrics and environment
 are in [measurements.json](windows-visual-parity-evidence/measurements.json).
-Complete capture archives remain in `.test-data/windows-parity/` and on the target
-under `D:\RecallDevelopment\visual-validation`.
+Complete Windows capture archives remain in `.test-data/windows-parity/` and on
+the target under `D:\RecallDevelopment\visual-validation`. Mac baseline captures
+and synthetic fixture data are committed in `docs/macos-visual-reference/`.
 
 ### Measurements
 

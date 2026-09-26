@@ -1,0 +1,915 @@
+{
+  "schemaVersion": 1,
+  "logicalWidth": 1280,
+  "logicalHeight": 800,
+  "nativeGlass": {
+    "captureDate": "2026-09-27",
+    "source": "macOS/Tools/MaterialReference.swift",
+    "captureMethod": "Onscreen application-window capture",
+    "originalFormat": "JPEG bytes, original embedded display ICC profile retained",
+    "normalizedFormat": "Existing 1280x800 RGB PNG derivatives converted to sRGB before Lanczos resizing; JPEG capture artifacts remain",
+    "cases": [
+      {
+        "name": "mac-material-light",
+        "dark": false,
+        "blur": false
+      },
+      {
+        "name": "mac-material-dark",
+        "dark": true,
+        "blur": false
+      },
+      {
+        "name": "mac-background-light",
+        "dark": false,
+        "blur": true
+      },
+      {
+        "name": "mac-background-dark",
+        "dark": true,
+        "blur": true
+      }
+    ],
+    "limitations": [
+      "Blur uses withinWindow NSVisualEffectView, not a behind-window desktop equivalence test.",
+      "Static captures do not measure animation, input response or GPU presentation."
+    ]
+  },
+  "applicationBaseline": {
+    "source": "macOS/Tests/RewindTests/VisualParityReferenceTests.swift",
+    "captureCount": 16,
+    "pixelWidth": 2560,
+    "pixelHeight": 1600,
+    "backingScale": 2,
+    "environment": "app-baseline/environment.json",
+    "limitations": [
+      "cacheDisplay does not faithfully capture compositor-owned glass; use these for layout, content and SceneKit artwork.",
+      "Compare after matching logical geometry and color profiles."
+    ]
+  },
+  "fixtures": {
+    "manifest": "fixtures/fixture.json",
+    "records": 60,
+    "synthetic": true,
+    "days": 5,
+    "applications": [
+      "Research",
+      "Notes",
+      "Design"
+    ]
+  },
+  "files": [
+    {
+      "path": "native-glass/original/mac-material-light.jpg",
+      "role": "native-glass-original",
+      "bytes": 233035,
+      "sha256": "0ca87b5249adf71cc795e941b39bd73b8c72bc8e30e941e38d8c4b985b4711cb",
+      "format": "JPEG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "native-glass/srgb/mac-material-light.png",
+      "role": "native-glass-srgb",
+      "bytes": 199738,
+      "sha256": "229b79710701ff5f14001e7399dd1c64c50ad01f2dfe7aa9a3e71735561ac887",
+      "format": "PNG",
+      "width": 1280,
+      "height": 800,
+      "embeddedICC": true
+    },
+    {
+      "path": "native-glass/original/mac-material-dark.jpg",
+      "role": "native-glass-original",
+      "bytes": 214267,
+      "sha256": "86202422999a330ac51bab1fce0588116f4f90328f3275e44d37b7ff215c5af9",
+      "format": "JPEG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "native-glass/srgb/mac-material-dark.png",
+      "role": "native-glass-srgb",
+      "bytes": 169478,
+      "sha256": "6d31398861f2e86e8e47d1e1510e01c40b340c2c0fecbd239b105e691f424572",
+      "format": "PNG",
+      "width": 1280,
+      "height": 800,
+      "embeddedICC": true
+    },
+    {
+      "path": "native-glass/original/mac-background-light.jpg",
+      "role": "native-glass-original",
+      "bytes": 144414,
+      "sha256": "d840b829caf349275ad7bac7785c1f424d2cf465cb00be460ec7023f329ae8bb",
+      "format": "JPEG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "native-glass/srgb/mac-background-light.png",
+      "role": "native-glass-srgb",
+      "bytes": 74404,
+      "sha256": "51deff3c03cb6ac0dcf0df25686179661ed2a11b7aed5adb0ed925d495bd6fb0",
+      "format": "PNG",
+      "width": 1280,
+      "height": 800,
+      "embeddedICC": true
+    },
+    {
+      "path": "native-glass/original/mac-background-dark.jpg",
+      "role": "native-glass-original",
+      "bytes": 177837,
+      "sha256": "42f3d2e5268f146675cb35990d6d1544849a305600c27c1705f4b6a5c5294bd7",
+      "format": "JPEG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "native-glass/srgb/mac-background-dark.png",
+      "role": "native-glass-srgb",
+      "bytes": 139045,
+      "sha256": "eb2cb31cf38c209334b8dc151de1509972036781e611814e33ccab9302237abb",
+      "format": "PNG",
+      "width": 1280,
+      "height": 800,
+      "embeddedICC": true
+    },
+    {
+      "path": "app-baseline/classic-dark-home.png",
+      "role": "application-layout",
+      "bytes": 101942,
+      "sha256": "bd9eb03e34f578d9d4eeb78ab0794227b40aeee2fc7bdd01eaade33fac8e944c",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "app-baseline/classic-dark-results.png",
+      "role": "application-layout",
+      "bytes": 968131,
+      "sha256": "cd6fe03b4b115c19d20d94b119d2d1a4e59389c760845c18268c791d75880c2d",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "app-baseline/classic-dark-search.png",
+      "role": "application-layout",
+      "bytes": 915006,
+      "sha256": "59d74e8d33439995669ab5604bf98396859b1cee8473d5438139cb5dc15d5a4e",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "app-baseline/classic-light-home.png",
+      "role": "application-layout",
+      "bytes": 99935,
+      "sha256": "72d44cded7f4494b4d5d7d53d848d48b60bc961b5dac56c75946e3498f8a218e",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "app-baseline/classic-light-results.png",
+      "role": "application-layout",
+      "bytes": 962607,
+      "sha256": "fea03b19647b1df98a9dba07098f608c37c0e7b12df2a43fb65e898117076472",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "app-baseline/classic-light-search.png",
+      "role": "application-layout",
+      "bytes": 910723,
+      "sha256": "9fb0e1f498a54479990142e487f25a61e361b254c8dc6b9f3f4f8b371e3dfb28",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "app-baseline/rhine-dark-expanded.png",
+      "role": "application-layout",
+      "bytes": 2402383,
+      "sha256": "ebf2d311b883dbfbfde728ef922909a982e824cda874123c157cfbde3bb1bce6",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "app-baseline/rhine-dark-home.png",
+      "role": "application-layout",
+      "bytes": 2626226,
+      "sha256": "8e6bc4f8147ca3b8e51c1183dd7fe2faad051dc78593e7822dde5672faf7feee",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "app-baseline/rhine-dark-results.png",
+      "role": "application-layout",
+      "bytes": 1015257,
+      "sha256": "6d1acba08d41c7476fce2a4646903bf2c2b2b91acbf8a1c20c3aa1742b426b69",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "app-baseline/rhine-dark-search.png",
+      "role": "application-layout",
+      "bytes": 963251,
+      "sha256": "86e042171c82b34b75faa27703b5aa4e0205daa4234fd5f964f339100af5d499",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "app-baseline/rhine-light-expanded.png",
+      "role": "application-layout",
+      "bytes": 2506287,
+      "sha256": "e251e5faf5ddc976de6dbab59d618b5e088627b9f185769b3570880095b1ccb2",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "app-baseline/rhine-light-home.png",
+      "role": "application-layout",
+      "bytes": 2732220,
+      "sha256": "8e902898b7d2258a8ebcf32da0b4fe211e23ae049dae08af3d7fbaaafd13d87b",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "app-baseline/rhine-light-results.png",
+      "role": "application-layout",
+      "bytes": 1007260,
+      "sha256": "c6498cc76bcc8b81d5fbb465dba78e1ce780f2c22d1a8901914afafcffd359c9",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "app-baseline/rhine-light-search.png",
+      "role": "application-layout",
+      "bytes": 956099,
+      "sha256": "31ca23f00dbad82ef6a0b6c1beee1fb2db1386df089cbd58812ae428f45f8c75",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "app-baseline/settings-recording.png",
+      "role": "application-layout",
+      "bytes": 268788,
+      "sha256": "595c40a0ba673e03f207987bbb00afc45c821dd63874e2ac7da9eae30eda551e",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "app-baseline/settings-storage.png",
+      "role": "application-layout",
+      "bytes": 269092,
+      "sha256": "4005827813f394fae5ec8aad2785f5cdd4367920752978e1450434227ad401bb",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "app-baseline/environment.json",
+      "role": "capture-environment",
+      "bytes": 335,
+      "sha256": "8d444f67f7e14e87b3d0babf405535ab9474638987f0d898a8a3492dc99836b4"
+    },
+    {
+      "path": "fixtures/fixture.json",
+      "role": "synthetic-manifest",
+      "bytes": 16578,
+      "sha256": "461cac1240fdea49bcb4e42458da999d7c2d4fa3fc42446dcc9dbdd249713b12"
+    },
+    {
+      "path": "fixtures/frames/parity-0-0.png",
+      "role": "synthetic-frame",
+      "bytes": 846430,
+      "sha256": "2adf5db5cfbc87d206ac03e551b5ccfa3e9b93253e831dc857ac3a4abfab00cd",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-0-1.png",
+      "role": "synthetic-frame",
+      "bytes": 846452,
+      "sha256": "9701cec16cfb49f68f1f29bbb4eed1069029ae63868e12739e8ac32c9183f15a",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-0-2.png",
+      "role": "synthetic-frame",
+      "bytes": 851225,
+      "sha256": "cbd8d6615b87d1cf1abceb06d0a4edbcaddf334c89303faf2b1a3314923a67b9",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-0-3.png",
+      "role": "synthetic-frame",
+      "bytes": 846636,
+      "sha256": "04445365c019833c623fb089ec3d669d061d6fcabec17f5ddcab20124764aa4a",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-0-4.png",
+      "role": "synthetic-frame",
+      "bytes": 846620,
+      "sha256": "5b813bef15bceded90ac1729708da03c19ec791cd39b01a5dafb3b0634e0135b",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-0-5.png",
+      "role": "synthetic-frame",
+      "bytes": 851119,
+      "sha256": "29c89bc9f32bac6923958cc167dffb1b0b8f9e1f74c562418d87c70031c3750d",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-0-6.png",
+      "role": "synthetic-frame",
+      "bytes": 846917,
+      "sha256": "eb5aee5357a4322cf7b809189254c3ee5a333912b759b65d546bf09462895ef3",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-0-7.png",
+      "role": "synthetic-frame",
+      "bytes": 846922,
+      "sha256": "b8ffd6548dbb4e11025f5aee71f2e85439b0f58a1823e248f05b5ad8b45e951a",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-0-8.png",
+      "role": "synthetic-frame",
+      "bytes": 850933,
+      "sha256": "393810f9a2d4107d990f837b176c5ade1765263d539aa360c1d3b5e49366ea96",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-0-9.png",
+      "role": "synthetic-frame",
+      "bytes": 847615,
+      "sha256": "0691ffa14ee557bdb1a040bd07a35b3067db96ddda06a1dd0230e1a2231cb726",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-0-10.png",
+      "role": "synthetic-frame",
+      "bytes": 846860,
+      "sha256": "3b9d5e6c0e5d76122a3ed61aba83044431e42164d6646b46fbc82e57fd10b5d8",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-0-11.png",
+      "role": "synthetic-frame",
+      "bytes": 851144,
+      "sha256": "5ea7e593b25e68550f307064d76d7ba7d3643d1ecd0627320ad4212a8fd575fc",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-1-0.png",
+      "role": "synthetic-frame",
+      "bytes": 846430,
+      "sha256": "2adf5db5cfbc87d206ac03e551b5ccfa3e9b93253e831dc857ac3a4abfab00cd",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-1-1.png",
+      "role": "synthetic-frame",
+      "bytes": 846452,
+      "sha256": "9701cec16cfb49f68f1f29bbb4eed1069029ae63868e12739e8ac32c9183f15a",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-1-2.png",
+      "role": "synthetic-frame",
+      "bytes": 851225,
+      "sha256": "cbd8d6615b87d1cf1abceb06d0a4edbcaddf334c89303faf2b1a3314923a67b9",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-1-3.png",
+      "role": "synthetic-frame",
+      "bytes": 846636,
+      "sha256": "04445365c019833c623fb089ec3d669d061d6fcabec17f5ddcab20124764aa4a",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-1-4.png",
+      "role": "synthetic-frame",
+      "bytes": 846620,
+      "sha256": "5b813bef15bceded90ac1729708da03c19ec791cd39b01a5dafb3b0634e0135b",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-1-5.png",
+      "role": "synthetic-frame",
+      "bytes": 851119,
+      "sha256": "29c89bc9f32bac6923958cc167dffb1b0b8f9e1f74c562418d87c70031c3750d",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-1-6.png",
+      "role": "synthetic-frame",
+      "bytes": 846917,
+      "sha256": "eb5aee5357a4322cf7b809189254c3ee5a333912b759b65d546bf09462895ef3",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-1-7.png",
+      "role": "synthetic-frame",
+      "bytes": 846922,
+      "sha256": "b8ffd6548dbb4e11025f5aee71f2e85439b0f58a1823e248f05b5ad8b45e951a",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-1-8.png",
+      "role": "synthetic-frame",
+      "bytes": 850933,
+      "sha256": "393810f9a2d4107d990f837b176c5ade1765263d539aa360c1d3b5e49366ea96",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-1-9.png",
+      "role": "synthetic-frame",
+      "bytes": 847615,
+      "sha256": "0691ffa14ee557bdb1a040bd07a35b3067db96ddda06a1dd0230e1a2231cb726",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-1-10.png",
+      "role": "synthetic-frame",
+      "bytes": 846860,
+      "sha256": "3b9d5e6c0e5d76122a3ed61aba83044431e42164d6646b46fbc82e57fd10b5d8",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-1-11.png",
+      "role": "synthetic-frame",
+      "bytes": 851144,
+      "sha256": "5ea7e593b25e68550f307064d76d7ba7d3643d1ecd0627320ad4212a8fd575fc",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-2-0.png",
+      "role": "synthetic-frame",
+      "bytes": 846430,
+      "sha256": "2adf5db5cfbc87d206ac03e551b5ccfa3e9b93253e831dc857ac3a4abfab00cd",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-2-1.png",
+      "role": "synthetic-frame",
+      "bytes": 846452,
+      "sha256": "9701cec16cfb49f68f1f29bbb4eed1069029ae63868e12739e8ac32c9183f15a",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-2-2.png",
+      "role": "synthetic-frame",
+      "bytes": 851225,
+      "sha256": "cbd8d6615b87d1cf1abceb06d0a4edbcaddf334c89303faf2b1a3314923a67b9",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-2-3.png",
+      "role": "synthetic-frame",
+      "bytes": 846636,
+      "sha256": "04445365c019833c623fb089ec3d669d061d6fcabec17f5ddcab20124764aa4a",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-2-4.png",
+      "role": "synthetic-frame",
+      "bytes": 846620,
+      "sha256": "5b813bef15bceded90ac1729708da03c19ec791cd39b01a5dafb3b0634e0135b",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-2-5.png",
+      "role": "synthetic-frame",
+      "bytes": 851119,
+      "sha256": "29c89bc9f32bac6923958cc167dffb1b0b8f9e1f74c562418d87c70031c3750d",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-2-6.png",
+      "role": "synthetic-frame",
+      "bytes": 846917,
+      "sha256": "eb5aee5357a4322cf7b809189254c3ee5a333912b759b65d546bf09462895ef3",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-2-7.png",
+      "role": "synthetic-frame",
+      "bytes": 846922,
+      "sha256": "b8ffd6548dbb4e11025f5aee71f2e85439b0f58a1823e248f05b5ad8b45e951a",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-2-8.png",
+      "role": "synthetic-frame",
+      "bytes": 850933,
+      "sha256": "393810f9a2d4107d990f837b176c5ade1765263d539aa360c1d3b5e49366ea96",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-2-9.png",
+      "role": "synthetic-frame",
+      "bytes": 847615,
+      "sha256": "0691ffa14ee557bdb1a040bd07a35b3067db96ddda06a1dd0230e1a2231cb726",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-2-10.png",
+      "role": "synthetic-frame",
+      "bytes": 846860,
+      "sha256": "3b9d5e6c0e5d76122a3ed61aba83044431e42164d6646b46fbc82e57fd10b5d8",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-2-11.png",
+      "role": "synthetic-frame",
+      "bytes": 851144,
+      "sha256": "5ea7e593b25e68550f307064d76d7ba7d3643d1ecd0627320ad4212a8fd575fc",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-3-0.png",
+      "role": "synthetic-frame",
+      "bytes": 846430,
+      "sha256": "2adf5db5cfbc87d206ac03e551b5ccfa3e9b93253e831dc857ac3a4abfab00cd",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-3-1.png",
+      "role": "synthetic-frame",
+      "bytes": 846452,
+      "sha256": "9701cec16cfb49f68f1f29bbb4eed1069029ae63868e12739e8ac32c9183f15a",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-3-2.png",
+      "role": "synthetic-frame",
+      "bytes": 851225,
+      "sha256": "cbd8d6615b87d1cf1abceb06d0a4edbcaddf334c89303faf2b1a3314923a67b9",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-3-3.png",
+      "role": "synthetic-frame",
+      "bytes": 846636,
+      "sha256": "04445365c019833c623fb089ec3d669d061d6fcabec17f5ddcab20124764aa4a",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-3-4.png",
+      "role": "synthetic-frame",
+      "bytes": 846620,
+      "sha256": "5b813bef15bceded90ac1729708da03c19ec791cd39b01a5dafb3b0634e0135b",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-3-5.png",
+      "role": "synthetic-frame",
+      "bytes": 851119,
+      "sha256": "29c89bc9f32bac6923958cc167dffb1b0b8f9e1f74c562418d87c70031c3750d",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-3-6.png",
+      "role": "synthetic-frame",
+      "bytes": 846917,
+      "sha256": "eb5aee5357a4322cf7b809189254c3ee5a333912b759b65d546bf09462895ef3",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-3-7.png",
+      "role": "synthetic-frame",
+      "bytes": 846922,
+      "sha256": "b8ffd6548dbb4e11025f5aee71f2e85439b0f58a1823e248f05b5ad8b45e951a",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-3-8.png",
+      "role": "synthetic-frame",
+      "bytes": 850933,
+      "sha256": "393810f9a2d4107d990f837b176c5ade1765263d539aa360c1d3b5e49366ea96",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-3-9.png",
+      "role": "synthetic-frame",
+      "bytes": 847615,
+      "sha256": "0691ffa14ee557bdb1a040bd07a35b3067db96ddda06a1dd0230e1a2231cb726",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-3-10.png",
+      "role": "synthetic-frame",
+      "bytes": 846860,
+      "sha256": "3b9d5e6c0e5d76122a3ed61aba83044431e42164d6646b46fbc82e57fd10b5d8",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-3-11.png",
+      "role": "synthetic-frame",
+      "bytes": 851144,
+      "sha256": "5ea7e593b25e68550f307064d76d7ba7d3643d1ecd0627320ad4212a8fd575fc",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-4-0.png",
+      "role": "synthetic-frame",
+      "bytes": 846430,
+      "sha256": "2adf5db5cfbc87d206ac03e551b5ccfa3e9b93253e831dc857ac3a4abfab00cd",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-4-1.png",
+      "role": "synthetic-frame",
+      "bytes": 846452,
+      "sha256": "9701cec16cfb49f68f1f29bbb4eed1069029ae63868e12739e8ac32c9183f15a",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-4-2.png",
+      "role": "synthetic-frame",
+      "bytes": 851225,
+      "sha256": "cbd8d6615b87d1cf1abceb06d0a4edbcaddf334c89303faf2b1a3314923a67b9",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-4-3.png",
+      "role": "synthetic-frame",
+      "bytes": 846636,
+      "sha256": "04445365c019833c623fb089ec3d669d061d6fcabec17f5ddcab20124764aa4a",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-4-4.png",
+      "role": "synthetic-frame",
+      "bytes": 846620,
+      "sha256": "5b813bef15bceded90ac1729708da03c19ec791cd39b01a5dafb3b0634e0135b",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-4-5.png",
+      "role": "synthetic-frame",
+      "bytes": 851119,
+      "sha256": "29c89bc9f32bac6923958cc167dffb1b0b8f9e1f74c562418d87c70031c3750d",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-4-6.png",
+      "role": "synthetic-frame",
+      "bytes": 846917,
+      "sha256": "eb5aee5357a4322cf7b809189254c3ee5a333912b759b65d546bf09462895ef3",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-4-7.png",
+      "role": "synthetic-frame",
+      "bytes": 846922,
+      "sha256": "b8ffd6548dbb4e11025f5aee71f2e85439b0f58a1823e248f05b5ad8b45e951a",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-4-8.png",
+      "role": "synthetic-frame",
+      "bytes": 850933,
+      "sha256": "393810f9a2d4107d990f837b176c5ade1765263d539aa360c1d3b5e49366ea96",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-4-9.png",
+      "role": "synthetic-frame",
+      "bytes": 847615,
+      "sha256": "0691ffa14ee557bdb1a040bd07a35b3067db96ddda06a1dd0230e1a2231cb726",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-4-10.png",
+      "role": "synthetic-frame",
+      "bytes": 846860,
+      "sha256": "3b9d5e6c0e5d76122a3ed61aba83044431e42164d6646b46fbc82e57fd10b5d8",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    },
+    {
+      "path": "fixtures/frames/parity-4-11.png",
+      "role": "synthetic-frame",
+      "bytes": 851144,
+      "sha256": "5ea7e593b25e68550f307064d76d7ba7d3643d1ecd0627320ad4212a8fd575fc",
+      "format": "PNG",
+      "width": 2560,
+      "height": 1600,
+      "embeddedICC": true
+    }
+  ]
+}
