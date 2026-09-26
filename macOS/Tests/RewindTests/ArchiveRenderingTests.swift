@@ -4,7 +4,7 @@ import SceneKit
 @testable import Rewind
 
 final class ArchiveRenderingTests:XCTestCase {
-    @MainActor func testExpandedScreenshotKeepsSourceBrightnessInBothThemes() throws {
+    @MainActor func testScreenshotKeepsDaylightPixelsAndSoftensOnlyNightImages() throws {
         let size = CGSize(width:800,height:500)
         let frame = MemoryFrame(timestamp:Date(),appName:"Brightness fixture",bundleID:"test",title:"",imagePath:"patches",text:"",regions:[])
         let context = try XCTUnwrap(CGContext(data:nil,width:320,height:200,bitsPerComponent:8,bytesPerRow:0,
@@ -27,7 +27,8 @@ final class ArchiveRenderingTests:XCTestCase {
                 // sRGB bitmap. Read its encoded samples without converting twice.
                 XCTAssertEqual(bitmap.colorSpace,.sRGB)
                 let color = try XCTUnwrap(bitmap.colorAt(x:Int(point.x),y:Int(size.height-point.y)))
-                XCTAssertEqual(color.redComponent,expected,accuracy:0.035,"Scene lighting must not dim recorded UI pixels")
+                let target = appearance == .deepNight ? (expected == 1 ? 0.896:0.445):expected
+                XCTAssertEqual(color.redComponent,target,accuracy:0.025,"Daylight stays faithful; night screenshots receive a restrained brightness reduction")
             }
             archive.stopMotion()
         }

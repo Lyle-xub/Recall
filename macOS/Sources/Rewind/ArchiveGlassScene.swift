@@ -542,6 +542,7 @@ private final class ArchiveRecordControl: SCNNode {
             let art = SCNPlane(width:4.87,height:3.0),material = SCNMaterial();material.lightingModel = .constant
             // Actual source pixels, without an opaque portrait canvas or tint.
             material.diffuse.contents = image;art.materials = [material]
+            material.diffuse.intensity = ArchiveImageTone.intensity(night:night)
             let node = SCNNode(geometry:art);node.name = "artwork";node.isHidden = image == nil;root.addChildNode(node)
         }
         if let frame {

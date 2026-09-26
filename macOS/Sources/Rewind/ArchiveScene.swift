@@ -58,40 +58,12 @@ struct BareIconButton: View {
     }
 }
 
-/// 暖昼 / 深夜 pill from the reference design. A matched-geometry knob slides
-/// between the two segments so the toggle reads as one continuous motion.
-struct ThemeTogglePill: View {
-    let appearance: OverlayAppearance
-    var action: () -> Void
-    @Namespace private var knob
-    @Environment(\.colorScheme) private var scheme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    var body: some View {
-        Button {
-            withAnimation(reduceMotion ? nil:.spring(response:0.42,dampingFraction:0.78)) { action() }
-        } label: {
-            HStack(spacing:2) {
-                segment("暖昼",symbol:"sun.max.fill",active:appearance == .warmDay)
-                segment("深夜",symbol:"moon.stars.fill",active:appearance == .deepNight)
-            }.padding(3)
-            .background(scheme == .dark ? Color.white.opacity(0.10):Color.white.opacity(0.55),in:Capsule())
-            .overlay(Capsule().strokeBorder(Color.white.opacity(scheme == .dark ? 0.22:0.7),lineWidth:1))
-        }.buttonStyle(.plain).fixedSize()
-            .help("切换暖昼 / 深夜外观").accessibilityLabel("切换外观,当前\(appearance.label)")
-    }
-    private func segment(_ title:String,symbol:String,active:Bool)->some View {
-        HStack(spacing:5) {
-            Circle().fill(active ? Color(red:0.98,green:0.80,blue:0.45):Color.secondary).frame(width:5,height:5)
-            Text(title).font(.system(size:11,weight:.medium))
-        }
-        .padding(.horizontal,11).frame(height:28)
-        .foregroundStyle(active ? (scheme == .dark ? Color.black:Color.white):Color.primary.opacity(0.5))
-        .background {
-            if active {
-                Capsule().fill(Color.primary.opacity(0.88)).matchedGeometryEffect(id:"themeKnob",in:knob)
-            }
-        }
-        .accessibilityAddTraits(active ? .isSelected:[])
+/// Tone only screenshot pixels, keeping text, icons and glass highlights clear.
+enum ArchiveImageTone {
+    static func intensity(night:Bool)->CGFloat { night ? 0.78:1 }
+    static func color(night:Bool)->Color {
+        let value = Double(intensity(night:night))
+        return Color(.sRGBLinear,red:value,green:value,blue:value)
     }
 }
 
@@ -139,7 +111,7 @@ struct ArchiveStackView: View {
                         Text("一列一天").foregroundStyle(.secondary)
                         Button { focusedID = nil;model.moveArchiveDay(by:1) } label: { Image(systemName:"chevron.right").frame(width:30,height:28) }.help("后一天")
                     }.font(.system(size:11,weight:.medium)).buttonStyle(.plain)
-                        .padding(.horizontal,12).background(.regularMaterial,in:Capsule()).padding(.bottom,22)
+                        .padding(.horizontal,12).liquidGlass(radius:18).padding(.bottom,22)
                 }
             }
             .task(id:active ? hoveredID:nil) {

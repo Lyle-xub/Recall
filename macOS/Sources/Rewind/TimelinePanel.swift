@@ -108,7 +108,6 @@ private struct AnimatedTimelineStrip: View {
                 .offset(y:motion.visible || reduceMotion ? 0:20)
         }.frame(height:model.settings.glassArchiveEnabled ? ArchiveViewportLayout.timelineHeight:TimelinePanelController.height)
         .preferredColorScheme(model.settings.glassArchiveEnabled ? ArchiveTone.colorScheme(model.settings.appearance):nil)
-        .environment(\.glassArchiveAppearance,model.settings.glassArchiveEnabled)
         .onExitCommand { model.dismissTimeline() }
     }
 }

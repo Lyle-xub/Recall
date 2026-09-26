@@ -41,19 +41,10 @@ struct ComfortableButtonStyle: ButtonStyle {
     }
 }
 
-private struct GlassArchiveAppearanceKey: EnvironmentKey { static let defaultValue = false }
-extension EnvironmentValues {
-    var glassArchiveAppearance: Bool {
-        get { self[GlassArchiveAppearanceKey.self] }
-        set { self[GlassArchiveAppearanceKey.self] = newValue }
-    }
-}
-
 extension View {
-    /// Classic mode samples the live desktop using native glass. The opaque
-    /// archive scene uses its own ivory surface so its controls match the cards.
+    /// Both archive and classic pages share the same native control material.
     func liquidGlass(radius: CGFloat = 24, interactive: Bool = true) -> some View {
-        modifier(ModeGlassModifier(radius:radius,interactive:interactive))
+        modifier(NativeGlassModifier(radius:radius,interactive:interactive))
     }
 }
 
@@ -80,14 +71,11 @@ struct ContinuousResultsBackground:ViewModifier {
     }
 }
 
-private struct ModeGlassModifier: ViewModifier {
+private struct NativeGlassModifier: ViewModifier {
     let radius: CGFloat
     let interactive: Bool
-    @Environment(\.glassArchiveAppearance) private var archive
     func body(content:Content)->some View {
-        if archive {
-            content.modifier(IvoryGlassModifier(radius:radius))
-        } else if #available(macOS 26.0, *) {
+        if #available(macOS 26.0, *) {
             content.glassEffect(.regular.interactive(interactive),in:RoundedRectangle(cornerRadius:radius,style:.continuous))
         } else {
             content.background(.regularMaterial,in:RoundedRectangle(cornerRadius:radius,style:.continuous))
@@ -95,27 +83,11 @@ private struct ModeGlassModifier: ViewModifier {
     }
 }
 
-private struct IvoryGlassModifier: ViewModifier {
-    let radius: CGFloat
-    @Environment(\.colorScheme) private var scheme
-    func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius:radius,style:.continuous)
-        content.background {
-            shape.fill(scheme == .dark ? Color.white.opacity(0.10):Color.white.opacity(0.55))
-                .overlay(shape.strokeBorder(Color.white.opacity(scheme == .dark ? 0.22:0.7),lineWidth:1))
-                .shadow(color:.black.opacity(scheme == .dark ? 0.4:0.1),radius:12,y:6)
-        }
-    }
-}
-
 struct SearchGlassGroup<Content:View>: View {
     @ViewBuilder var content:()->Content
-    @Environment(\.glassArchiveAppearance) private var archive
     var body:some View {
-        if !archive {
-            if #available(macOS 26.0, *) { GlassEffectContainer(spacing:18) { content() } }
-            else { content() }
-        } else { content() }
+        if #available(macOS 26.0, *) { GlassEffectContainer(spacing:18) { content() } }
+        else { content() }
     }
 }
 
@@ -123,12 +95,9 @@ struct SearchGlassSurface: ViewModifier {
     let id:String
     let namespace:Namespace.ID
     let radius:CGFloat
-    @Environment(\.glassArchiveAppearance) private var archive
     func body(content:Content)->some View {
-        if !archive {
-            if #available(macOS 26.0, *) { content.liquidGlass(radius:radius).glassEffectID(id,in:namespace) }
-            else { content.liquidGlass(radius:radius) }
-        } else { content.liquidGlass(radius:radius) }
+        if #available(macOS 26.0, *) { content.liquidGlass(radius:radius).glassEffectID(id,in:namespace) }
+        else { content.liquidGlass(radius:radius) }
     }
 }
 

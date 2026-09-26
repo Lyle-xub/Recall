@@ -44,7 +44,7 @@ struct RootView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var expanded: Bool { model.searchPresented || model.askOpen || model.inspectorOpen }
     private var compactSearch: Bool { expanded || model.selected != nil }
-    private var showSearchActions: Bool { searchEngaged || compactSearch }
+    private var showSearchActions: Bool { model.settings.glassArchiveEnabled || searchEngaged || compactSearch }
     var body: some View {
         Group {
           if model.onboardingOpen {
@@ -108,53 +108,29 @@ struct RootView: View {
                     }
                     if model.settings.glassArchiveEnabled { archiveCaptions(size:geo.size,top:top) }
                 }
-                if showSearchActions || !model.settings.glassArchiveEnabled {
-                    searchToolbar(width:min(1020,geo.size.width-196))
-                        .frame(height:showSearchActions ? 58:72)
-                        .position(x:geo.size.width/2,y:compactSearch || model.settings.glassArchiveEnabled ? top+43:geo.size.height*0.425)
-                        .transition(.opacity.combined(with:.scale(scale:0.94)))
-                        .zIndex(5)
-                }
+                // Keep one search field and one glass container alive through
+                // archive -> results navigation, including the native IME editor.
+                searchToolbar(width:min(1020,geo.size.width-196))
+                    .frame(height:showSearchActions ? 58:72)
+                    .position(x:geo.size.width/2,y:compactSearch || model.settings.glassArchiveEnabled ? top+43:geo.size.height*0.425)
+                    .zIndex(5)
                 HStack {
-                    if !model.settings.glassArchiveEnabled {
-                        RoundButton(symbol:expanded || model.selected != nil ? "arrow.left":"xmark",label:expanded ? "Back to desktop":"Close Recall") { goBack() }
-                    } else if expanded || model.selected != nil || showSearchActions || archiveFocusedID != nil {
-                        BareIconButton(symbol:"arrow.left",label:model.settings.glassArchiveEnabled ? "返回档案":"返回记忆库") { goBack() }.frame(width:showSearchActions ? 58:34,height:58)
-                    } else {
-                        VStack(alignment:.leading,spacing:3) {
-                            Text("RECALL").font(.system(size:geo.size.width < 1050 ? 32:42,weight:.heavy)).tracking(-1.5)
-                            Text("MEMORY ARCHIVE   /   私人记忆终端")
-                                .font(.system(size:10,weight:.medium)).tracking(1.7)
-                        }.foregroundStyle(Color.primary.opacity(0.92))
-                    }
+                    RoundButton(symbol:expanded || model.selected != nil || archiveFocusedID != nil ? "arrow.left":"xmark",
+                        label:expanded || archiveFocusedID != nil ? "Back to desktop":"Close Recall") { goBack() }
                     Spacer()
                     if !showSearchActions {
                         HStack(spacing:geo.size.width < 1050 ? 9:18) {
-                            if model.settings.glassArchiveEnabled {
-                                archiveNavigation("记忆库",symbol:"folder",compact:geo.size.width < 1050) { model.query = ""; model.showSearch() }
-                                archiveNavigation("搜索",symbol:"magnifyingglass",compact:geo.size.width < 1050) { searchEngaged = true; searchFocused = true }
-                                ThemeTogglePill(appearance:model.settings.appearance) { model.toggleAppearance() }
-                            } else {
-                                BareIconButton(symbol:"folder",label:"Browse all memories") { model.query = ""; model.showSearch() }
-                            }
+                            BareIconButton(symbol:"folder",label:"Browse all memories") { model.query = ""; model.showSearch() }
                             BareIconButton(symbol:"slider.horizontal.3",label:"Settings") { model.settingsOpen = true }
                             Rectangle().fill(Color.primary.opacity(0.16)).frame(width:1,height:16)
                             Text("\(model.total)").font(.system(size:13,weight:.medium).monospacedDigit()).fixedSize().foregroundStyle(Color.overlayControl)
                             BareIconButton(symbol:model.recordingRequested ? "pause":"play",label:model.recordingActionTitle,size:13) { model.toggleRecording() }
-                            if model.settings.glassArchiveEnabled { menu } else { menu.liquidGlass(radius:25) }
-                            if model.settings.glassArchiveEnabled { BareIconButton(symbol:"xmark",label:"关闭 Recall",size:11) { model.hideOverlay() } }
+                            menu.liquidGlass(radius:25)
                         }.transition(.opacity)
-                    } else if !model.settings.glassArchiveEnabled {
+                    } else {
                         menu.liquidGlass(radius:25)
                     }
-                }.padding(.horizontal,34).position(x:geo.size.width/2,y:top+(showSearchActions || !model.settings.glassArchiveEnabled ? 43:59)).zIndex(10)
-                if model.settings.glassArchiveEnabled {
-                Text("● \(model.apps.count) 个应用 · \(model.total) 条记忆 · 本地索引")
-                    .font(.system(size:11,weight:.medium)).foregroundStyle(.secondary)
-                    .frame(maxWidth:.infinity,alignment:.leading).padding(.horizontal,40)
-                    .position(x:geo.size.width/2,y:top+131).allowsHitTesting(false)
-                    .opacity(showSearchActions || expanded || model.selected != nil ? 0:1)
-                }
+                }.padding(.horizontal,34).position(x:geo.size.width/2,y:top+43).zIndex(10)
                 if let toast = model.toast {
                     Text(toast).font(.system(size:12,weight:.medium)).padding(.horizontal,19).padding(.vertical,11)
                         .liquidGlass(radius:20).position(x:geo.size.width/2,y:geo.size.height-240).allowsHitTesting(false)
@@ -168,7 +144,6 @@ struct RootView: View {
         }
         .font(.system(size:14)).buttonStyle(ComfortableButtonStyle()).controlSize(.large).frame(minWidth:800,minHeight:600)
         .preferredColorScheme(model.settings.glassArchiveEnabled ? ArchiveTone.colorScheme(model.settings.appearance):nil)
-        .environment(\.glassArchiveAppearance,model.settings.glassArchiveEnabled && !expanded)
         .onChange(of:model.timelineDragging) { _,dragging in if dragging { archiveFocusedID = nil } }
         .onChange(of:model.archiveTimelinePosition) { _,_ in archiveFocusedID = nil }
         .onChange(of:model.settings.glassArchiveEnabled) { _,enabled in
@@ -196,27 +171,11 @@ struct RootView: View {
         else if expanded || model.selected != nil { model.returnToDesktop() }
         else if !wasSearching { model.hideOverlay() }
     }
-    private func archiveNavigation(_ title:String,symbol:String,compact:Bool,action:@escaping ()->Void)->some View {
-        Button(action:action) {
-            HStack(spacing:7) {
-                Image(systemName:symbol)
-                if !compact { Text(title).fixedSize() }
-            }.font(.system(size:12,weight:.medium))
-                .foregroundStyle(Color.overlayControl).padding(.vertical,9)
-                .accessibilityLabel(title)
-                .contentShape(Rectangle())
-        }.buttonStyle(ComfortableButtonStyle())
-    }
     private func searchToolbar(width:CGFloat)->some View {
         SearchGlassGroup {
           HStack(spacing:18) {
             searchBar.frame(width:showSearchActions ? width-380:min(860,width),height:showSearchActions ? 58:72)
                 .modifier(SearchGlassSurface(id:"search",namespace:searchGlassNamespace,radius:showSearchActions ? 29:36))
-                .phaseAnimator([0,1,2],trigger:showSearchActions) { content,phase in
-                    content.scaleEffect(x:!reduceMotion && phase == 1 ? 0.975:1,y:!reduceMotion && phase == 1 ? 1.045:1,anchor:.trailing)
-                } animation: { phase in
-                    reduceMotion ? nil:.spring(response:phase == 1 ? 0.18:0.42,dampingFraction:phase == 1 ? 0.72:0.53)
-                }
                 .shadow(color:.black.opacity(0.15),radius:22,y:10)
                 .background(SearchClickObserver { searchEngaged = true })
             if showSearchActions {
@@ -265,18 +224,9 @@ struct RootView: View {
     private var searchBar: some View {
         HStack(spacing:14) {
             Image(systemName:"magnifyingglass").font(.system(size:23,weight:.medium))
-            TextField("",text:$model.query)
+            TextField(showSearchActions ? "Search memories":"Search anything you’ve seen, said, or heard",text:$model.query)
                 .textFieldStyle(.plain).font(.system(size:showSearchActions ? 20:23,weight:.regular))
-                .overlay(alignment:.leading) {
-                    // AppKit's placeholder can retain the system's light ink
-                    // inside dark glass. Draw the hint in the SwiftUI theme.
-                    if model.query.isEmpty {
-                        Text(showSearchActions ? "Search memories":"Search anything you’ve seen, said, or heard")
-                            .font(.system(size:showSearchActions ? 20:23,weight:.regular))
-                            .foregroundStyle(Color.primary.opacity(0.70))
-                            .allowsHitTesting(false).accessibilityHidden(true)
-                    }
-                }
+                .transaction { $0.animation = nil }
                 .focused($searchFocused).onSubmit { model.showSearch() }
                 .accessibilityLabel("Search memories")
             if !model.query.isEmpty {
@@ -293,6 +243,10 @@ struct RootView: View {
             Button("Ask Recall",systemImage:"sparkles") {model.back();model.searchPresented = false;model.askOpen = true;searchFocused = false}
             Button("App usage…",systemImage:"chart.bar.xaxis") {model.usageOpen = true}
             Button("Settings…",systemImage:"gearshape") {model.settingsOpen = true}
+            if model.settings.glassArchiveEnabled {
+                Button(model.settings.appearance == .deepNight ? "切换到浅色模式":"切换到暗黑模式",
+                    systemImage:model.settings.appearance == .deepNight ? "sun.max":"moon") { model.toggleAppearance() }
+            }
             Button("Welcome to Recall…",systemImage:"sparkle") {model.showOnboarding()}
             Button("Jump to date…",systemImage:"calendar") {model.searchPresented = false;model.askOpen = false;model.timelineJumpOpen = true}
             Divider()
@@ -303,8 +257,8 @@ struct RootView: View {
             Divider()
             Button("Quit Recall") {NSApplication.shared.terminate(nil)}.keyboardShortcut("q")
         } label: {
-            Image(systemName:"ellipsis").font(.system(size:17,weight:.semibold)).foregroundStyle(Color.overlayControl.opacity(0.78)).frame(width:model.settings.glassArchiveEnabled ? 34:50,height:model.settings.glassArchiveEnabled ? 34:50)
-        }.menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).frame(width:model.settings.glassArchiveEnabled ? 34:50,height:model.settings.glassArchiveEnabled ? 34:50).help("Recall menu").accessibilityLabel("Recall menu")
+            Image(systemName:"ellipsis").font(.system(size:17,weight:.semibold)).foregroundStyle(Color.overlayControl.opacity(0.78)).frame(width:50,height:50)
+        }.menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).frame(width:50,height:50).help("Recall menu").accessibilityLabel("Recall menu")
     }
     private func archiveCaptions(size:CGSize,top:CGFloat)->some View {
         let style = Font.system(size:10,weight:.medium)
@@ -408,6 +362,7 @@ struct MemoryCard: View {
                     ZStack(alignment:.topLeading) {
                         if let image = thumbnail {
                             Image(nsImage:image).resizable().aspectRatio(contentMode:.fit).frame(width:geo.size.width,height:geo.size.height)
+                                .colorMultiply(ArchiveImageTone.color(night:model.settings.glassArchiveEnabled && model.settings.appearance == .deepNight))
                             let ratio = image.size.width/image.size.height
                             let w = min(geo.size.width,geo.size.height*ratio), h = w/ratio
                             ForEach(frame.regions.filter { plan.highlights($0.text) }) { region in
