@@ -8,12 +8,18 @@ private final class ArchiveRecordControl: SCNNode {
     var action = ""
 }
 
+@MainActor private final class ArchiveFrameClock:NSObject {
+    weak var archive:ArchiveGlassScene?
+    @objc func tick(_ link:CADisplayLink) { archive?.advanceFrame(at:link.targetTimestamp) }
+}
+
 /// Real, thick glass sheets in camera space. All racks share the same camera,
 /// lighting and depth of field, so their edges converge consistently.
 @MainActor final class ArchiveGlassScene {
     let scene = SCNScene()
     let cameraNode = SCNNode()
     private var nodes: [String:SCNNode] = [:]
+    private var positions:[String:SCNVector3] = [:]
     private struct Slot { let lane:Int; let depth:Double; let x:CGFloat; let z:CGFloat }
     private struct Extraction {
         var spring = ArchiveMotionSpring(value:0)
@@ -31,6 +37,10 @@ private final class ArchiveRecordControl: SCNNode {
     private var blankIDs = Set<String>()
     private var anchorDay:Date?
     private var viewport = CGSize(width:2000,height:876)
+    private var verticalSpan:CGFloat = 9
+    private var cameraTransform = matrix_identity_float4x4
+    private var cameraAnimating = false
+    private var cameraPanRevision = 0
     var onPresentationChanged:(()->Void)?
     private(set) var dayColumns:[ArchiveDayColumn] = []
     private var currentID:String?
@@ -46,8 +56,11 @@ private final class ArchiveRecordControl: SCNNode {
     private var across = ArchiveMotionSpring(value:0)
     private var acrossTarget:Double = 0
     private var timer:Timer?
+    private var displayLink:CADisplayLink?
+    private weak var animationView:NSView?
+    private let frameClock = ArchiveFrameClock()
     private(set) var isActive = true
-    var isAnimating:Bool { timer != nil }
+    var isAnimating:Bool { timer != nil || displayLink != nil }
     private var previousTime:TimeInterval = 0
     private(set) var scrollOffset:CGFloat = 0
     private var horizontalOffset:CGFloat = 0
@@ -93,6 +106,7 @@ private final class ArchiveRecordControl: SCNNode {
         cameraNode.camera = camera
         cameraNode.position = cameraHome
         cameraNode.look(at:target)
+        cameraTransform = cameraNode.simdWorldTransform
         scene.rootNode.addChildNode(cameraNode)
         let key = SCNNode(); key.light = SCNLight();key.light?.type = .directional
         key.light?.intensity = 360; key.light?.color = NSColor(red:1,green:0.95,blue:0.84,alpha:1)
@@ -110,12 +124,14 @@ private final class ArchiveRecordControl: SCNNode {
         scene.background.contents = NSColor.clear
         scene.fogStartDistance = 36; scene.fogEndDistance = 49
         scene.fogColor = NSColor(red:0.90,green:0.89,blue:0.86,alpha:1)
+        frameClock.archive = self
     }
 
     func update(frames:[MemoryFrame],images:[String:NSImage],appearance:OverlayAppearance,selected:String?,size:CGSize,reduced:Bool,day:Date? = nil,timelinePosition:Date? = nil) {
         let resized = viewport != size
         reducedMotion = reduced;viewport = size
-        cameraNode.camera?.orthographicScale = 4.5*2.22/max(1,size.width/max(1,size.height))
+        verticalSpan = 9*2.22/max(1,size.width/max(1,size.height))
+        cameraNode.camera?.orthographicScale = verticalSpan/2
         if resized {
             for id in Array(extractions.keys) { extractions[id]?.destination = extractionDestination() }
         }
@@ -207,7 +223,7 @@ private final class ArchiveRecordControl: SCNNode {
         }
         let ids = Set(entries.map { $0.0 })
         for id in Array(nodes.keys) where !ids.contains(id) {
-            nodes.removeValue(forKey:id)?.removeFromParentNode();slots[id] = nil;heights[id] = nil;depths[id] = nil;extractions[id] = nil;surfaceKeys[id] = nil;imageAspects[id] = nil;imageKeys[id] = nil;shapeKeys[id] = nil;informationAspects[id] = nil
+            nodes.removeValue(forKey:id)?.removeFromParentNode();positions[id] = nil;slots[id] = nil;heights[id] = nil;depths[id] = nil;extractions[id] = nil;surfaceKeys[id] = nil;imageAspects[id] = nil;imageKeys[id] = nil;shapeKeys[id] = nil;informationAspects[id] = nil
         }
         maxScroll = max(0,CGFloat(rowCount)-3)
         scrollOffset = min(scrollOffset,maxScroll)
@@ -234,6 +250,7 @@ private final class ArchiveRecordControl: SCNNode {
                 heights[id] = ArchiveMotionSpring(value:height)
                 depths[id] = ArchiveMotionSpring(value:Double(slot.z))
                 surface.position = SCNVector3(slot.x,CGFloat(height),slot.z)
+                positions[id] = surface.position
             }
             if let node = nodes[id] { shape(node,id:id,progress:Float(extractions[id]?.spring.value ?? 0)) }
         }
@@ -266,6 +283,35 @@ private final class ArchiveRecordControl: SCNNode {
         // Focus is useful even when Reduce Motion disables the wave.
         if reducedMotion { advance(dt:1,immediate:true) } else { wake() }
     }
+    var canHitRestingSheets:Bool { extractions.isEmpty }
+    /// Orthographic picking needs only the camera pose and view size. Native
+    /// unprojectPoint can flush/wait for the renderer even with cached bounds.
+    /// During an implicit camera pan, use SceneKit's presentation transform.
+    func ray(at point:CGPoint,in size:CGSize)->(SCNVector3,SCNVector3)? {
+        guard size == viewport,size.width > 0,size.height > 0,
+              !cameraAnimating else { return nil }
+        let x = Float((point.x/size.width-0.5)*verticalSpan*size.width/size.height)
+        let y = Float((point.y/size.height-0.5)*verticalSpan)
+        let near = cameraTransform*SIMD4<Float>(x,y,-0.1,1)
+        let far = cameraTransform*SIMD4<Float>(x,y,-100,1)
+        return (SCNVector3(CGFloat(near.x),CGFloat(near.y),CGFloat(near.z)),SCNVector3(CGFloat(far.x),CGFloat(far.y),CGFloat(far.z)))
+    }
+    /// Rack sheets are parallel rectangles. Intersect their cached bounds on
+    /// the UI thread instead of synchronizing with SceneKit's mesh hit tester.
+    /// Rotating/extracted sheets still use native hit testing for their actions.
+    func record(at near:SCNVector3,toward far:SCNVector3)->String? {
+        guard canHitRestingSheets,abs(far.z-near.z) > 0.00001 else { return nil }
+        var closest:CGFloat = .infinity,result:String?
+        for id in framesByID.keys {
+            guard let position = positions[id] else { continue }
+            let t = (position.z+0.065/2-near.z)/(far.z-near.z)
+            guard t >= 0,t <= 1,t < closest else { continue }
+            let x = near.x+(far.x-near.x)*t-position.x
+            let y = near.y+(far.y-near.y)*t-position.y
+            if abs(x) <= 5.35/2,abs(y) <= 6.5/2 { closest = t;result = id }
+        }
+        return result
+    }
     func pointer(at point:CGPoint) {
         guard !reducedMotion,currentID == nil else { return }
         // Intersect the camera ray with the crest's top plane. Screen-space
@@ -286,6 +332,7 @@ private final class ArchiveRecordControl: SCNNode {
             guard !reducedMotion else { return }
             acrossTarget = Double(slot.lane);crestTarget = slot.depth;wake();return
         }
+        hover(nil)
         guard !reducedMotion,abs(far.y-near.y) > 0.0001 else { return }
         let t = (5.9-near.y)/(far.y-near.y)
         let x = near.x+(far.x-near.x)*t,z = near.z+(far.z-near.z)*t
@@ -314,6 +361,7 @@ private final class ArchiveRecordControl: SCNNode {
         let position = SCNVector3(cameraHome.x+dx,cameraHome.y,cameraHome.z+dz)
         if abs(cameraNode.position.x-position.x)+abs(cameraNode.position.z-position.z) > 0.00001 {
             cameraNode.position = position
+            cameraTransform.columns.3 = SIMD4(Float(position.x),Float(position.y),Float(position.z),1)
             // Translation leaves the view direction unchanged.
         }
     }
@@ -327,25 +375,51 @@ private final class ArchiveRecordControl: SCNNode {
         scrollOffset = next;horizontalOffset = nextHorizontal
         crestTarget = Double(next)+Double(delta)*(precise ? 0.025:0.16)
         acrossTarget = Double(nextHorizontal)*0.12
-        SCNTransaction.begin();SCNTransaction.animationDuration = reducedMotion ? 0:precise ? 0.12:0.28
+        let duration:Double = reducedMotion ? 0:precise ? 0.12:0.28
+        cameraPanRevision += 1
+        let revision = cameraPanRevision
+        cameraAnimating = duration > 0
+        SCNTransaction.begin();SCNTransaction.animationDuration = duration
+        if cameraAnimating {
+            SCNTransaction.completionBlock = { [weak self] in
+                Task { @MainActor in
+                    guard let self,self.cameraPanRevision == revision else { return }
+                    self.cameraAnimating = false
+                }
+            }
+        }
         SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name:.easeOut)
         placeCamera();SCNTransaction.commit()
         if reducedMotion { advance(dt:1,immediate:true) } else { wake() }
     }
+    func attachAnimation(to view:NSView) {
+        guard animationView !== view else { return }
+        let running = isAnimating
+        stopMotion();animationView = view
+        if running { wake() }
+    }
     private func wake() {
-        guard isActive,timer == nil else { return }
+        guard isActive,!isAnimating else { return }
         previousTime = ProcessInfo.processInfo.systemUptime
+        if let animationView {
+            let link = animationView.displayLink(target:frameClock,selector:#selector(ArchiveFrameClock.tick(_:)))
+            link.preferredFrameRateRange = CAFrameRateRange(minimum:60,maximum:60,preferred:60)
+            displayLink = link;link.add(to:.main,forMode:.common)
+            return
+        }
+        // Headless renderers have no display; tests can also advance directly.
         let source = Timer(timeInterval:1/60,repeats:true) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self else { return }
-                let now = ProcessInfo.processInfo.systemUptime
-                self.advance(dt:min(1/20,max(1/240,now-self.previousTime)))
-                self.previousTime = now
+                self?.advanceFrame(at:ProcessInfo.processInfo.systemUptime)
             }
         }
         timer = source;RunLoop.main.add(source,forMode:.common)
     }
-    func stopMotion() { timer?.invalidate();timer = nil }
+    fileprivate func advanceFrame(at now:TimeInterval) {
+        advance(dt:min(1/20,max(1/240,now-previousTime)))
+        previousTime = now
+    }
+    func stopMotion() { timer?.invalidate();timer = nil;displayLink?.invalidate();displayLink = nil }
     func setActive(_ active:Bool) {
         guard active != isActive else { return }
         isActive = active
@@ -380,8 +454,9 @@ private final class ArchiveRecordControl: SCNNode {
                 else { depth.step(to:Double(slot.z),frequency:9,dt:dt) }
                 depths[id] = depth
                 let position = SCNVector3(slot.x,CGFloat(height.value),CGFloat(depth.value))
-                if abs(node.position.x-position.x)+abs(node.position.y-position.y)+abs(node.position.z-position.z) > 0.00001 {
-                    node.position = position;positionUpdateCount += 1
+                let previous = positions[id] ?? position
+                if abs(previous.x-position.x)+abs(previous.y-position.y)+abs(previous.z-position.z) > 0.00001 {
+                    node.position = position;positions[id] = position;positionUpdateCount += 1
                 }
                 active = active || !depth.settled(at:Double(slot.z))
                 active = active || !height.settled(at:wanted)
@@ -392,6 +467,7 @@ private final class ArchiveRecordControl: SCNNode {
                 else { motion.spring.step(to:motion.target,frequency:6.5,dt:dt) }
                 let p = Float(max(0,min(1,motion.spring.value)))
                 node.simdPosition = ArchiveExtractionPath.position(from:motion.origin,to:motion.destination,progress:p)
+                positions[id] = node.position
                 let rotation = ArchiveExtractionPath.rotationProgress(p)
                 node.simdOrientation = simd_slerp(simd_quatf(angle:0,axis:SIMD3(0,1,0)),motion.rotation,rotation)
                 shape(node,id:id,progress:p)
@@ -399,6 +475,7 @@ private final class ArchiveRecordControl: SCNNode {
                 active = active || !motion.spring.settled(at:motion.target)
                 if motion.target == 0,motion.spring.settled(at:0) {
                     node.simdPosition = motion.origin;node.simdOrientation = simd_quatf(angle:0,axis:SIMD3(0,1,0));node.simdScale = SIMD3(repeating:1)
+                    positions[id] = node.position
                     shape(node,id:id,progress:0)
                     heights[id] = ArchiveMotionSpring(value:Double(motion.origin.y));extractions[id] = nil
                     active = true
@@ -681,8 +758,7 @@ final class ArchiveSceneView: SCNView {
     override func mouseMoved(with event:NSEvent) {
         let p = convert(event.locationInWindow,from:nil)
         let now = ProcessInfo.processInfo.systemUptime
-        let travel = aimPoint.map { hypot(p.x-$0.x,p.y-$0.y) } ?? .infinity
-        if now-lastHitTime >= 1/60 || travel > 8 {
+        if now-lastHitTime >= 1/60 {
             updatePointer(at:p)
         } else {
             // Deliver the final sample even when a fast mouse stops between
@@ -700,13 +776,24 @@ final class ArchiveSceneView: SCNView {
     }
     private func updatePointer(at point:CGPoint) {
         pointerDelivery?.cancel();pointerDelivery = nil;pendingPointer = nil
-        lastHitTime = ProcessInfo.processInfo.systemUptime;aimPoint = point;aimedID = memoryID(at:point)
-        onPointer?(unprojectPoint(SCNVector3(point.x,point.y,0)),unprojectPoint(SCNVector3(point.x,point.y,1)),aimedID)
-        onHover?(aimedID)
+        lastHitTime = ProcessInfo.processInfo.systemUptime;aimPoint = point
+        let (near,far) = pointerRay(at:point)
+        let previous = aimedID
+        aimedID = archive?.canHitRestingSheets == true ? archive?.record(at:near,toward:far):memoryID(at:point)
+        onPointer?(near,far,aimedID)
+        if previous != aimedID { onHover?(aimedID) }
+    }
+    func pointerRay(at point:CGPoint)->(SCNVector3,SCNVector3) {
+        archive?.ray(at:point,in:bounds.size) ?? (unprojectPoint(SCNVector3(point.x,point.y,0)),unprojectPoint(SCNVector3(point.x,point.y,1)))
     }
     private func clearPointerAim() {
         pointerDelivery?.cancel();pointerDelivery = nil;pendingPointer = nil
         aimedID = nil;aimPoint = nil;onHover?(nil)
+    }
+    func cancelPendingInteraction() {
+        clearPointerAim()
+        viewportDelivery?.cancel();viewportDelivery = nil
+        viewportRefresh?.cancel();viewportRefresh = nil
     }
     override func mouseExited(with event:NSEvent) { clearPointerAim() }
     override func scrollWheel(with event:NSEvent) {
@@ -740,6 +827,10 @@ final class ArchiveSceneView: SCNView {
         pressPoint = nil;dragged = false
     }
     private func memoryID(at p:CGPoint)->String? {
+        if let archive,archive.canHitRestingSheets {
+            let (near,far) = pointerRay(at:p)
+            return archive.record(at:near,toward:far)
+        }
         for result in hitTest(p,options:[.searchMode:SCNHitTestSearchMode.closest.rawValue,.categoryBitMask:1]) {
             var node:SCNNode? = result.node
             while let current = node {
@@ -770,6 +861,7 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
     func makeNSView(context:Context)->SCNView {
         let view = ArchiveSceneView(frame:.zero)
         view.archive = context.coordinator
+        context.coordinator.attachAnimation(to:view)
         context.coordinator.onPresentationChanged = { [weak view] in
             view?.updateTextSelection();view?.refreshViewport();view?.needsDisplay = true
         }
@@ -788,11 +880,14 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
         view.onScroll = { [weak coordinator = context.coordinator] delta,horizontal,precise in coordinator?.scroll(by:delta,horizontal:horizontal,precise:precise) }
         return view
     }
-    static func dismantleNSView(_ view:SCNView,coordinator:ArchiveGlassScene) { coordinator.stopMotion();coordinator.onPresentationChanged = nil }
+    static func dismantleNSView(_ view:SCNView,coordinator:ArchiveGlassScene) {
+        (view as? ArchiveSceneView)?.cancelPendingInteraction()
+        coordinator.stopMotion();coordinator.onPresentationChanged = nil
+    }
     func updateNSView(_ view:SCNView,context:Context) {
         context.coordinator.setActive(active)
         view.isHidden = !active
-        guard active else { return }
+        guard active else { (view as? ArchiveSceneView)?.cancelPendingInteraction();return }
         (view as? ArchiveSceneView)?.onSelect = onSelect
         (view as? ArchiveSceneView)?.onViewportChange = onViewportChange
         (view as? ArchiveSceneView)?.selectedRegions = regions

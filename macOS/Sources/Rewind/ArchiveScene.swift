@@ -73,8 +73,6 @@ struct ArchiveStackView: View {
     @ObservedObject var model: AppModel
     @Binding var focusedID: String?
     var active:Bool = true
-    @State private var viewportRecords = ArchiveViewportRecords()
-    @State private var hoveredID:String?
     @StateObject private var imageLoader = ArchiveImageLoader()
     private var images:[String:NSImage] { imageLoader.images }
     @State private var recognizedRegions:[String:[TextRegion]] = [:]
@@ -84,7 +82,7 @@ struct ArchiveStackView: View {
         GeometryReader { geo in
             ZStack {
                 ArchiveGlassRenderer(frames:frames,images:images,appearance:model.settings.appearance,
-                    selected:focusedID,day:model.archiveDay,timelinePosition:model.archiveTimelinePosition,regions:focusedID.flatMap { recognizedRegions[$0] } ?? [],size:geo.size,reduced:reduceMotion,active:active,onSelect:toggle,onRecordAction:recordAction,onHoverRecord:{ if hoveredID != $0 { hoveredID = $0 } },onViewportChange:{ viewportRecords = $0 })
+                    selected:focusedID,day:model.archiveDay,timelinePosition:model.archiveTimelinePosition,regions:focusedID.flatMap { recognizedRegions[$0] } ?? [],size:geo.size,reduced:reduceMotion,active:active,onSelect:toggle,onRecordAction:recordAction,onHoverRecord:{ imageLoader.hover(focusedID == nil ? $0:nil) },onViewportChange:{ imageLoader.updateViewport($0) })
                     .accessibilityRepresentation {
                         VStack {
                             ForEach(frames) { frame in
@@ -117,17 +115,10 @@ struct ArchiveStackView: View {
                 .allowsHitTesting(!model.timelineVisible)
                 .accessibilityHidden(model.timelineVisible)
             }
-            .task(id:active ? hoveredID:nil) {
-                guard active else { return }
-                guard focusedID == nil,let id = hoveredID,let frame = frames.first(where: { $0.id == id }) else { return }
-                // Coalesce pointer sweeps instead of decoding every crossed card.
-                do { try await Task.sleep(for:.milliseconds(180)) } catch { return }
-                guard let pixels = await MemoryImagePipeline.previews.image(at:model.store.root.appendingPathComponent(frame.imagePath),maxPixels:1000),!Task.isCancelled else { return }
-                imageLoader.showDetail(pixels,for:frame.imagePath)
-            }
             .task(id:active ? focusedID:nil) {
                 guard active else { return }
                 guard let id = focusedID,let frame = frames.first(where: { $0.id == id }) else { return }
+                imageLoader.hover(nil)
                 let url = model.store.root.appendingPathComponent(frame.imagePath)
                 // The existing thumbnail follows the extraction immediately.
                 // Upload full-size pixels after its busiest rotation phase.
@@ -152,22 +143,22 @@ struct ArchiveStackView: View {
                 focusedID = id
             }
             .onChange(of:frames.map(\.id)) { _,ids in
+                requestImages()
                 if let focusedID,!ids.contains(focusedID) { self.focusedID = nil }
                 let retained = Set(ids)
                 recognizedRegions = recognizedRegions.filter { retained.contains($0.key) }
             }
             .onAppear { requestImages() }
             .onChange(of:frames.map(\.imagePath)) { _,_ in requestImages() }
-            .onChange(of:viewportRecords) { _,_ in requestImages() }
             .onChange(of:active) { _,isActive in
-                if isActive { requestImages() } else { hoveredID = nil;imageLoader.stop() }
+                if isActive { requestImages() } else { imageLoader.stop() }
             }
             .onDisappear { imageLoader.stop() }
         }
     }
     private func requestImages() {
         guard active else { return }
-        imageLoader.request(frames,viewport:viewportRecords,root:model.store.root)
+        imageLoader.request(frames,viewport:imageLoader.viewport,root:model.store.root)
     }
     private func toggle(_ id:String?) {
         model.cancelArchiveExtraction()

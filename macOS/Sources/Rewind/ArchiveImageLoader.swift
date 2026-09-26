@@ -16,6 +16,10 @@ struct ArchiveViewportRecords:Equatable {
     private var recent:[String] = []
     private var detailPaths:[String] = []
     private var paths = Set<String>()
+    private var pathsByID:[String:String] = [:]
+    private(set) var viewport = ArchiveViewportRecords()
+    private var hoverID:String?
+    private var hoverTask:Task<Void,Never>?
     private var wanted = Set<String>()
     private var nearby = Set<String>()
     private var failed = Set<String>()
@@ -36,6 +40,8 @@ struct ArchiveViewportRecords:Equatable {
         active = true
         self.root = root
         let byID = Dictionary(uniqueKeysWithValues:frames.map { ($0.id,$0.imagePath) })
+        pathsByID = byID
+        if let hoverID,byID[hoverID] == nil { hover(nil) }
         let newPaths = Set(byID.values)
         if paths != newPaths {
             paths = newPaths
@@ -46,10 +52,14 @@ struct ArchiveViewportRecords:Equatable {
             let retained = images.filter { paths.contains($0.key) }
             if retained.count != images.count { images = retained }
         }
-        wanted = Set(viewport.visible.compactMap { byID[$0] })
-        nearby = Set(viewport.nearby.compactMap { byID[$0] }).subtracting(wanted)
+        updateViewport(viewport)
+    }
+    func updateViewport(_ viewport:ArchiveViewportRecords) {
+        self.viewport = viewport
+        wanted = Set(viewport.visible.compactMap { pathsByID[$0] })
+        nearby = Set(viewport.nearby.compactMap { pathsByID[$0] }).subtracting(wanted)
         publishViewportIfReady()
-        guard worker == nil,!missingPaths.isEmpty else { return }
+        guard active,worker == nil,!missingPaths.isEmpty else { return }
         worker = Task { [weak self] in await self?.run() }
     }
     private var missingPaths:[String] {
@@ -118,6 +128,21 @@ struct ArchiveViewportRecords:Equatable {
         }
         if changed { images = next;publicationCount += 1 }
     }
-    func stop() { active = false;worker?.cancel() }
+    /// Pointer changes remain local to the loader: no SwiftUI invalidation,
+    /// accessibility-tree rebuild or texture upload while sweeping the rack.
+    func hover(_ id:String?) {
+        guard hoverID != id else { return }
+        hoverID = id;hoverTask?.cancel();hoverTask = nil
+        guard active,let id,let path = pathsByID[id] else { return }
+        let base = root
+        hoverTask = Task { [weak self] in
+            do { try await Task.sleep(for:.milliseconds(320)) } catch { return }
+            guard !Task.isCancelled,
+                  let pixels = await MemoryImagePipeline.previews.image(at:base.appendingPathComponent(path),maxPixels:1000),
+                  !Task.isCancelled,let self,self.active,self.root == base,self.hoverID == id else { return }
+            self.showDetail(pixels,for:path)
+        }
+    }
+    func stop() { active = false;worker?.cancel();hover(nil) }
     func waitUntilIdle() async { await worker?.value }
 }

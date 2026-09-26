@@ -144,6 +144,34 @@ final class ArchiveNavigationTests:XCTestCase {
         scene.stopMotion()
     }
 
+    @MainActor func testHoverOnlyPublishesDetailAfterPointerSettlesAndStopCancelsIt() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:root.appendingPathComponent("frames"),withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:root) }
+        let items = records(count:3)
+        func pixels(_ width:Int)->CGImage {
+            CGContext(data:nil,width:width,height:width*5/8,bitsPerComponent:8,bytesPerRow:0,
+                space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue)!.makeImage()!
+        }
+        let thumbnail = pixels(80)
+        let data = try XCTUnwrap(NSBitmapImageRep(cgImage:pixels(800)).representation(using:.png,properties:[:]))
+        for frame in items { try data.write(to:root.appendingPathComponent(frame.imagePath)) }
+        let loader = ArchiveImageLoader(decode:{ _ in thumbnail })
+        loader.request(items,viewport:.init(visible:Set(items.map(\.id))),root:root)
+        await loader.waitUntilIdle()
+        let publications = loader.publicationCount
+        for _ in 0..<20 { for frame in items { loader.hover(frame.id) } }
+        try await Task.sleep(for:.milliseconds(80))
+        XCTAssertEqual(loader.publicationCount,publications,"Moving across cards must not invalidate the SwiftUI scene")
+        try await Task.sleep(for:.milliseconds(400))
+        XCTAssertEqual(loader.publicationCount,publications+1)
+        XCTAssertEqual(loader.images[items[2].imagePath]?.size.width,800)
+        XCTAssertEqual(loader.images[items[0].imagePath]?.size.width,80)
+        loader.hover(items[0].id);loader.stop()
+        try await Task.sleep(for:.milliseconds(400))
+        XCTAssertEqual(loader.publicationCount,publications+1,"Leaving the archive cancels queued hover upgrades")
+    }
+
 }
 
 private actor ArchiveDecodeProbe {
