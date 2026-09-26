@@ -43,7 +43,7 @@ import Combine
             NotificationCenter.default.publisher(for:notification,object:parent).sink { [weak self] _ in self?.updateFrame() }.store(in:&subscriptions)
         }
         model.$settings.map(\.glassArchiveEnabled).removeDuplicates().receive(on:RunLoop.main).sink { [weak self] _ in self?.sync() }.store(in:&subscriptions)
-        model.$timelineCursor.removeDuplicates().sink { [weak self] _ in self?.sync() }.store(in:&subscriptions)
+        model.$timelineCursor.removeDuplicates().receive(on:RunLoop.main).sink { [weak self] _ in self?.sync() }.store(in:&subscriptions)
         NotificationCenter.default.publisher(for:NSApplication.didHideNotification).sink { [weak self] _ in self?.dismiss() }.store(in:&subscriptions)
     }
     deinit { if let mouseMonitor { NSEvent.removeMonitor(mouseMonitor) } }

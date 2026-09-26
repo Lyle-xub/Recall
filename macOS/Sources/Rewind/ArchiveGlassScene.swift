@@ -49,6 +49,9 @@ private final class ArchiveRecordControl: SCNNode {
     private var previousTime:TimeInterval = 0
     private(set) var scrollOffset:CGFloat = 0
     private var horizontalOffset:CGFloat = 0
+    private var navigationKey = ""
+    private var navigationTarget:Double?
+    private var navigationMotion = ArchiveMotionSpring(value:0)
     private var maxScroll:CGFloat = 0
     var recordIDs:Set<String> { Set(framesByID.keys) }
     var renderedCardCount:Int { nodes.count-blankIDs.count }
@@ -91,7 +94,7 @@ private final class ArchiveRecordControl: SCNNode {
         scene.fogColor = NSColor(red:0.90,green:0.89,blue:0.86,alpha:1)
     }
 
-    func update(frames:[MemoryFrame],images:[String:NSImage],appearance:OverlayAppearance,selected:String?,size:CGSize,reduced:Bool,day:Date? = nil) {
+    func update(frames:[MemoryFrame],images:[String:NSImage],appearance:OverlayAppearance,selected:String?,size:CGSize,reduced:Bool,day:Date? = nil,timelinePosition:Date? = nil) {
         reducedMotion = reduced;viewport = size
         cameraNode.camera?.orthographicScale = 4.5*2.22/max(1,size.width/max(1,size.height))
         let isNight = appearance == .deepNight
@@ -120,7 +123,31 @@ private final class ArchiveRecordControl: SCNNode {
             if reduced { advance(dt:1,immediate:true) } else { wake() }
         }
         if let currentID,let node = nodes[currentID] { shape(node,id:currentID,progress:Float(extractions[currentID]?.spring.value ?? 0)) }
+        navigateArchive(to:timelinePosition)
         onPresentationChanged?()
+    }
+
+    private func navigateArchive(to date:Date?) {
+        let key = date.map { String($0.timeIntervalSince1970)+dayColumns.flatMap(\.records).map(\.id).joined() } ?? ""
+        guard key != navigationKey else { return };navigationKey = key
+        guard let date,let column = dayColumns.first(where:{ Calendar.current.isDate($0.day,inSameDayAs:date) }),!column.records.isEmpty else {
+            navigationTarget = nil;return
+        }
+        let records = column.records
+        var row = Double(records.count-1)
+        if date >= records[0].timestamp { row = 0 }
+        else if records.count > 1 {
+            for index in 0..<(records.count-1) where records[index].timestamp >= date && records[index+1].timestamp <= date {
+                let span = records[index].timestamp.timeIntervalSince(records[index+1].timestamp)
+                row = Double(index)+records[index].timestamp.timeIntervalSince(date)/max(0.001,span);break
+            }
+        }
+        let depth = row-(column.lane == 0 ? 0:column.lane < 0 ? 3.5:1.5)
+        navigationMotion = ArchiveMotionSpring(value:Double(scrollOffset),velocity:navigationMotion.velocity)
+        navigationTarget = max(0,min(Double(maxScroll),depth))
+        crestTarget = depth;acrossTarget = Double(column.lane)
+        hoveredID = records.min(by:{ abs($0.timestamp.timeIntervalSince(date)) < abs($1.timestamp.timeIntervalSince(date)) })?.id
+        if reducedMotion { advance(dt:1,immediate:true) } else { wake() }
     }
 
     /// Reconcile by record ID. Loading thumbnails or starring a record must
@@ -198,6 +225,7 @@ private final class ArchiveRecordControl: SCNNode {
     }
     func scroll(by delta:CGFloat,horizontal:CGFloat = 0,precise:Bool) {
         guard currentID == nil,extractions.isEmpty else { return }
+        navigationTarget = nil
         let next = min(maxScroll,max(0,scrollOffset+delta*(precise ? 0.018:0.42)))
         let nextHorizontal = min(8,max(-8,horizontalOffset+horizontal*(precise ? 0.018:0.42)))
         guard next != scrollOffset || nextHorizontal != horizontalOffset else { return }
@@ -232,6 +260,13 @@ private final class ArchiveRecordControl: SCNNode {
         if immediate { crest = ArchiveMotionSpring(value:crestTarget);across = ArchiveMotionSpring(value:acrossTarget) }
         else { crest.step(to:crestTarget,frequency:8,dt:dt);across.step(to:acrossTarget,frequency:7,dt:dt) }
         var active = !crest.settled(at:crestTarget) || !across.settled(at:acrossTarget)
+        if let navigationTarget,currentID == nil,extractions.isEmpty {
+            if immediate { navigationMotion = ArchiveMotionSpring(value:navigationTarget) }
+            else { navigationMotion.step(to:navigationTarget,frequency:10,dt:dt) }
+            scrollOffset = CGFloat(navigationMotion.value);horizontalOffset *= immediate ? 0:0.82
+            placeCamera()
+            active = active || !navigationMotion.settled(at:navigationTarget)
+        }
         var focus:Double = 0
         for (id,node) in nodes {
             guard let slot = slots[id],var height = heights[id] else { continue }
@@ -518,6 +553,7 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
     let appearance:OverlayAppearance
     let selected:String?
     var day:Date? = nil
+    var timelinePosition:Date? = nil
     var regions:[TextRegion] = []
     let size:CGSize
     let reduced:Bool
@@ -552,6 +588,6 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
             guard let (id,action) = coordinator?.action(at:hit) else { return false }
             onRecordAction(id,action);return true
         }
-        context.coordinator.update(frames:frames,images:images,appearance:appearance,selected:selected,size:size,reduced:reduced,day:day)
+        context.coordinator.update(frames:frames,images:images,appearance:appearance,selected:selected,size:size,reduced:reduced,day:day,timelinePosition:timelinePosition)
     }
 }

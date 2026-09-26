@@ -21,6 +21,11 @@ final class ArchiveVisualTests: XCTestCase {
         return view.subviews.compactMap { selectionOverlay(in:$0) }.first
     }
 
+    @MainActor private func searchField(in view:NSView)->NSTextField? {
+        if let field = view as? NSTextField,field.isEditable { return field }
+        return view.subviews.compactMap { searchField(in:$0) }.first
+    }
+
     @MainActor func testRenderArchiveStates() async throws {
         guard let output = ProcessInfo.processInfo.environment["RECALL_ARCHIVE_RENDER_DIR"] else {
             throw XCTSkip("Set RECALL_ARCHIVE_RENDER_DIR to render the native archive")
@@ -184,6 +189,25 @@ final class ArchiveVisualTests: XCTestCase {
             let data = try XCTUnwrap(bitmap.representation(using:.png,properties:[:]))
             try data.write(to:destination.appendingPathComponent("\(name).png"))
             XCTAssertGreaterThan(data.count,10000)
+            if name == "archive-disabled" {
+                let field = try XCTUnwrap(searchField(in:host))
+                let resting = field.convert(field.bounds,to:host)
+                NotificationCenter.default.post(name:Notification.Name("RewindFocusSearch"),object:nil)
+                try await Task.sleep(for:.seconds(1))
+                host.layoutSubtreeIfNeeded()
+                let engaged = try XCTUnwrap(searchField(in:host))
+                let focused = engaged.convert(engaged.bounds,to:host)
+                XCTAssertEqual(resting.midY,focused.midY,accuracy:8,"Focusing the classic search field must not move it to the top")
+                XCTAssertFalse(model.searchPresented)
+                let focusedBitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in:host.bounds))
+                host.cacheDisplay(in:host.bounds,to:focusedBitmap)
+                try XCTUnwrap(focusedBitmap.representation(using:.png,properties:[:])).write(to:destination.appendingPathComponent("classic-search-focused.png"))
+                model.showSearch()
+                try await Task.sleep(for:.seconds(1))
+                let resultsBitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in:host.bounds))
+                host.cacheDisplay(in:host.bounds,to:resultsBitmap)
+                try XCTUnwrap(resultsBitmap.representation(using:.png,properties:[:])).write(to:destination.appendingPathComponent("all-memories.png"))
+            }
             if open {
                 let overlay = try XCTUnwrap(selectionOverlay(in:host))
                 XCTAssertFalse(overlay.isHidden,"Selection must be mounted on the actual expanded image")

@@ -111,15 +111,17 @@ struct SearchGlassSurface: ViewModifier {
 
 struct DesktopBlur: NSViewRepresentable {
     var fadesUpward = false
+    var material:NSVisualEffectView.Material = .fullScreenUI
     func makeNSView(context: Context) -> DesktopEffectView {
         let view = DesktopEffectView()
         view.blendingMode = .behindWindow
-        view.material = .fullScreenUI
+        view.material = material
         view.state = .active
         view.fadesUpward = fadesUpward
         return view
     }
     func updateNSView(_ view: DesktopEffectView, context: Context) {
+        view.material = material
         view.fadesUpward = fadesUpward
     }
 }

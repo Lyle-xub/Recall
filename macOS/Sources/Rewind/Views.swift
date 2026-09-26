@@ -76,7 +76,7 @@ struct RootView: View {
                 if model.settings.glassArchiveEnabled {
                     ArchiveBackdrop(appearance:model.settings.appearance).ignoresSafeArea().allowsHitTesting(false)
                 } else if expanded {
-                    DesktopBlur().ignoresSafeArea().allowsHitTesting(false)
+                    DesktopBlur(material:.underWindowBackground).ignoresSafeArea().allowsHitTesting(false)
                 }
                 DesktopClickShield {
                     searchFocused = false
@@ -86,10 +86,10 @@ struct RootView: View {
                 }.ignoresSafeArea()
                 if model.settings.glassArchiveEnabled {
                 ArchiveStackView(model:model,focusedID:$archiveFocusedID)
-                    .opacity(!expanded && model.selected == nil && model.timelineCursor == nil ? 1:0)
+                    .opacity(!expanded && model.selected == nil ? 1:0)
                     .scaleEffect(expanded || model.selected != nil ? 0.96:1)
-                    .allowsHitTesting(!expanded && model.selected == nil && model.timelineCursor == nil)
-                    .accessibilityHidden(expanded || model.selected != nil || model.timelineCursor != nil)
+                    .allowsHitTesting(!expanded && model.selected == nil)
+                    .accessibilityHidden(expanded || model.selected != nil)
                 }
                 if !expanded,let frame = model.selected {
                     history(frame, size:geo.size).transition(.opacity)
@@ -101,7 +101,7 @@ struct RootView: View {
                 } else {
                     if model.selected != nil { historyActions.position(x:geo.size.width/2,y:top+108) }
                     if model.total == 0 { recordingPrompt.position(x:geo.size.width/2,y:geo.size.height*0.425+106) }
-                    else if model.timelineCursor != nil,model.selected == nil {
+                    else if !model.settings.glassArchiveEnabled,model.timelineCursor != nil,model.selected == nil {
                         Label("No screen captured at this time",systemImage:"clock")
                             .font(.system(size:12)).foregroundStyle(.secondary).padding(.horizontal,18).padding(.vertical,12)
                             .liquidGlass(radius:18,interactive:false).position(x:geo.size.width/2,y:geo.size.height*0.425+90)
@@ -111,13 +111,13 @@ struct RootView: View {
                 if showSearchActions || !model.settings.glassArchiveEnabled {
                     searchToolbar(width:min(1020,geo.size.width-196))
                         .frame(height:showSearchActions ? 58:72)
-                        .position(x:geo.size.width/2,y:showSearchActions ? top+43:geo.size.height*0.425)
+                        .position(x:geo.size.width/2,y:compactSearch || model.settings.glassArchiveEnabled ? top+43:geo.size.height*0.425)
                         .transition(.opacity.combined(with:.scale(scale:0.94)))
                         .zIndex(5)
                 }
                 HStack {
                     if !model.settings.glassArchiveEnabled {
-                        BareIconButton(symbol:expanded || model.selected != nil ? "arrow.left":"xmark",label:expanded ? "Back to desktop":"Close Recall") { goBack() }
+                        RoundButton(symbol:expanded || model.selected != nil ? "arrow.left":"xmark",label:expanded ? "Back to desktop":"Close Recall") { goBack() }
                     } else if expanded || model.selected != nil || showSearchActions || archiveFocusedID != nil {
                         BareIconButton(symbol:"arrow.left",label:model.settings.glassArchiveEnabled ? "返回档案":"返回记忆库") { goBack() }.frame(width:showSearchActions ? 58:34,height:58)
                     } else {
@@ -141,11 +141,13 @@ struct RootView: View {
                             Rectangle().fill(Color.primary.opacity(0.16)).frame(width:1,height:16)
                             Text("\(model.total)").font(.system(size:13,weight:.medium).monospacedDigit()).fixedSize().foregroundStyle(Color.overlayControl)
                             BareIconButton(symbol:model.recordingRequested ? "pause":"play",label:model.recordingActionTitle,size:13) { model.toggleRecording() }
-                            menu
+                            if model.settings.glassArchiveEnabled { menu } else { menu.liquidGlass(radius:25) }
                             if model.settings.glassArchiveEnabled { BareIconButton(symbol:"xmark",label:"关闭 Recall",size:11) { model.hideOverlay() } }
                         }.transition(.opacity)
+                    } else if !model.settings.glassArchiveEnabled {
+                        menu.liquidGlass(radius:25)
                     }
-                }.padding(.horizontal,34).position(x:geo.size.width/2,y:top+(showSearchActions || !model.settings.glassArchiveEnabled ? 43:59))
+                }.padding(.horizontal,34).position(x:geo.size.width/2,y:top+(showSearchActions || !model.settings.glassArchiveEnabled ? 43:59)).zIndex(10)
                 if model.settings.glassArchiveEnabled {
                 Text("● \(model.apps.count) 个应用 · \(model.total) 条记忆 · 本地索引")
                     .font(.system(size:11,weight:.medium)).foregroundStyle(.secondary)
@@ -167,6 +169,7 @@ struct RootView: View {
         .font(.system(size:14)).buttonStyle(ComfortableButtonStyle()).controlSize(.large).frame(minWidth:800,minHeight:600)
         .preferredColorScheme(model.settings.glassArchiveEnabled ? ArchiveTone.colorScheme(model.settings.appearance):nil)
         .environment(\.glassArchiveAppearance,model.settings.glassArchiveEnabled)
+        .onChange(of:model.archiveTimelinePosition) { _,_ in archiveFocusedID = nil }
         .onChange(of:model.settings.glassArchiveEnabled) { _,enabled in
             archiveFocusedID = nil;searchFocused = false;searchEngaged = false
             model.returnToDesktop()
@@ -289,8 +292,8 @@ struct RootView: View {
             Divider()
             Button("Quit Recall") {NSApplication.shared.terminate(nil)}.keyboardShortcut("q")
         } label: {
-            Image(systemName:"ellipsis").font(.system(size:17,weight:.semibold)).foregroundStyle(Color.overlayControl.opacity(0.78)).frame(width:34,height:34)
-        }.menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).frame(width:34,height:34).help("Recall menu").accessibilityLabel("Recall menu")
+            Image(systemName:"ellipsis").font(.system(size:17,weight:.semibold)).foregroundStyle(Color.overlayControl.opacity(0.78)).frame(width:model.settings.glassArchiveEnabled ? 34:50,height:model.settings.glassArchiveEnabled ? 34:50)
+        }.menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).frame(width:model.settings.glassArchiveEnabled ? 34:50,height:model.settings.glassArchiveEnabled ? 34:50).help("Recall menu").accessibilityLabel("Recall menu")
     }
     private func archiveCaptions(size:CGSize,top:CGFloat)->some View {
         let style = Font.system(size:10,weight:.medium)

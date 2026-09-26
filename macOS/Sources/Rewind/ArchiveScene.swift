@@ -16,51 +16,24 @@ enum ArchiveTone {
     static func colorScheme(_ appearance:OverlayAppearance)->ColorScheme { appearance == .warmDay ? .light:.dark }
 }
 
-/// Warm mist backdrop: an opaque ivory gradient with soft drifting fog blobs,
-/// so the archive never shows the real desktop through the transparent window.
+/// The native material samples the live desktop. A restrained tint keeps
+/// wallpaper colors visible without the old opaque cream blanket.
 struct ArchiveBackdrop: View {
     let appearance: OverlayAppearance
-    @State private var drift = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
-        let day = appearance == .warmDay
-        GeometryReader { geo in
-            ZStack {
-                LinearGradient(colors:day
-                    ? [Color(red:0.960,green:0.956,blue:0.946),ArchiveTone.base(appearance)]
-                    : [Color(red:0.078,green:0.086,blue:0.110),ArchiveTone.base(appearance)],
-                    startPoint:.top,endPoint:.bottom)
-                blob(day ? Color.white.opacity(0.95):Color(red:0.25,green:0.31,blue:0.46).opacity(0.5),radius:geo.size.width*0.66)
-                    .position(x:geo.size.width*0.32,y:geo.size.height*0.18)
-                    .offset(x:drift ? 26:-26,y:drift ? -14:14).animation(driftAnimation(16),value:drift)
-                blob(day ? Color(red:0.80,green:0.84,blue:0.90).opacity(0.55):Color(red:0.20,green:0.25,blue:0.39).opacity(0.55),radius:geo.size.width*0.52)
-                    .position(x:geo.size.width*0.88,y:geo.size.height*0.50)
-                    .offset(x:drift ? -30:30,y:drift ? 18:-18).animation(driftAnimation(19),value:drift)
-                blob(day ? Color(red:0.96,green:0.86,blue:0.78).opacity(0.40):Color(red:0.31,green:0.22,blue:0.37).opacity(0.40),radius:geo.size.width*0.44)
-                    .position(x:geo.size.width*0.10,y:geo.size.height*0.90)
-                    .offset(x:drift ? 20:-20,y:drift ? 12:-12).animation(driftAnimation(23),value:drift)
-            }
-            .animation(.easeInOut(duration:0.7),value:appearance)
-            .onAppear { drift = true }
-        }
-    }
-    private func blob(_ color:Color,radius:CGFloat)->some View {
-        Circle().fill(RadialGradient(colors:[color,color.opacity(0)],center:.center,startRadius:0,endRadius:radius/2))
-            .frame(width:radius,height:radius)
-    }
-    private func driftAnimation(_ duration:Double)->Animation? {
-        reduceMotion ? nil:.easeInOut(duration:duration).repeatForever(autoreverses:true)
+        ZStack {
+            DesktopBlur(material:.underWindowBackground)
+            LinearGradient(colors:appearance == .warmDay
+                ? [.white.opacity(0.09),.white.opacity(0.025)]
+                : [.black.opacity(0.16),.black.opacity(0.06)],startPoint:.top,endPoint:.bottom)
+        }.allowsHitTesting(false)
     }
 }
 
-/// Ivory gradient for the detached timeline strip window: clear at the top,
-/// settling into the archive base tone at the bottom edge of the screen.
 struct ArchiveStripBackground: View {
     let appearance: OverlayAppearance
     var body: some View {
-        LinearGradient(colors:[ArchiveTone.base(appearance).opacity(0),ArchiveTone.base(appearance).opacity(0.72),ArchiveTone.base(appearance)],
-                       startPoint:.top,endPoint:.bottom)
-            .animation(.easeInOut(duration:0.7),value:appearance)
+        DesktopBlur(fadesUpward:true,material:.underWindowBackground)
     }
 }
 
@@ -136,7 +109,7 @@ struct ArchiveStackView: View {
         GeometryReader { geo in
             ZStack {
                 ArchiveGlassRenderer(frames:frames,images:images,appearance:model.settings.appearance,
-                    selected:focusedID,day:model.archiveDay,regions:focusedID.flatMap { recognizedRegions[$0] } ?? [],size:geo.size,reduced:reduceMotion,onSelect:toggle,onRecordAction:recordAction,onHoverRecord:{ hoveredID = $0 })
+                    selected:focusedID,day:model.archiveDay,timelinePosition:model.archiveTimelinePosition,regions:focusedID.flatMap { recognizedRegions[$0] } ?? [],size:geo.size,reduced:reduceMotion,onSelect:toggle,onRecordAction:recordAction,onHoverRecord:{ hoveredID = $0 })
                     .accessibilityRepresentation {
                         VStack {
                             ForEach(frames) { frame in
@@ -150,8 +123,8 @@ struct ArchiveStackView: View {
                             }
                         }
                     }
-                LinearGradient(stops:[.init(color:ArchiveTone.base(model.settings.appearance),location:0),
-                    .init(color:ArchiveTone.base(model.settings.appearance).opacity(0.9),location:0.08),
+                LinearGradient(stops:[.init(color:ArchiveTone.base(model.settings.appearance).opacity(0.13),location:0),
+                    .init(color:ArchiveTone.base(model.settings.appearance).opacity(0.04),location:0.08),
                     .init(color:.clear,location:0.23)],startPoint:.top,endPoint:.bottom)
                     .allowsHitTesting(false)
                 VStack {

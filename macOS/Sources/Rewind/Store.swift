@@ -108,18 +108,21 @@ final class MemoryStore: @unchecked Sendable {
     }
     /// Bounded day queries avoid loading today's thousands of captures just
     /// to reach yesterday. Deduplicate screenshots before applying the limit.
-    func archiveFrames(around anchor:Date,calendar:Calendar = .current) throws -> [MemoryFrame] {
+    func archiveFrames(around anchor:Date,calendar:Calendar = .current,near time:Date? = nil) throws -> [MemoryFrame] {
         var result:[MemoryFrame] = []
         for column in ArchiveDayLayout.columns(frames:[],around:anchor,calendar:calendar) {
             let end = calendar.date(byAdding:.day,value:1,to:column.day)!
+            let ordering = time == nil ? "time DESC,id":"ABS(time-?),time DESC,id"
+            var parameters:[Any?] = [column.day.timeIntervalSince1970,end.timeIntervalSince1970]
+            if let time { parameters.append(time.timeIntervalSince1970) };parameters.append(ArchiveDayLayout.recordsPerDay)
             result += try jsonRows("""
                 SELECT json FROM (
                     SELECT json,time,id,ROW_NUMBER() OVER (
                         PARTITION BY json_extract(json,'$.imagePath') ORDER BY time DESC,id
                     ) AS duplicate FROM frames
                     WHERE time>=? AND time<? AND demo=0 AND deleted IS NULL
-                ) WHERE duplicate=1 ORDER BY time DESC,id LIMIT ?
-                """,[column.day.timeIntervalSince1970,end.timeIntervalSince1970,ArchiveDayLayout.recordsPerDay],as:MemoryFrame.self)
+                ) WHERE duplicate=1 ORDER BY \(ordering) LIMIT ?
+                """,parameters,as:MemoryFrame.self)
         }
         return result
     }

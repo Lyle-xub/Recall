@@ -11,6 +11,8 @@ import ServiceManagement
     @Published var settings: AppSettings
     @Published var frames: [MemoryFrame] = []
     @Published var archiveFrames: [MemoryFrame] = []
+    @Published var archiveTimelinePosition:Date?
+    private let archiveNavigationWorker:LatestRequestWorker<Date,[MemoryFrame]>
     @Published var archiveDay = Calendar.current.startOfDay(for:Date())
     private var archiveDayInitialized = false
     @Published var apps: [String] = []
@@ -131,6 +133,8 @@ import ServiceManagement
         previewWorker = LatestRequestWorker { try previewDB.frame($0) }
         navigationWorker = LatestRequestWorker { try TimelineNavigationResult.load($0,store:navigationDB) }
         activityWorker = LatestRequestWorker { try TimelineActivityResult.load($0,store:activityDB) }
+        let archiveDB = try MemoryStore(root:root,readOnly:true)
+        archiveNavigationWorker = LatestRequestWorker { try archiveDB.archiveFrames(around:$0,near:$0) }
         transcriptWorker = LatestRequestWorker { try RecordingRecognitionDetail.load($0,store:previewDB) }
         searchWorker = LatestRequestWorker { try MemorySearchPage.load($0,store:searchDB) }
         capture = CaptureEngine(store:store)
@@ -253,13 +257,14 @@ import ServiceManagement
                 let latest = try libraryReader.frames(demo:false,limit:1).first?.timestamp ?? Date()
                 archiveDay = Calendar.current.startOfDay(for:latest);archiveDayInitialized = true
             }
-            archiveFrames = try libraryReader.archiveFrames(around:archiveDay)
+            archiveFrames = try libraryReader.archiveFrames(around:archiveDay,near:archiveTimelinePosition)
             refreshTimelineActivity(force:true)
             if searchPresented { reloadSearch() }
             if let selected,!timeline.contains(where:{$0.id == selected.id}) { loadTimeline(around:selected.timestamp) }
         } catch { self.error = error.localizedDescription }
     }
     func moveArchiveDay(by offset:Int) {
+        archiveNavigationWorker.cancel();archiveTimelinePosition = nil;timelineCursor = nil
         guard let day = Calendar.current.date(byAdding:.day,value:offset,to:archiveDay) else { return }
         do { let records = try libraryReader.archiveFrames(around:day);archiveDay = day;archiveFrames = records }
         catch { self.error = error.localizedDescription }
@@ -309,6 +314,7 @@ import ServiceManagement
         })
     }
     func select(_ frame: MemoryFrame) {
+        archiveNavigationWorker.cancel();archiveTimelinePosition = nil
         previewWorker.cancel(); previewRequestedID = frame.id
         searchPresented = false; timelineCursor = frame.timestamp; display(frame)
         if !timeline.contains(where:{$0.id == frame.id}) { loadTimeline(around:frame.timestamp) }
@@ -324,6 +330,7 @@ import ServiceManagement
     }
     func back() {
         videoLoadTask?.cancel()
+        archiveNavigationWorker.cancel();archiveTimelinePosition = nil
         previewWorker.cancel(); navigationWorker.cancel(); transcriptWorker.cancel(); searchWorker.cancel()
         previewRequestedID = nil; requestedNavigationDate = nil; transcriptSessionID = nil
         selected = nil; timelineCursor = nil; inspectorOpen = false; player?.pause(); player = nil; lines = []; originalTranscriptLines = [];recordingDetail = nil
@@ -334,6 +341,22 @@ import ServiceManagement
         loadTimeline(around:Date()); refreshTimelineActivity(force:true)
     }
     func showSearch() { back(); askOpen = false; searchPresented = true; searchLimit = 200; reloadSearch() }
+    private func browseArchive(at time:Date) {
+        previewWorker.cancel();previewRequestedID = nil
+        selected = nil;inspectorOpen = false;askOpen = false
+        player?.pause();player = nil;videoLoadTask?.cancel()
+        transcriptWorker.cancel();transcriptSessionID = nil;lines = [];recordingDetail = nil
+        archiveTimelinePosition = time
+        let records = archiveFrames.filter { Calendar.current.isDate($0.timestamp,inSameDayAs:time) }
+        if Calendar.current.isDate(archiveDay,inSameDayAs:time),
+           let first = records.map(\.timestamp).min(),let last = records.map(\.timestamp).max(),time >= first,time <= last {
+            archiveNavigationWorker.cancel();return
+        }
+        archiveNavigationWorker.submit(time,apply:{ [weak self] records in
+            guard let self,self.settings.glassArchiveEnabled,self.archiveTimelinePosition == time else { return }
+            self.archiveDay = Calendar.current.startOfDay(for:time);self.archiveFrames = records
+        },fail:{ [weak self] in self?.error = $0.localizedDescription })
+    }
     func scrub(to date: Date, keepingInspector:Bool = false) {
         guard let first = timelineStart ?? timeline.first?.timestamp else { return }
         let time = max(first,min(Date(),date))
@@ -341,10 +364,13 @@ import ServiceManagement
         if searchPresented { searchPresented = false; searchWorker.cancel() }
         if inspectorOpen && !keepingInspector { inspectorOpen = false }
         refreshTimelineActivity()
+        if settings.glassArchiveEnabled && !(keepingInspector && inspectorOpen) { browseArchive(at:time);return }
+        archiveNavigationWorker.cancel();archiveTimelinePosition = nil
         if navigationWindow?.contains(time) != true { loadTimeline(around:time); return }
         resolvePreview(at:time)
     }
     private func resolvePreview(at time:Date) {
+        guard archiveTimelinePosition == nil else { return }
         guard activityWindow?.contains(time) == true else { return }
         let segment = timelineActivity.first { $0.start <= time && $0.end >= time && $0.kind == .application }
         if let segment,let moment = TimelineFrameLookup.nearest(to:time,in:timeline,segment:segment) { requestPreview(moment) }
@@ -404,6 +430,7 @@ import ServiceManagement
         },fail:{ [weak self] in self?.requestedNavigationDate = nil; self?.error = $0.localizedDescription })
     }
     func waitForPendingLoads() async {
+        await archiveNavigationWorker.waitUntilIdle()
         await activityWorker.waitUntilIdle(); await navigationWorker.waitUntilIdle()
         await previewWorker.waitUntilIdle(); await transcriptWorker.waitUntilIdle(); await searchWorker.waitUntilIdle()
     }
@@ -411,7 +438,11 @@ import ServiceManagement
         guard !timeline.isEmpty else {return}
         let current = timelineCursor.flatMap { date in timeline.firstIndex { $0.timestamp == date } } ?? selected.flatMap{frame in timeline.firstIndex{$0.id == frame.id}} ?? timeline.count-1
         let next = current+offset
-        if next >= 0 && next < timeline.count { timelineCursor = timeline[next].timestamp; requestPreview(timeline[next]); return }
+        if next >= 0 && next < timeline.count {
+            if settings.glassArchiveEnabled && !inspectorOpen { scrub(to:timeline[next].timestamp) }
+            else { timelineCursor = timeline[next].timestamp; requestPreview(timeline[next]) }
+            return
+        }
         guard let edge = offset < 0 ? timeline.first:timeline.last else {return}
         do {
             let frame = offset < 0 ? try libraryReader.frames(trash:trash,since:since,until:edge.timestamp.addingTimeInterval(-0.001),demo:false,limit:1).first : try libraryReader.frames(trash:trash,since:edge.timestamp.addingTimeInterval(0.001),demo:false,limit:1,ascending:true).first

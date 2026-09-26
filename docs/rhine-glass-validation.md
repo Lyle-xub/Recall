@@ -59,3 +59,13 @@ swift test --package-path macOS --filter 'ArchiveRidgeMotionTests|ArchiveVisualT
 本轮截图位于 `.test-data/rhine-modes-fixed`。可启动构建位于 `release/Recall.app`；独立真实记录预览仍位于 `.test-data/Recall Glass Preview.app`。
 
 本轮共 36 项相关检查通过（35 项回归首次通过；原生视觉检查改为等待动画稳定后补跑通过）。Release 构建与严格签名验证通过，另提供 `release/Recall-macOS-modes.zip` 及 SHA-256 校验文件。
+
+## 2026-09-26：档案时间线联动与透明材质
+
+- 玻璃模式的时间线拖动通过独立的档案导航状态驱动相机和山脊位置，不再设置传统回看 `selected`。旧预览、转写任务和过期查询不能把页面切回传统模式。
+- 档案查询以目标时刻为中心选取真实截图，仍然按自然日分列与去重；因此可以访问每天最新 48 张以外的较早记录。快速拖动合并查询，并在相邻截图时间之间连续插值移动。
+- 默认模式中，点击搜索框只在中央收缩并展开操作按钮；进入实际结果或回看后才到顶部。关闭、菜单恢复原生玻璃承托，提高复杂桌面背景上的可见性，并保持在搜索层上方。
+- 全部记忆及玻璃档案采用原生 `underWindowBackground` 材质，移除大面积不透明奶白背景与漂移色块。保留轻微冷暖色调，底部继续使用逐渐消隐的原生模糊。
+- 原生视觉检查增加“点击前后搜索框中心高度一致”的断言，并输出 `classic-search-focused.png` 与 `all-memories.png`。截图在 `.test-data/rhine-navigation-fixed`，不提交私人记录。
+
+本轮 15 项导航、日期、响应性及模式回归通过；原生视觉检查另行通过，共 16 项。桌面预览确认了启动时左右角按钮可见，以及点击搜索框后仍在中央展开并保留菜单。原生 Liquid Glass 在 AppKit 离屏截图中可能不完整，因此按钮可见性同时使用实际窗口截图核对。
