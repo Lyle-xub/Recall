@@ -101,7 +101,8 @@ struct ArchiveStackView: View {
     @ObservedObject var model: AppModel
     @Binding var focusedID: String?
     @State private var hoveredID:String?
-    @State private var images: [String:NSImage] = [:]
+    @StateObject private var imageLoader = ArchiveImageLoader()
+    private var images:[String:NSImage] { imageLoader.images }
     @State private var recognizedRegions:[String:[TextRegion]] = [:]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var frames:[MemoryFrame] { model.archiveFrames }
@@ -109,7 +110,7 @@ struct ArchiveStackView: View {
         GeometryReader { geo in
             ZStack {
                 ArchiveGlassRenderer(frames:frames,images:images,appearance:model.settings.appearance,
-                    selected:focusedID,day:model.archiveDay,timelinePosition:model.archiveTimelinePosition,regions:focusedID.flatMap { recognizedRegions[$0] } ?? [],size:geo.size,reduced:reduceMotion,onSelect:toggle,onRecordAction:recordAction,onHoverRecord:{ hoveredID = $0 })
+                    selected:focusedID,day:model.archiveDay,timelinePosition:model.archiveTimelinePosition,regions:focusedID.flatMap { recognizedRegions[$0] } ?? [],size:geo.size,reduced:reduceMotion,onSelect:toggle,onRecordAction:recordAction,onHoverRecord:{ if hoveredID != $0 { hoveredID = $0 } })
                     .accessibilityRepresentation {
                         VStack {
                             ForEach(frames) { frame in
@@ -143,40 +144,39 @@ struct ArchiveStackView: View {
                 // Coalesce pointer sweeps instead of decoding every crossed card.
                 do { try await Task.sleep(for:.milliseconds(100)) } catch { return }
                 guard let pixels = await MemoryImagePipeline.previews.image(at:model.store.root.appendingPathComponent(frame.imagePath),maxPixels:1600),!Task.isCancelled else { return }
-                if CGFloat(pixels.width) > (images[frame.imagePath]?.size.width ?? 0) {
-                    images[frame.imagePath] = NSImage(cgImage:pixels,size:NSSize(width:pixels.width,height:pixels.height))
-                }
+                imageLoader.showDetail(pixels,for:frame.imagePath)
             }
             .task(id:focusedID) {
                 guard let id = focusedID,let frame = frames.first(where: { $0.id == id }) else { return }
                 let url = model.store.root.appendingPathComponent(frame.imagePath)
                 guard let pixels = await MemoryImagePipeline.previews.image(at:url,maxPixels:2600),!Task.isCancelled else { return }
-                images[frame.imagePath] = NSImage(cgImage:pixels,size:NSSize(width:pixels.width,height:pixels.height))
+                imageLoader.showDetail(pixels,for:frame.imagePath)
                 if frame.regions.isEmpty,recognizedRegions[id] == nil {
                     let regions = await Task.detached(priority:.userInitiated) { (try? NativeOCR.recognize(pixels).1) ?? [] }.value
                     if !Task.isCancelled { recognizedRegions[id] = regions }
                 }
             }
+            .task(id:model.archiveExtractionID) {
+                guard let id = model.archiveExtractionID,let frame = frames.first(where:{ $0.id == id }) else { return }
+                // The same physical sheet is extracted only once its real pixels
+                // are ready; the focused task then upgrades it for text selection.
+                guard let pixels = await MemoryImagePipeline.previews.image(at:model.store.root.appendingPathComponent(frame.imagePath),maxPixels:1600),
+                      !Task.isCancelled,model.archiveExtractionID == id else { return }
+                imageLoader.showDetail(pixels,for:frame.imagePath)
+                focusedID = id
+            }
             .onChange(of:frames.map(\.id)) { _,ids in
                 if let focusedID,!ids.contains(focusedID) { self.focusedID = nil }
+                let retained = Set(ids)
+                recognizedRegions = recognizedRegions.filter { retained.contains($0.key) }
             }
             .task(id:frames.map(\.imagePath)) {
-                let paths = Set(frames.map(\.imagePath))
-                var loaded = images.filter { paths.contains($0.key) }
-                for frame in frames where loaded[frame.imagePath] == nil {
-                    guard !Task.isCancelled else { return }
-                    if let pixels = await MemoryImagePipeline.shared.image(at:model.store.root.appendingPathComponent(frame.imagePath),maxPixels:720),!Task.isCancelled {
-                        loaded[frame.imagePath] = NSImage(cgImage:pixels,size:NSSize(width:pixels.width,height:pixels.height))
-                    }
-                }
-                if !Task.isCancelled {
-                    for (path,image) in loaded where image.size.width > (images[path]?.size.width ?? 0) { images[path] = image }
-                    images = images.filter { paths.contains($0.key) }
-                }
+                await imageLoader.load(frames,root:model.store.root,near:model.archiveTimelinePosition ?? model.archiveDay.addingTimeInterval(86399))
             }
         }
     }
     private func toggle(_ id:String?) {
+        model.cancelArchiveExtraction()
         focusedID = focusedID == id ? nil:id
     }
     private func recordAction(_ id:String,_ action:String) {
@@ -185,7 +185,7 @@ struct ArchiveStackView: View {
         case "star":model.star(frame)
         case "copy":model.copy(frame.text.isEmpty ? (recognizedRegions[id] ?? frame.regions).map(\.text).joined(separator:"\n"):frame.text)
         case "rewind":model.select(frame)
-        case "close":focusedID = nil
+        case "close":model.cancelArchiveExtraction();focusedID = nil
         default:break
         }
     }

@@ -12,6 +12,9 @@ import ServiceManagement
     @Published var frames: [MemoryFrame] = []
     @Published var archiveFrames: [MemoryFrame] = []
     @Published var archiveTimelinePosition:Date?
+    @Published private(set) var archiveExtractionID:String?
+    private var archiveSettleTask:Task<Void,Never>?
+    @Published private(set) var timelineDragging = false
     private let archiveNavigationWorker:LatestRequestWorker<Date,[MemoryFrame]>
     @Published var archiveDay = Calendar.current.startOfDay(for:Date())
     private var archiveDayInitialized = false
@@ -264,7 +267,7 @@ import ServiceManagement
         } catch { self.error = error.localizedDescription }
     }
     func moveArchiveDay(by offset:Int) {
-        archiveNavigationWorker.cancel();archiveTimelinePosition = nil;timelineCursor = nil
+        timelineDragging = false;cancelArchiveExtraction();archiveNavigationWorker.cancel();archiveTimelinePosition = nil;timelineCursor = nil
         guard let day = Calendar.current.date(byAdding:.day,value:offset,to:archiveDay) else { return }
         do { let records = try libraryReader.archiveFrames(around:day);archiveDay = day;archiveFrames = records }
         catch { self.error = error.localizedDescription }
@@ -314,7 +317,7 @@ import ServiceManagement
         })
     }
     func select(_ frame: MemoryFrame) {
-        archiveNavigationWorker.cancel();archiveTimelinePosition = nil
+        timelineDragging = false;cancelArchiveExtraction();archiveNavigationWorker.cancel();archiveTimelinePosition = nil
         previewWorker.cancel(); previewRequestedID = frame.id
         searchPresented = false; timelineCursor = frame.timestamp; display(frame)
         if !timeline.contains(where:{$0.id == frame.id}) { loadTimeline(around:frame.timestamp) }
@@ -330,7 +333,7 @@ import ServiceManagement
     }
     func back() {
         videoLoadTask?.cancel()
-        archiveNavigationWorker.cancel();archiveTimelinePosition = nil
+        timelineDragging = false;cancelArchiveExtraction();archiveNavigationWorker.cancel();archiveTimelinePosition = nil
         previewWorker.cancel(); navigationWorker.cancel(); transcriptWorker.cancel(); searchWorker.cancel()
         previewRequestedID = nil; requestedNavigationDate = nil; transcriptSessionID = nil
         selected = nil; timelineCursor = nil; inspectorOpen = false; player?.pause(); player = nil; lines = []; originalTranscriptLines = [];recordingDetail = nil
@@ -346,7 +349,9 @@ import ServiceManagement
         selected = nil;inspectorOpen = false;askOpen = false
         player?.pause();player = nil;videoLoadTask?.cancel()
         transcriptWorker.cancel();transcriptSessionID = nil;lines = [];recordingDetail = nil
+        cancelArchiveExtraction()
         archiveTimelinePosition = time
+        if !timelineDragging { scheduleArchiveExtraction(delay:.milliseconds(220)) }
         let records = archiveFrames.filter { Calendar.current.isDate($0.timestamp,inSameDayAs:time) }
         if Calendar.current.isDate(archiveDay,inSameDayAs:time),
            let first = records.map(\.timestamp).min(),let last = records.map(\.timestamp).max(),time >= first,time <= last {
@@ -357,6 +362,32 @@ import ServiceManagement
             self.archiveDay = Calendar.current.startOfDay(for:time);self.archiveFrames = records
         },fail:{ [weak self] in self?.error = $0.localizedDescription })
     }
+    func cancelArchiveExtraction() {
+        archiveSettleTask?.cancel();archiveSettleTask = nil
+        archiveExtractionID = nil
+    }
+    func beginTimelineDrag() {
+        timelineDragging = true;cancelArchiveExtraction()
+    }
+    func endTimelineDrag() {
+        timelineDragging = false
+        scheduleArchiveExtraction(delay:.zero)
+    }
+    private func scheduleArchiveExtraction(delay:Duration) {
+        guard settings.glassArchiveEnabled,let time = archiveTimelinePosition else { return }
+        archiveSettleTask?.cancel()
+        archiveSettleTask = Task { [weak self] in
+            do { try await Task.sleep(for:delay) } catch { return }
+            guard let self else { return }
+            await self.archiveNavigationWorker.waitUntilIdle()
+            guard !Task.isCancelled,self.settings.glassArchiveEnabled,!self.timelineDragging,
+                  self.archiveTimelinePosition == time else { return }
+            self.archiveExtractionID = self.archiveFrames
+                .filter { Calendar.current.isDate($0.timestamp,inSameDayAs:time) }
+                .min { abs($0.timestamp.timeIntervalSince(time)) < abs($1.timestamp.timeIntervalSince(time)) }?.id
+        }
+    }
+    func waitForArchiveSettlement() async { await archiveSettleTask?.value }
     func scrub(to date: Date, keepingInspector:Bool = false) {
         guard let first = timelineStart ?? timeline.first?.timestamp else { return }
         let time = max(first,min(Date(),date))
@@ -365,7 +396,7 @@ import ServiceManagement
         if inspectorOpen && !keepingInspector { inspectorOpen = false }
         refreshTimelineActivity()
         if settings.glassArchiveEnabled && !(keepingInspector && inspectorOpen) { browseArchive(at:time);return }
-        archiveNavigationWorker.cancel();archiveTimelinePosition = nil
+        timelineDragging = false;cancelArchiveExtraction();archiveNavigationWorker.cancel();archiveTimelinePosition = nil
         if navigationWindow?.contains(time) != true { loadTimeline(around:time); return }
         resolvePreview(at:time)
     }
@@ -493,6 +524,7 @@ import ServiceManagement
         toastTask = Task { try? await Task.sleep(for:.seconds(3)); if !Task.isCancelled { toast = nil } }
     }
     func hideOverlay() {
+        cancelArchiveExtraction()
         if let overlay = window as? RewindOverlayWindow { overlay.dismiss(hideApplication:true) }
         else { window?.orderOut(nil); NSApp.hide(nil) }
     }
@@ -515,7 +547,7 @@ import ServiceManagement
     func stopRecording() async { recordingCoordinator.request(false);await recordingCoordinator.waitUntilSettled() }
     func shutDownRecording() async { await recordingCoordinator.shutdown();transcriptionTask?.cancel() }
     // Prevent a pending animation completion from restarting capture during quit.
-    func prepareToQuit() { recordingCoordinator.request(false) }
+    func prepareToQuit() { cancelArchiveExtraction();recordingCoordinator.request(false) }
     private func beginCapture() async throws {
         error = nil;capturePermissionRequired = false
         try await capture.start(settings:settings,allowed:{ [weak self] in self?.recordingCoordinator.state.shouldCapture == true })

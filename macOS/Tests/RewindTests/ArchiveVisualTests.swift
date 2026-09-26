@@ -189,6 +189,33 @@ final class ArchiveVisualTests: XCTestCase {
             let data = try XCTUnwrap(bitmap.representation(using:.png,properties:[:]))
             try data.write(to:destination.appendingPathComponent("\(name).png"))
             XCTAssertGreaterThan(data.count,10000)
+            if name == "archive-desktop" {
+                replacements.forEach { $0.removeFromSuperview() }
+                let target = try XCTUnwrap(model.archiveFrames.sorted { $0.timestamp < $1.timestamp }.dropFirst(8).first)
+                model.beginTimelineDrag();model.scrub(to:target.timestamp)
+                await model.waitForPendingLoads()
+                try await Task.sleep(for:.milliseconds(400))
+                XCTAssertNil(model.archiveExtractionID)
+                XCTAssertTrue(selectionOverlay(in:host)?.isHidden ?? true)
+                model.endTimelineDrag();await model.waitForArchiveSettlement()
+                XCTAssertEqual(model.archiveExtractionID,target.id)
+                for _ in 0..<120 {
+                    if let overlay = selectionOverlay(in:host),!overlay.isHidden,overlay.frame.width > size.width*0.5 { break }
+                    try await Task.sleep(for:.milliseconds(100))
+                }
+                let overlay = try XCTUnwrap(selectionOverlay(in:host))
+                XCTAssertFalse(overlay.isHidden,"Releasing the real-record timeline must extract its sheet")
+                XCTAssertGreaterThan(overlay.frame.width,size.width*0.5)
+                let extracted = materializeMetal(in:host)
+                let image = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in:host.bounds))
+                host.cacheDisplay(in:host.bounds,to:image)
+                try XCTUnwrap(image.representation(using:.png,properties:[:])).write(to:destination.appendingPathComponent("timeline-release-extracted.png"))
+                extracted.forEach { $0.removeFromSuperview() }
+                model.beginTimelineDrag()
+                try await Task.sleep(for:.milliseconds(100))
+                XCTAssertTrue(overlay.isHidden,"A new drag must immediately release the text selection overlay")
+                model.back()
+            }
             if name == "archive-disabled" {
                 let field = try XCTUnwrap(searchField(in:host))
                 let resting = field.convert(field.bounds,to:host)

@@ -81,7 +81,7 @@ struct RootView: View {
                 DesktopClickShield {
                     searchFocused = false
                     if archiveFocusedID != nil {
-                        withAnimation(reduceMotion ? nil:.spring(response:0.76,dampingFraction:0.86)) { archiveFocusedID = nil }
+                        withAnimation(reduceMotion ? nil:.spring(response:0.76,dampingFraction:0.86)) { model.cancelArchiveExtraction();archiveFocusedID = nil }
                     } else { model.dismissTimeline() }
                 }.ignoresSafeArea()
                 if model.settings.glassArchiveEnabled {
@@ -169,6 +169,7 @@ struct RootView: View {
         .font(.system(size:14)).buttonStyle(ComfortableButtonStyle()).controlSize(.large).frame(minWidth:800,minHeight:600)
         .preferredColorScheme(model.settings.glassArchiveEnabled ? ArchiveTone.colorScheme(model.settings.appearance):nil)
         .environment(\.glassArchiveAppearance,model.settings.glassArchiveEnabled)
+        .onChange(of:model.timelineDragging) { _,dragging in if dragging { archiveFocusedID = nil } }
         .onChange(of:model.archiveTimelinePosition) { _,_ in archiveFocusedID = nil }
         .onChange(of:model.settings.glassArchiveEnabled) { _,enabled in
             archiveFocusedID = nil;searchFocused = false;searchEngaged = false
@@ -189,7 +190,7 @@ struct RootView: View {
         let wasSearching = searchEngaged
         searchFocused = false; searchEngaged = false
         if archiveFocusedID != nil,!expanded,model.selected == nil {
-            withAnimation(reduceMotion ? nil:.spring(response:0.76,dampingFraction:0.86)) { archiveFocusedID = nil }
+            withAnimation(reduceMotion ? nil:.spring(response:0.76,dampingFraction:0.86)) { model.cancelArchiveExtraction();archiveFocusedID = nil }
         }
         else if model.inspectorOpen { model.inspectorOpen = false }
         else if expanded || model.selected != nil { model.returnToDesktop() }

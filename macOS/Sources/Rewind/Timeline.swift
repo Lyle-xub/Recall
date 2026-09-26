@@ -135,9 +135,9 @@ struct TimelineView: View {
                         .simultaneousGesture(DragGesture(minimumDistance:3,coordinateSpace:.named("timeline"))
                             .onChanged { value in
                                 model.window?.makeFirstResponder(nil)
-                                if dragAnchor == nil { dragAnchor = cursor }
+                                if dragAnchor == nil { model.beginTimelineDrag();dragAnchor = cursor }
                                 if let dragAnchor { model.scrub(to:dragAnchor.addingTimeInterval(-value.translation.width/model.timelineScale)) }
-                            }.onEnded { _ in dragAnchor = nil })
+                            }.onEnded { _ in dragAnchor = nil;model.endTimelineDrag() })
                     }
                     playhead
                     HStack {
@@ -162,9 +162,9 @@ struct TimelineView: View {
     private var input: some View {
         TimelineInputSurface(pan:{ delta,began in
             model.window?.makeFirstResponder(nil)
-            if began { dragAnchor = cursor }
+            if began { model.beginTimelineDrag();dragAnchor = cursor }
             if let dragAnchor { model.scrub(to:dragAnchor.addingTimeInterval(-delta/model.timelineScale)) }
-        },end:{ dragAnchor = nil },wheel:{ dx,dy,zoom in
+        },end:{ dragAnchor = nil;model.endTimelineDrag() },wheel:{ dx,dy,zoom in
             model.window?.makeFirstResponder(nil)
             if zoom { model.setTimelineSpan(model.timelineSpan * exp(dy*0.015)) }
             else { model.panTimeline(points:abs(dx) > abs(dy) ? dx:dy) }

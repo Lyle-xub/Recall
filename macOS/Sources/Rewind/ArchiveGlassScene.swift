@@ -49,7 +49,13 @@ private final class ArchiveRecordControl: SCNNode {
     private var previousTime:TimeInterval = 0
     private(set) var scrollOffset:CGFloat = 0
     private var horizontalOffset:CGFloat = 0
-    private var navigationKey = ""
+    private var navigationDate:Date?
+    private var layoutRevision = 0
+    private var navigationRevision = -1
+    private var imageKeys:[String:ObjectIdentifier] = [:]
+    private(set) var surfaceBuildCount = 0
+    private(set) var textureUpdateCount = 0
+    private(set) var layoutUpdateCount = 0
     private var navigationTarget:Double?
     private var navigationMotion = ArchiveMotionSpring(value:0)
     private var maxScroll:CGFloat = 0
@@ -100,11 +106,12 @@ private final class ArchiveRecordControl: SCNNode {
         let isNight = appearance == .deepNight
         scene.fogColor = isNight ? NSColor(red:0.04,green:0.05,blue:0.07,alpha:1):NSColor(red:0.90,green:0.89,blue:0.86,alpha:1)
         let center = Calendar.current.startOfDay(for:day ?? frames.max(by: { $0.timestamp < $1.timestamp })?.timestamp ?? Date())
-        let keys = frames.map { "\($0.id)|\($0.imagePath)|\($0.starred)|\($0.regions.count)|\($0.ocrKey ?? "")|\(images[$0.imagePath].map { String(describing:ObjectIdentifier($0)) } ?? "pending")" }
+        let keys = frames.map { "\($0.id)|\($0.imagePath)|\($0.starred)|\($0.regions.count)|\($0.ocrKey ?? "")" }
         if keys != frameKeys || isNight != night || anchorDay != center {
             frameKeys = keys;night = isNight;anchorDay = center
             reconcile(frames:frames,images:images)
         }
+        updateImages(images)
         if selected != currentID {
             onPresentationChanged?()
             if let previous = currentID,var motion = extractions[previous] {
@@ -128,8 +135,8 @@ private final class ArchiveRecordControl: SCNNode {
     }
 
     private func navigateArchive(to date:Date?) {
-        let key = date.map { String($0.timeIntervalSince1970)+dayColumns.flatMap(\.records).map(\.id).joined() } ?? ""
-        guard key != navigationKey else { return };navigationKey = key
+        guard date != navigationDate || navigationRevision != layoutRevision else { return }
+        navigationDate = date;navigationRevision = layoutRevision
         guard let date,let column = dayColumns.first(where:{ Calendar.current.isDate($0.day,inSameDayAs:date) }),!column.records.isEmpty else {
             navigationTarget = nil;return
         }
@@ -158,6 +165,7 @@ private final class ArchiveRecordControl: SCNNode {
         let rack:SCNNode
         if let existing = scene.rootNode.childNode(withName:"racks",recursively:false) { rack = existing }
         else { rack = SCNNode();rack.name = "racks";scene.rootNode.addChildNode(rack) }
+        layoutRevision += 1;layoutUpdateCount += 1
         dayColumns = ArchiveDayLayout.columns(frames:frames,around:anchorDay ?? Date())
         framesByID = Dictionary(uniqueKeysWithValues:dayColumns.flatMap(\.records).map { ($0.id,$0) })
         let rowCount = max(20,dayColumns.map { $0.records.count }.max() ?? 0)
@@ -173,7 +181,7 @@ private final class ArchiveRecordControl: SCNNode {
         }
         let ids = Set(entries.map { $0.0 })
         for id in Array(nodes.keys) where !ids.contains(id) {
-            nodes.removeValue(forKey:id)?.removeFromParentNode();slots[id] = nil;heights[id] = nil;depths[id] = nil;extractions[id] = nil;surfaceKeys[id] = nil;imageAspects[id] = nil
+            nodes.removeValue(forKey:id)?.removeFromParentNode();slots[id] = nil;heights[id] = nil;depths[id] = nil;extractions[id] = nil;surfaceKeys[id] = nil;imageAspects[id] = nil;imageKeys[id] = nil
         }
         maxScroll = max(0,CGFloat(rowCount)-3)
         scrollOffset = min(scrollOffset,maxScroll)
@@ -183,10 +191,12 @@ private final class ArchiveRecordControl: SCNNode {
             slots[id] = slot
             let image = frame.flatMap { images[$0.imagePath] }
             imageAspects[id] = image.map { $0.size.width/max(1,$0.size.height) } ?? imageAspects[id] ?? 1.6
-            let surfaceKey = "\(frame?.imagePath ?? "empty")|\(frame?.starred ?? false)|\(night)|\(lane)|\(image.map { String(describing:ObjectIdentifier($0)) } ?? "pending")"
+            let surfaceKey = "\(frame?.imagePath ?? "empty")|\(frame?.starred ?? false)|\(night)|\(lane)"
             guard surfaceKeys[id] != surfaceKey else { continue }
             surfaceKeys[id] = surfaceKey
+            surfaceBuildCount += 1
             let surface = makeSheet(frame:frame,image:image,side:lane != 0,lane:lane)
+            imageKeys[id] = image.map(ObjectIdentifier.init)
             if let node = nodes[id] {
                 node.childNodes.forEach { $0.removeFromParentNode() }
                 for child in surface.childNodes { child.removeFromParentNode();node.addChildNode(child) }
@@ -202,6 +212,23 @@ private final class ArchiveRecordControl: SCNNode {
         updateDayLabels()
         placeCamera()
         if reducedMotion { advance(dt:1,immediate:true) } else { wake() }
+    }
+
+    /// Image arrivals only replace the artwork texture. Glass geometry, labels,
+    /// metadata textures and the spring-driven root stay intact.
+    private func updateImages(_ images:[String:NSImage]) {
+        SCNTransaction.begin();SCNTransaction.disableActions = true
+        defer { SCNTransaction.commit() }
+        for (id,frame) in framesByID {
+            let image = images[frame.imagePath],key = image.map(ObjectIdentifier.init)
+            guard key != imageKeys[id],let node = nodes[id],
+                  let artwork = node.childNode(withName:"artwork",recursively:false) else { continue }
+            imageKeys[id] = key;textureUpdateCount += 1
+            artwork.geometry?.firstMaterial?.diffuse.contents = image
+            artwork.isHidden = image == nil
+            if let image { imageAspects[id] = image.size.width/max(1,image.size.height) }
+            shape(node,id:id,progress:Float(extractions[id]?.spring.value ?? 0))
+        }
     }
 
     func hover(_ id:String?) {
@@ -396,11 +423,11 @@ private final class ArchiveRecordControl: SCNNode {
         edge.metalness.contents = 0.12;edge.roughness.contents = 0.12;edge.transparency = 0.5;edge.writesToDepthBuffer = false
         glass.materials = [front,edge,front,edge,edge,edge]
         let body = SCNNode(geometry:glass);body.name = "glass";root.addChildNode(body)
-        if let image {
+        if frame != nil {
             let art = SCNPlane(width:4.87,height:3.0),material = SCNMaterial();material.lightingModel = .constant
             // Actual source pixels, without an opaque portrait canvas or tint.
             material.diffuse.contents = image;art.materials = [material]
-            let node = SCNNode(geometry:art);node.name = "artwork";root.addChildNode(node)
+            let node = SCNNode(geometry:art);node.name = "artwork";node.isHidden = image == nil;root.addChildNode(node)
         }
         if let frame {
             let info = SCNPlane(width:4.85,height:1.0),material = SCNMaterial();material.lightingModel = .constant
