@@ -18,6 +18,10 @@ def main():
     parser.add_argument('--configuration', choices=['Debug', 'Release'], default='Release')
     args = parser.parse_args()
     system = {'Darwin': 'osx', 'Windows': 'win', 'Linux': 'linux'}[platform.system()]
+    if system == 'osx':
+        sdk = subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-version'], text=True).strip()
+        if int(sdk.split('.')[0]) < 26:
+            parser.error('The shared Mac sources require the macOS 26+ SDK; select Xcode 26+ with xcode-select.')
     arch = {'arm64': 'arm64', 'aarch64': 'arm64', 'x86_64': 'x64', 'AMD64': 'x64'}[platform.machine()]
     rid = f'{system}-{arch}'
     name = f'Recall-CLI-{rid}'

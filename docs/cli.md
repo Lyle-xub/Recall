@@ -7,7 +7,7 @@ or import step for existing app data. The glass UI work remains on its own branc
 ## Build and run
 
 Install .NET 10 SDK and Python 3.12+. On macOS, also install Xcode Command Line Tools
-with a macOS 15+ SDK. From the repository root:
+with a macOS 26+ SDK (Xcode 26+); the native helper supports macOS 15+ at runtime. From the repository root:
 
 ```sh
 python3 scripts/build-cli.py
