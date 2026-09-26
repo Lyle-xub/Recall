@@ -22,22 +22,18 @@ struct SettingsView: View {
     @State private var status = ""
     @State private var saving = false
     @State private var connecting = false
-    @State private var confirmEmptyTrash = false
     @State private var cleanupOpen = false
     @State private var displays: [SCDisplay] = []
     @State private var excluded = ""
     @State private var detectedModels: [String] = []
-    @State private var storageUsage: StorageUsage?
-    @State private var storageLoading = false
-    @State private var storageError = ""
-    @State private var storageRefresh = UUID()
+    @ObservedObject private var storageState:StorageUsageModel
     @State private var microphonePermission = CapturePermissions.microphone
     @State private var screenPermission = CapturePermissions.screen
     @State private var requestingMicrophone = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var page: SettingsPage { SettingsPage(rawValue:model.settingsTab) ?? .recording }
-    init(model:AppModel) { self.model = model; _draft = State(initialValue:model.settings) }
+    init(model:AppModel) { self.model = model; _draft = State(initialValue:model.settings);storageState = model.storageUsage }
     var body: some View {
         VStack(spacing:0) {
             header
@@ -62,27 +58,18 @@ struct SettingsView: View {
         .presentationBackground(.white)
         .preferredColorScheme(.light)
         .font(.system(size:13)).controlSize(.large)
-        .sheet(isPresented:$cleanupOpen,onDismiss:{ storageRefresh = UUID() }) {
-            StorageCleanupView(model:model) { message in status = message;storageRefresh = UUID() }
+        .interactiveDismissDisabled(model.storageClearing)
+        .sheet(isPresented:$cleanupOpen) {
+            StorageCleanupView(model:model) { message in status = message }
         }
-        .confirmationDialog("Permanently delete every memory in Trash?",isPresented:$confirmEmptyTrash,titleVisibility:.visible) {
-            Button("Delete permanently",role:.destructive) { do { let count = try model.store.emptyTrash(); model.reload(); status = "Deleted \(count) memories and their unused recordings"; storageRefresh = UUID() } catch { status = error.localizedDescription } }
-        } message: { Text("This removes screenshots, text and recordings that are no longer used by any retained memory. It cannot be undone.") }
-        .task(id:"\(page.rawValue)-\(storageRefresh)") {
-            guard page == .storage else { return }
-            storageLoading = true; storageError = ""
-            let root = model.store.root, models = BuiltinModels.shared.root
-            let worker = Task.detached(priority:.utility) { try StorageUsageReader.scan(root:root,modelRoot:models) }
-            defer { storageLoading = false }
-            do {
-                let result = try await withTaskCancellationHandler(operation:{ try await worker.value },onCancel:{ worker.cancel() })
-                guard !Task.isCancelled else { return }; storageUsage = result
-            } catch is CancellationError {} catch { storageError = error.localizedDescription }
+        .task(id:page.rawValue) {
+            model.storageOptimizer.setStoragePageVisible(page == .storage)
+            if page == .storage { storageState.refresh() }
         }
+        .onDisappear { model.storageOptimizer.setStoragePageVisible(false) }
         .onAppear { chatKey = SecretStore.read("chat"); speechKey = SecretStore.read("transcription"); excluded = draft.excludedApps.joined(separator:"\n") }
         .onReceive(NotificationCenter.default.publisher(for:NSApplication.didBecomeActiveNotification)) { _ in refreshPermissions() }
         .onChange(of:model.settingsTab) { _,_ in refreshPermissions() }
-        .onReceive(model.storageOptimizer.$savedBytes.dropFirst().throttle(for:.seconds(2),scheduler:RunLoop.main,latest:true)) { _ in storageRefresh = UUID() }
     }
     private var categories: some View {
         HStack(spacing:4) {
@@ -269,12 +256,12 @@ struct SettingsView: View {
                 HStack {
                     Label("Storage on this Mac",systemImage:"chart.donut").font(.system(size:13,weight:.semibold)).foregroundStyle(.secondary)
                     Spacer()
-                    if storageLoading { ProgressView().controlSize(.small).frame(width:44,height:44) }
-                    else { Button { storageRefresh = UUID() } label: { Image(systemName:"arrow.clockwise").frame(width:44,height:44) }.buttonStyle(.plain).help("Refresh storage usage").accessibilityLabel("Refresh storage usage") }
+                    if storageState.loading { ProgressView().controlSize(.small).frame(width:44,height:44) }
+                    else { Button { storageState.refresh(force:true) } label: { Image(systemName:"arrow.clockwise").frame(width:44,height:44) }.buttonStyle(.plain).help("Refresh storage usage").accessibilityLabel("Refresh storage usage") }
                 }
-                if let usage = storageUsage { StorageUsageChart(usage:usage) }
-                else if storageLoading { Text("Measuring files on disk…").font(.system(size:12)).foregroundStyle(.secondary).frame(maxWidth:.infinity,minHeight:120) }
-                if !storageError.isEmpty { Text(storageError).font(.system(size:12)).foregroundStyle(.orange) }
+                if let usage = storageState.usage { StorageUsageChart(usage:usage) }
+                else if storageState.loading { Text("Measuring storage in the background…").font(.system(size:12)).foregroundStyle(.secondary).frame(maxWidth:.infinity,minHeight:120) }
+                if !storageState.error.isEmpty { Text(storageState.error).font(.system(size:12)).foregroundStyle(.orange) }
                 Divider().opacity(0.5)
                 HStack(spacing:16) {
                     VStack(alignment:.leading,spacing:4) {
@@ -298,7 +285,7 @@ struct SettingsView: View {
                 HStack {
                     Button("View Trash") { model.trash = true; model.showSearch(); dismiss() }.buttonStyle(SettingsActionStyle())
                     Spacer()
-                    Button("Empty permanently…",role:.destructive) { confirmEmptyTrash = true }.buttonStyle(SettingsActionStyle())
+                    Button("Clear Trash…",role:.destructive) { cleanupOpen = true }.buttonStyle(SettingsActionStyle())
                 }
             }
             Label("API keys are stored securely in macOS Keychain.",systemImage:"key").font(.system(size:11)).foregroundStyle(.secondary).padding(.horizontal,6)

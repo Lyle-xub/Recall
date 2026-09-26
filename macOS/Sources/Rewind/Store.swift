@@ -16,10 +16,13 @@ final class MemoryStore: @unchecked Sendable {
     private var segmentMaintenance:[Int]?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-    init(root: URL, readOnly:Bool = false) throws {
+    init(root: URL, readOnly:Bool = false, maintenanceOnly:Bool = false) throws {
         self.root = root
-        if readOnly {
-            guard sqlite3_open_v2(root.appendingPathComponent("memory.sqlite").path,&db,SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,nil) == SQLITE_OK else { throw RewindError.message("Cannot open memory database for reading.") }
+        // Maintenance opens an already initialized library on its own worker.
+        // Never run startup recovery again or share the UI writer's mutex.
+        if readOnly || maintenanceOnly {
+            let access = readOnly ? SQLITE_OPEN_READONLY:SQLITE_OPEN_READWRITE
+            guard sqlite3_open_v2(root.appendingPathComponent("memory.sqlite").path,&db,access | SQLITE_OPEN_FULLMUTEX,nil) == SQLITE_OK else { throw RewindError.message("Cannot open memory database for reading.") }
             sqlite3_busy_timeout(db,5000)
             return
         }
@@ -373,8 +376,8 @@ extension MemoryStore {
             return FileManager.default.fileExists(atPath:url.path) ? try Data(contentsOf:url):nil
         }
     }
-    private func imageStorageBytes(_ path:String)throws->Int64 {
-        let url = try CleanupFiles.ownedURL(path,root:root)
+    private func imageStorageBytes(_ path:String,validatedURL:URL? = nil)throws->Int64 {
+        let url = try validatedURL ?? CleanupFiles.ownedURL(path,root:root)
         if FileManager.default.fileExists(atPath:url.path) {return try CleanupFiles.size(url)}
         return TilePackStore.key(path) == nil ? 0:try tilePacks().size(path)
     }
@@ -492,7 +495,13 @@ extension MemoryStore {
     }
     private func pruneTileReferences() throws {
         try execute("DELETE FROM ocr_payloads WHERE key NOT IN (SELECT json_extract(json,'$.ocrKey') FROM frames WHERE json_extract(json,'$.ocrKey') IS NOT NULL)")
-        try execute("DELETE FROM image_tiles WHERE image NOT IN (SELECT json_extract(json,'$.imagePath') FROM frames UNION SELECT json_extract(json,'$.meetingImagePath') FROM frames WHERE json_extract(json,'$.meetingImagePath') IS NOT NULL)")
+        let retained = "SELECT json_extract(json,'$.imagePath') FROM frames UNION SELECT json_extract(json,'$.meetingImagePath') FROM frames WHERE json_extract(json,'$.meetingImagePath') IS NOT NULL"
+        if try jsonRows("SELECT json_quote(type) FROM sqlite_master WHERE name='image_tiles'",as:String.self).first == "view" {
+            // Delete integer associations directly; routing millions of links
+            // through the compatibility view repeats path lookups per tile.
+            try execute("DELETE FROM tile_links WHERE image IN (SELECT id FROM image_paths WHERE path NOT IN (\(retained)))")
+        } else { try execute("DELETE FROM image_tiles WHERE image NOT IN (\(retained))") }
+        try execute("DELETE FROM image_archives WHERE source NOT IN (\(retained)) AND destination NOT IN (\(retained))")
     }
     private func archiveIsComplete(_ path:String,data:Data)->Bool {
         if path.hasSuffix("."+VisualArchive.fileExtension) {
@@ -644,7 +653,7 @@ extension MemoryStore {
     func cleanupPlan(scope:StorageCleanupScope,keepStarred:Bool = true,at date:Date = Date()) throws -> StorageCleanupPlan {
         try synchronized { try makeCleanupPlan(scope:scope,keepStarred:keepStarred,at:date,allowedIDs:nil) }
     }
-    private func makeCleanupPlan(scope:StorageCleanupScope,keepStarred:Bool,at date:Date,allowedIDs:Set<String>?) throws -> StorageCleanupPlan {
+    private func makeCleanupPlan(scope:StorageCleanupScope,keepStarred:Bool,at date:Date,allowedIDs:Set<String>?,allowedSessions:Set<String>? = nil) throws -> StorageCleanupPlan {
         let records = try cleanupFrames(), sessions = try sessions()
         let active = Set(sessions.filter { $0.endedAt == nil }.map(\.id)), cutoff = scope.cutoff(at:date)
         var skippedActive = 0, skippedStarred = 0
@@ -657,7 +666,13 @@ extension MemoryStore {
             return true
         }
         let ids = Set(removed.map(\.id)), remaining = records.filter { !ids.contains($0.id) }
-        let removedSessions = Set(removed.compactMap(\.session)).subtracting(Set(remaining.compactMap(\.session))).subtracting(active)
+        var removedSessions = Set(removed.compactMap(\.session)).subtracting(Set(remaining.compactMap(\.session))).subtracting(active)
+        // All memories also includes completed empty recordings. Revalidation
+        // can only remove session IDs present in the confirmed preview.
+        if scope == .all {
+            let used = Set(records.compactMap(\.session))
+            removedSessions.formUnion(sessions.filter { !used.contains($0.id) && $0.endedAt != nil && $0.startedAt <= date && allowedSessions?.contains($0.id) != false }.map(\.id))
+        }
         let closedSessions = sessions.filter { removedSessions.contains($0.id) && $0.endedAt != nil }
         func sessionPaths(_ session:RecordingSession) -> [String] {
             [session.videoPath,session.systemAudioPath,session.microphoneAudioPath,session.supersededVideoPath,"recordings/\(session.id).wav","recordings/\(session.id).m4a"].compactMap { $0 }.filter { !$0.isEmpty }
@@ -669,29 +684,33 @@ extension MemoryStore {
         let candidates = try expandedImagePaths(removed.flatMap(\.paths) + closedSessions.flatMap(sessionPaths))
         var paths:[String] = [], bytes:Int64 = 0, seen = Set<URL>()
         for path in candidates.sorted() {
+            try Task.checkCancellation()
             let url = try CleanupFiles.ownedURL(path,root:root)
             guard !protected.contains(url),seen.insert(url).inserted else { continue }
-            bytes += try imageStorageBytes(path); paths.append(path)
+            bytes += try imageStorageBytes(path,validatedURL:url); paths.append(path)
         }
         return StorageCleanupPlan(scope:scope,keepStarred:keepStarred,preparedAt:date,frameIDs:ids,sessionIDs:Set(closedSessions.map(\.id)),paths:paths,bytes:bytes,skippedActive:skippedActive,skippedStarred:skippedStarred)
     }
     /// Confirmation authorizes this snapshot only. Revalidate stars, active
     /// sessions and shared media under the writer lock before changing anything.
-    func clearStorage(_ preview:StorageCleanupPlan) throws -> StorageCleanupResult {
+    func clearStorage(_ preview:StorageCleanupPlan,progress:(@Sendable (String)->Void)? = nil) throws -> StorageCleanupResult {
         try synchronized {
             try execute("BEGIN IMMEDIATE")
             var stage:URL?
             do {
-                let plan = try makeCleanupPlan(scope:preview.scope,keepStarred:preview.keepStarred,at:preview.preparedAt,allowedIDs:preview.frameIDs)
-                guard !plan.frameIDs.isEmpty else { try execute("COMMIT");return StorageCleanupResult(memories:0,recordings:0,bytes:0,pendingFileRemoval:false) }
+                progress?("Checking shared media and protected memories…")
+                let plan = try makeCleanupPlan(scope:preview.scope,keepStarred:preview.keepStarred,at:preview.preparedAt,allowedIDs:preview.frameIDs,allowedSessions:preview.sessionIDs)
+                guard !plan.frameIDs.isEmpty || !plan.sessionIDs.isEmpty else { try execute("COMMIT");return StorageCleanupResult(memories:0,recordings:0,bytes:0,pendingFileRemoval:false) }
                 let folder = root.appendingPathComponent(".cleanup-"+UUID().uuidString,isDirectory:true)
                 try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:false);stage = folder
-                let journal = CleanupJournal(frameIDs:Array(plan.frameIDs),paths:plan.paths)
+                let journal = CleanupJournal(frameIDs:Array(plan.frameIDs),paths:plan.paths,sessionIDs:Array(plan.sessionIDs))
                 try encoder.encode(journal).write(to:folder.appendingPathComponent("journal.json"),options:.atomic)
                 for (index,path) in plan.paths.enumerated() {
+                    if index % 256 == 0 { progress?("Removing media · \(index) of \(plan.paths.count) files") }
                     let source = try CleanupFiles.ownedURL(path,root:root)
                     if FileManager.default.fileExists(atPath:source.path) { try FileManager.default.moveItem(at:source,to:folder.appendingPathComponent(String(index))) }
                 }
+                progress?("Updating the search index…")
                 let ids = Array(plan.frameIDs)
                 for start in stride(from:0,to:ids.count,by:400) {
                     let batch = Array(ids[start..<min(start+400,ids.count)]), placeholders = batch.map { _ in "?" }.joined(separator:",")
@@ -706,6 +725,7 @@ extension MemoryStore {
                 try execute("COMMIT")
                 // If interrupted after commit, the journal lets startup finish
                 // removing quarantined files without touching unrelated content.
+                progress?("Reclaiming disk space…")
                 var pending = false
                 do { try removePackedTiles(plan.paths);try FileManager.default.removeItem(at:folder) } catch { pending = true }
                 try? execute("PRAGMA wal_checkpoint(PASSIVE)")
@@ -720,10 +740,15 @@ extension MemoryStore {
     private func recoverCleanup(_ folder:URL) throws {
         guard let data = try? Data(contentsOf:folder.appendingPathComponent("journal.json")) else { return }
         let journal = try decoder.decode(CleanupJournal.self,from:data)
-        guard !journal.frameIDs.isEmpty else { return }
+        guard !journal.frameIDs.isEmpty || journal.sessionIDs?.isEmpty == false else { return }
         var uncommitted = false
         for id in journal.frameIDs {
             if try !jsonRows("SELECT json_quote(id) FROM frames WHERE id=?",[id],as:String.self).isEmpty { uncommitted = true; break }
+        }
+        if !uncommitted {
+            for id in journal.sessionIDs ?? [] {
+                if try session(id) != nil { uncommitted = true;break }
+            }
         }
         if uncommitted {
             for (index,path) in journal.paths.enumerated() {
@@ -1007,7 +1032,7 @@ extension MemoryStore {
             // Fold layout migration into this vacuum instead of copying the
             // database once for each optimizer job.
             try compactTileReferences(reclaim:false)
-            try execute("DELETE FROM ocr_payloads WHERE key NOT IN (SELECT json_extract(json,'$.ocrKey') FROM frames WHERE json_extract(json,'$.ocrKey') IS NOT NULL)")
+            try pruneTileReferences()
             try execute("INSERT INTO frame_fts(frame_fts,rank) VALUES('integrity-check',1)")
             try execute("INSERT INTO ocr_fts(ocr_fts,rank) VALUES('integrity-check',1)")
             try execute("PRAGMA wal_checkpoint(PASSIVE)")

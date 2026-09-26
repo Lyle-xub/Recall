@@ -25,7 +25,14 @@ struct StorageCleanupView:View {
             }
             VStack(alignment:.leading,spacing:18) {
                 HStack { Text("Clear").fontWeight(.medium);Spacer();Picker("Cleanup range",selection:$scope) { ForEach(StorageCleanupScope.allCases) { item in Text(item.title).tag(item) } }.labelsHidden().frame(width:240) }
-                Toggle("Keep starred memories",isOn:$keepStarred).toggleStyle(.switch)
+                HStack(spacing:16) {
+                    VStack(alignment:.leading,spacing:4) {
+                        Text("Keep starred memories").fontWeight(.medium)
+                        Text("Protect your favorites from this cleanup.").font(.system(size:11)).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength:12)
+                    Toggle("Keep starred memories",isOn:$keepStarred).labelsHidden().toggleStyle(.switch).frame(minWidth:44,minHeight:44)
+                }
             }.disabled(clearing).padding(18).background(Color.blue.opacity(0.035),in:RoundedRectangle(cornerRadius:20))
             VStack(alignment:.leading,spacing:12) {
                 HStack(alignment:.firstTextBaseline) {
@@ -33,7 +40,7 @@ struct StorageCleanupView:View {
                     Spacer()
                     if loading || clearing { ProgressView().controlSize(.small) }
                 }
-                Text(clearing ? "Clearing selected memories…":"Estimated space to free").font(.system(size:12)).foregroundStyle(.secondary)
+                Text(clearing ? model.storageCleanupStatus:"Estimated space to free").font(.system(size:12)).foregroundStyle(.secondary)
                 if let plan,!loading {
                     Divider().opacity(0.5)
                     HStack { Label("\(plan.frameIDs.count) memories",systemImage:"photo.on.rectangle");Spacer();Label("\(plan.sessionIDs.count) recordings",systemImage:"video") }.font(.system(size:12))
@@ -51,7 +58,7 @@ struct StorageCleanupView:View {
                 Spacer()
                 Button("Cancel") { dismiss() }.buttonStyle(.bordered).disabled(clearing)
                 Button("Clear…",role:.destructive) { confirm = true }.buttonStyle(.borderedProminent).tint(.red)
-                    .disabled(loading || clearing || plan?.frameIDs.isEmpty != false)
+                    .disabled(loading || clearing || (plan?.frameIDs.isEmpty != false && plan?.sessionIDs.isEmpty != false))
             }
         }.padding(26).frame(width:550).background(.white).presentationBackground(.white).preferredColorScheme(.light)
             .font(.system(size:13)).controlSize(.large).interactiveDismissDisabled(clearing)
@@ -64,7 +71,7 @@ struct StorageCleanupView:View {
                     guard !Task.isCancelled else { return };plan = result;loading = false
                 } catch { if !Task.isCancelled { self.error = error.localizedDescription;loading = false } }
             }
-            .confirmationDialog("Permanently clear \(plan?.frameIDs.count ?? 0) memories?",isPresented:$confirm,titleVisibility:.visible) {
+            .confirmationDialog("Permanently clear this selection?",isPresented:$confirm,titleVisibility:.visible) {
                 Button("Clear permanently",role:.destructive) { clear() }
                 Button("Cancel",role:.cancel) {}
             } message: { Text("About \(StorageUsage.formatted(plan?.bytes ?? 0)) of media can be removed. This cannot be undone.") }
@@ -72,12 +79,9 @@ struct StorageCleanupView:View {
     private func clear() {
         guard let plan,!clearing else { return }
         clearing = true;error = nil
-        model.cancelAsk();model.back()
-        let store = model.store
         Task {
             do {
-                let result = try await Task.detached(priority:.utility) { try store.clearStorage(plan) }.value
-                model.messages.removeAll { message in message.sources.contains { plan.frameIDs.contains($0.id) } };model.reload()
+                let result = try await model.clearStorage(plan)
                 let message = "Cleared \(result.memories) memories · \(StorageUsage.formatted(result.bytes)) freed" + (result.pendingFileRemoval ? ". Remaining media will be removed when Recall next opens.":"")
                 completed(message);clearing = false;dismiss()
             } catch { self.error = error.localizedDescription;clearing = false }

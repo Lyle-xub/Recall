@@ -1,7 +1,8 @@
 import Foundation
+import Combine
 
-struct StorageCategory: Identifiable, Sendable {
-    enum Kind: String, CaseIterable, Sendable {
+struct StorageCategory: Identifiable, Sendable, Codable {
+    enum Kind: String, CaseIterable, Sendable, Codable {
         case screenshots, video, audio, models, index, other
         var label:String { switch self { case .screenshots:"Screenshots";case .video:"Video";case .audio:"Audio";case .models:"Models";case .index:"Search index";case .other:"Other" } }
     }
@@ -9,7 +10,7 @@ struct StorageCategory: Identifiable, Sendable {
     var bytes: Int64
     var id: String { kind.rawValue }
 }
-struct StorageUsage: Sendable {
+struct StorageUsage: Sendable, Codable {
     var categories: [StorageCategory]
     var availableBytes: Int64?
     var capacityBytes: Int64?
@@ -56,4 +57,49 @@ enum StorageUsageReader {
         let disk = try? root.resourceValues(forKeys:[.volumeAvailableCapacityKey,.volumeTotalCapacityKey])
         return StorageUsage(categories:StorageCategory.Kind.allCases.map { StorageCategory(kind:$0,bytes:counts[$0] ?? 0) },availableBytes:disk?.volumeAvailableCapacity.map(Int64.init),capacityBytes:disk?.volumeTotalCapacity.map(Int64.init),unreadableFiles:unreadable)
     }
+}
+
+/// One scan per library, independent of a sheet's lifetime. Reopening settings
+/// reuses the last result; a mutation queues at most one follow-up scan.
+@MainActor final class StorageUsageModel:ObservableObject {
+    @Published private(set) var usage:StorageUsage?
+    @Published private(set) var loading = false
+    @Published private(set) var error = ""
+    private let scan:@Sendable () throws -> StorageUsage
+    private let cacheURL:URL
+    private var cacheLoaded = false
+    private var refreshAgain = false
+    private var task:Task<Void,Never>?
+    init(root:URL,modelRoot:URL,scan:(@Sendable () throws -> StorageUsage)? = nil) {
+        cacheURL = root.appendingPathComponent("storage-usage.json")
+        self.scan = scan ?? { try StorageUsageReader.scan(root:root,modelRoot:modelRoot) }
+    }
+    func refresh(force:Bool = false) {
+        if task != nil { if force { refreshAgain = true };return }
+        if !force,let usage,Date().timeIntervalSince(usage.measuredAt) < 60 { return }
+        loading = true;error = ""
+        let scan = self.scan,cacheURL = self.cacheURL,readCache = !cacheLoaded
+        cacheLoaded = true
+        task = Task { [weak self] in
+            guard let self else { return }
+            if readCache {
+                let cached = await Task.detached(priority:.utility) { () -> StorageUsage? in
+                    guard let data = try? Data(contentsOf:cacheURL) else { return nil }
+                    return try? JSONDecoder().decode(StorageUsage.self,from:data)
+                }.value
+                if usage == nil { usage = cached }
+            }
+            do {
+                let result = try await Task.detached(priority:.utility) {
+                    let result = try scan()
+                    if let data = try? JSONEncoder().encode(result) { try? data.write(to:cacheURL,options:.atomic) }
+                    return result
+                }.value
+                usage = result
+            } catch { self.error = error.localizedDescription }
+            loading = false;task = nil
+            if refreshAgain { refreshAgain = false;refresh(force:true) }
+        }
+    }
+    func waitForRefresh() async { while let task { await task.value } }
 }

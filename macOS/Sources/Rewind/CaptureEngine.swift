@@ -211,6 +211,17 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
         if !ocrQueue.isEmpty { startOCRIfNeeded() }
     }
 
+    func suspendIndexing() async {
+        ocrTask?.cancel();await ocrTask?.value
+        ocrQueue.removeAll();publishRecognitionProgress()
+    }
+    func resumeIndexingAfterCleanup() async {
+        let database = store
+        ocrQueue = (try? await Task.detached(priority:.utility) { try database.pendingIndexFrames() }.value) ?? []
+        publishRecognitionProgress()
+        if !ocrQueue.isEmpty { startOCRIfNeeded() }
+    }
+
     func setInterfaceVisible(_ visible:Bool) {
         interfaceVisible = visible
         // Stop accepting new screen pixels; saved screenshots keep indexing.

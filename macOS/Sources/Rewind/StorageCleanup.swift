@@ -38,6 +38,7 @@ struct CleanupFrameRecord:Decodable {
 struct CleanupJournal:Codable {
     let frameIDs:[String]
     let paths:[String]
+    var sessionIDs:[String]? = nil
 }
 
 enum CleanupFiles {

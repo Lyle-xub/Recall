@@ -66,6 +66,34 @@ final class StorageCleanupTests:XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath:root.appendingPathComponent("models/test.gguf").path))
         XCTAssertEqual(try store.usage(in:DateInterval(start:now.addingTimeInterval(-60),end:now)).count,1)
     }
+    func testAllIncludesEmptyCompletedRecordingsButConfirmationExcludesNewOnes() throws {
+        try session("empty")
+        let preview = try store.cleanupPlan(scope:.all,at:now)
+        XCTAssertTrue(preview.frameIDs.isEmpty);XCTAssertEqual(preview.sessionIDs,["empty"])
+        try session("new-empty")
+        let result = try store.clearStorage(preview)
+        XCTAssertEqual(result.memories,0);XCTAssertEqual(result.recordings,1)
+        XCTAssertNil(try store.session("empty"));XCTAssertNotNil(try store.session("new-empty"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath:root.appendingPathComponent("recordings/empty.mp4").path))
+    }
+    func testEmptyRecordingCleanupJournalRecoversBeforeAndAfterCommit() throws {
+        try session("orphan")
+        let media = root.appendingPathComponent("recordings/orphan.mp4")
+        let folder = root.appendingPathComponent(".cleanup-"+UUID().uuidString)
+        let journal = CleanupJournal(frameIDs:[],paths:["recordings/orphan.mp4"],sessionIDs:["orphan"])
+        try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:false)
+        try JSONEncoder().encode(journal).write(to:folder.appendingPathComponent("journal.json"))
+        try FileManager.default.moveItem(at:media,to:folder.appendingPathComponent("0"))
+        store = nil;store = try MemoryStore(root:root)
+        XCTAssertTrue(FileManager.default.fileExists(atPath:media.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath:folder.path))
+        _ = try store.clearStorage(store.cleanupPlan(scope:.all,at:now))
+        try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:false)
+        try JSONEncoder().encode(journal).write(to:folder.appendingPathComponent("journal.json"))
+        try Data([1]).write(to:folder.appendingPathComponent("0"))
+        store = nil;store = try MemoryStore(root:root)
+        XCTAssertNil(try store.session("orphan"));XCTAssertFalse(FileManager.default.fileExists(atPath:folder.path))
+    }
     func testUnsafePathsAndSymlinksAreRejectedBeforeDeletion() throws {
         let good = try memory()
         var bad = good;bad.id = UUID().uuidString;bad.imagePath = "../outside.jpg";try store.save(bad)

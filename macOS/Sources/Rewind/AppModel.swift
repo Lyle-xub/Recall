@@ -7,6 +7,9 @@ import ServiceManagement
 @MainActor final class AppModel: ObservableObject {
     let store: MemoryStore
     let capture: CaptureEngine
+    let storageUsage: StorageUsageModel
+    @Published private(set) var storageClearing = false
+    @Published private(set) var storageCleanupStatus = ""
     let storageOptimizer: StorageOptimizer
     @Published var settings: AppSettings
     @Published private(set) var interfaceVisible = false
@@ -131,6 +134,7 @@ import ServiceManagement
         let root = root ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("RewindReplica")
         store = try MemoryStore(root:root)
         storageOptimizer = StorageOptimizer(store:store)
+        storageUsage = StorageUsageModel(root:root,modelRoot:BuiltinModels.shared.root)
         // A separate WAL reader keeps long history/search queries from holding
         // the writer's lock while screen capture saves the next frame.
         let previewDB = try MemoryStore(root:root,readOnly:true), navigationDB = try MemoryStore(root:root,readOnly:true)
@@ -184,6 +188,9 @@ import ServiceManagement
             if searchPresented {reloadSearch()}
         }
         storageOptimizer.onFramesArchived = capture.onArchived
+        storageOptimizer.onFinished = { [weak self] in
+            guard let self,!storageClearing else { return };storageUsage.refresh(force:true)
+        }
         capture.onError = { [weak self] text in self?.error = text }
         capture.onIndexingIssue = { [weak self] text in self?.indexingIssue = text }
         capture.onFrameRecognition = { [weak self] id,state in self?.recognitionActivity.set(state,for:.image(id)) }
@@ -278,6 +285,52 @@ import ServiceManagement
             refreshTimelineActivity(force:true)
             if searchPresented { reloadSearch() }
             if let selected,!timeline.contains(where:{$0.id == selected.id}) { loadTimeline(around:selected.timestamp) }
+        } catch { self.error = error.localizedDescription }
+    }
+    func clearStorage(_ plan:StorageCleanupPlan) async throws -> StorageCleanupResult {
+        guard !storageClearing else { throw RewindError.message("Storage cleanup is already running.") }
+        storageClearing = true;storageCleanupStatus = "Finishing background work…";cancelAsk();back()
+        recordingCoordinator.setInterfaceVisible(true)
+        await recordingCoordinator.waitUntilSettled()
+        await storageOptimizer.beginCleanup()
+        await capture.suspendIndexing()
+        defer {
+            storageClearing = false
+            recordingCoordinator.setInterfaceVisible(interfaceVisible)
+            storageOptimizer.endCleanup()
+            storageUsage.refresh(force:true)
+        }
+        let root = store.root
+        let report:@Sendable (String)->Void = { [weak self] text in Task { @MainActor in self?.storageCleanupStatus = text } }
+        do {
+            let result = try await Task.detached(priority:.utility) {
+                try MemoryStore(root:root,maintenanceOnly:true).clearStorage(plan,progress:report)
+            }.value
+            messages.removeAll { $0.sources.contains { plan.frameIDs.contains($0.id) } }
+            storageCleanupStatus = "Refreshing your library…"
+            await reloadAfterCleanup()
+            await capture.resumeIndexingAfterCleanup()
+            return result
+        } catch {
+            await capture.resumeIndexingAfterCleanup()
+            throw error
+        }
+    }
+    private func reloadAfterCleanup() async {
+        navigationWorker.cancel();archiveNavigationWorker.cancel();requestedNavigationDate = nil
+        frameCache.removeAll();frameCacheOrder.removeAll()
+        let root = store.root,trash = trash,since = since,day = archiveDay,near = archiveTimelinePosition
+        do {
+            let snapshot = try await Task.detached(priority:.utility) {
+                let reader = try MemoryStore(root:root,readOnly:true)
+                return (Array(try reader.timelineMoments(trash:trash,since:since,limit:2000).reversed()),
+                        try reader.count(demo:false),try reader.appNames(demo:false,trash:trash,since:since),
+                        try reader.firstTimelineDate(),try reader.archiveFrames(around:day,near:near))
+            }.value
+            timeline = snapshot.0;total = snapshot.1;apps = snapshot.2;timelineStart = snapshot.3;archiveFrames = snapshot.4
+            navigationWindow = DateInterval(start:timeline.count < 2000 ? .distantPast:timeline.first!.timestamp,end:.distantFuture)
+            refreshTimelineActivity(force:true)
+            if searchPresented { reloadSearch() }
         } catch { self.error = error.localizedDescription }
     }
     func moveArchiveDay(by offset:Int) {
@@ -551,7 +604,7 @@ import ServiceManagement
         interfaceVisible = visible
         capture.setInterfaceVisible(visible)
         storageOptimizer.setInterfaceVisible(visible)
-        recordingCoordinator.setInterfaceVisible(visible)
+        recordingCoordinator.setInterfaceVisible(visible || storageClearing)
         CaptureDiagnostics(root:store.root).write("Recall interface visible=\(visible); recordingRequested=\(recordingRequested)")
     }
     func toggleRecording() {
