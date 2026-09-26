@@ -73,10 +73,10 @@ struct RootView: View {
         GeometryReader { geo in
             let top = model.desktopInsets.top
             ZStack {
-                if model.settings.glassArchiveEnabled {
-                    ArchiveBackdrop(appearance:model.settings.appearance).ignoresSafeArea().allowsHitTesting(false)
-                } else if expanded {
+                if expanded {
                     DesktopBlur(material:.underWindowBackground).ignoresSafeArea().allowsHitTesting(false)
+                } else if model.settings.glassArchiveEnabled {
+                    ArchiveBackdrop(appearance:model.settings.appearance).ignoresSafeArea().allowsHitTesting(false)
                 }
                 DesktopClickShield {
                     searchFocused = false
@@ -168,7 +168,7 @@ struct RootView: View {
         }
         .font(.system(size:14)).buttonStyle(ComfortableButtonStyle()).controlSize(.large).frame(minWidth:800,minHeight:600)
         .preferredColorScheme(model.settings.glassArchiveEnabled ? ArchiveTone.colorScheme(model.settings.appearance):nil)
-        .environment(\.glassArchiveAppearance,model.settings.glassArchiveEnabled)
+        .environment(\.glassArchiveAppearance,model.settings.glassArchiveEnabled && !expanded)
         .onChange(of:model.timelineDragging) { _,dragging in if dragging { archiveFocusedID = nil } }
         .onChange(of:model.archiveTimelinePosition) { _,_ in archiveFocusedID = nil }
         .onChange(of:model.settings.glassArchiveEnabled) { _,enabled in
@@ -265,15 +265,25 @@ struct RootView: View {
     private var searchBar: some View {
         HStack(spacing:14) {
             Image(systemName:"magnifyingglass").font(.system(size:23,weight:.medium))
-            TextField(showSearchActions ? "Search memories":"Search anything you’ve seen, said, or heard",text:$model.query)
+            TextField("",text:$model.query)
                 .textFieldStyle(.plain).font(.system(size:showSearchActions ? 20:23,weight:.regular))
+                .overlay(alignment:.leading) {
+                    // AppKit's placeholder can retain the system's light ink
+                    // inside dark glass. Draw the hint in the SwiftUI theme.
+                    if model.query.isEmpty {
+                        Text(showSearchActions ? "Search memories":"Search anything you’ve seen, said, or heard")
+                            .font(.system(size:showSearchActions ? 20:23,weight:.regular))
+                            .foregroundStyle(Color.primary.opacity(0.70))
+                            .allowsHitTesting(false).accessibilityHidden(true)
+                    }
+                }
                 .focused($searchFocused).onSubmit { model.showSearch() }
                 .accessibilityLabel("Search memories")
             if !model.query.isEmpty {
                 Button { model.query = ""; model.showSearch() } label: { Image(systemName:"xmark.circle.fill").foregroundStyle(.secondary) }
                     .buttonStyle(ComfortableButtonStyle()).help("Clear search")
             }
-        }.padding(.horizontal,24).frame(maxWidth:.infinity,maxHeight:.infinity)
+        }.foregroundStyle(.primary).padding(.horizontal,24).frame(maxWidth:.infinity,maxHeight:.infinity)
     }
     private var menu: some View {
         Menu {
@@ -350,7 +360,7 @@ struct RootView: View {
                     }
                     if model.since != nil { Button("Clear date filter") {model.since = nil}.buttonStyle(ComfortableButtonStyle()).padding(12).liquidGlass(radius:18) }
                 }.padding(.horizontal,48).padding(.vertical,6)
-            }.scrollIndicators(.never).frame(height:62)
+            }.scrollIndicators(.never).modifier(ContinuousResultsBackground()).frame(height:62)
             if model.searchLoading && model.frames.isEmpty {
                 ProgressView("Searching memories…").frame(maxWidth:.infinity,maxHeight:.infinity)
             } else if model.frames.isEmpty {
@@ -368,13 +378,14 @@ struct RootView: View {
                         ForEach(model.frames) { frame in MemoryCard(model:model,frame:frame) }
                     }.padding(.horizontal,42).padding(.top,6).padding(.bottom,24)
                     if model.searchHasMore {Button(model.searchLoading ? "Loading…":"Load more memories") {model.loadMore()}.disabled(model.searchLoading).padding()}
-                }.scrollIndicators(.never).id("\(model.query)|\(model.appFilter ?? "")|\(model.starredOnly)|\(model.since?.timeIntervalSince1970 ?? 0)")
+                }.scrollIndicators(.never).modifier(ContinuousResultsBackground(fadesVerticalEdges:true)).id("\(model.query)|\(model.appFilter ?? "")|\(model.starredOnly)|\(model.since?.timeIntervalSince1970 ?? 0)")
             }
         }
     }
     private func filterButton<Icon:View>(_ title:String,selected:Bool,action:@escaping ()->Void,@ViewBuilder icon:()->Icon) -> some View {
         Button(action:action) {
             HStack(spacing:10) {icon();Text(title).font(.system(size:14,weight:.medium))}
+                .foregroundStyle(.primary)
                 .frame(minWidth:100).padding(.horizontal,17).frame(height:47)
                 .background(selected ? Color.accentColor.opacity(0.16):.clear,in:RoundedRectangle(cornerRadius:19))
                 .liquidGlass(radius:19)
@@ -419,7 +430,7 @@ struct MemoryCard: View {
                     Spacer(minLength:0)
                     if frame.starred {Image(systemName:"star.fill").foregroundStyle(.yellow)}
                 }.padding(.horizontal,3).padding(.bottom,3)
-            }.padding(10).liquidGlass(radius:29,interactive:true)
+            }.foregroundStyle(.primary).padding(10).liquidGlass(radius:29,interactive:true)
                 .overlay(RoundedRectangle(cornerRadius:29).strokeBorder(.white.opacity(hovered ? 0.65:0.12),lineWidth:1))
         }.buttonStyle(ComfortableButtonStyle()).onHover {hovered = $0}
             .task(id:frame.imagePath) {

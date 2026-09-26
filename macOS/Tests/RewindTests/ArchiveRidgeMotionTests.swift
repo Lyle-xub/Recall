@@ -76,7 +76,7 @@ final class ArchiveRidgeMotionTests: XCTestCase {
         view.updateTrackingAreas()
         XCTAssertTrue(view.trackingAreas.contains { $0 === own[0] })
         var received = 0
-        view.onPointer = { _,_ in received += 1 }
+        view.onPointer = { _,_,_ in received += 1 }
         let event = NSEvent.mouseEvent(with:.mouseMoved,location:NSPoint(x:450,y:300),modifierFlags:[],timestamp:1,windowNumber:0,context:nil,eventNumber:0,clickCount:0,pressure:0)!
         view.mouseMoved(with:event)
         XCTAssertEqual(received,1)

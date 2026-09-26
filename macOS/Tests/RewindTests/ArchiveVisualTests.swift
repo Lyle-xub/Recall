@@ -159,6 +159,7 @@ final class ArchiveVisualTests: XCTestCase {
             ("archive-desktop",CGSize(width:1440,height:900),false,false),
             ("archive-night",CGSize(width:1600,height:720),true,false),
             ("archive-open",CGSize(width:1440,height:900),false,true),
+            ("archive-open-night",CGSize(width:1440,height:900),true,true),
             ("archive-compact",CGSize(width:800,height:600),false,false),
             ("archive-disabled",CGSize(width:1440,height:900),false,false)
         ] {
@@ -169,7 +170,7 @@ final class ArchiveVisualTests: XCTestCase {
                 view = AnyView(ZStack {
                     ArchiveBackdrop(appearance:model.settings.appearance)
                     ArchiveStackView(model:model,focusedID:.constant(model.archiveFrames.max(by: { $0.timestamp < $1.timestamp })?.id))
-                }.preferredColorScheme(.light))
+                }.preferredColorScheme(night ? .dark:.light))
             } else { view = AnyView(RootView(model:model)) }
             let host = NSHostingView(rootView:view.frame(width:size.width,height:size.height))
             window.setContentSize(size);window.contentView = host;window.orderFront(nil)
@@ -219,7 +220,18 @@ final class ArchiveVisualTests: XCTestCase {
                     let windowPoint = native.convert(point,to:nil)
                     let event = try XCTUnwrap(NSEvent.mouseEvent(with:.mouseMoved,location:windowPoint,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,windowNumber:window.windowNumber,context:nil,eventNumber:0,clickCount:0,pressure:0))
                     native.mouseMoved(with:event)
+                    let hitID = archive.hoveredID
                     try await Task.sleep(for:.seconds(3))
+                    if let hitID {
+                        let summit = try XCTUnwrap(rack.childNodes.max { $0.position.y < $1.position.y })
+                        XCTAssertEqual(summit.name,hitID,"The visible summit must be the record under the pointer")
+                        XCTAssertNotNil(summit.childNode(withName:"hover-outline",recursively:false))
+                        var clicked:String?
+                        let originalSelect = native.onSelect;native.onSelect = { clicked = $0 }
+                        native.mouseDown(with:event);native.mouseUp(with:event)
+                        native.onSelect = originalSelect
+                        XCTAssertEqual(clicked,hitID,"Click the highlighted record after geometry has moved")
+                    }
                     let visible = archive.viewportRecords(in:native).visible
                     for _ in 0..<40 {
                         if visible.allSatisfy({ id in archive.scene.rootNode.childNode(withName:id,recursively:true)?.childNode(withName:"artwork",recursively:false)?.isHidden == false }) { break }
@@ -306,6 +318,35 @@ final class ArchiveVisualTests: XCTestCase {
                 let selectionBitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in:host.bounds))
                 host.cacheDisplay(in:host.bounds,to:selectionBitmap)
                 try XCTUnwrap(selectionBitmap.representation(using:.png,properties:[:])).write(to:destination.appendingPathComponent("archive-selection.png"))
+            }
+        }
+        for glass in [false,true] {
+            for night in [false,true] {
+                model.settings.glassArchiveEnabled = glass
+                model.settings.appearance = night ? .deepNight:.warmDay
+                let size = CGSize(width:1440,height:900)
+                let host = NSHostingView(rootView:RootView(model:model).preferredColorScheme(night ? .dark:.light).frame(width:size.width,height:size.height))
+                window.setContentSize(size);window.contentView = host;window.orderFront(nil)
+                try await Task.sleep(for:.milliseconds(100))
+                model.showSearch();await model.waitForPendingLoads()
+                try await Task.sleep(for:.seconds(2))
+                func effects(_ view:NSView)->[DesktopEffectView] {
+                    if let effect = view as? DesktopEffectView { return [effect] }
+                    return view.subviews.flatMap { effects($0) }
+                }
+                XCTAssertEqual(effects(host).count,1,"Results should share the original full-window desktop background")
+                func scrollGrid(_ view:NSView) {
+                    if let scroll = view as? NSScrollView,let document = scroll.documentView,document.bounds.height > scroll.contentView.bounds.height+220 {
+                        scroll.contentView.scroll(to:NSPoint(x:0,y:220));scroll.reflectScrolledClipView(scroll.contentView)
+                    }
+                    view.subviews.forEach { scrollGrid($0) }
+                }
+                scrollGrid(host)
+                try await Task.sleep(for:.milliseconds(300))
+                let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in:host.bounds))
+                host.cacheDisplay(in:host.bounds,to:bitmap)
+                try XCTUnwrap(bitmap.representation(using:.png,properties:[:])).write(to:destination.appendingPathComponent("results-\(glass ? "archive":"classic")-\(night ? "night":"day").png"))
+                model.returnToDesktop()
             }
         }
         model.prepareToQuit(); await model.shutDownRecording(); await model.storageOptimizer.stop()

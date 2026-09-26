@@ -57,6 +57,29 @@ extension View {
     }
 }
 
+/// Results share the single full-window desktop material. macOS scroll-edge
+/// treatments would add a second rectangular veil beneath the filter row.
+struct ContinuousResultsBackground:ViewModifier {
+    var fadesVerticalEdges = false
+    func body(content:Content)->some View {
+        Group {
+            if #available(macOS 26.0, *) {
+                content.scrollContentBackground(.hidden).scrollEdgeEffectHidden(true,for:.all)
+            } else { content.scrollContentBackground(.hidden) }
+        }.mask {
+            if fadesVerticalEdges {
+                // Glass shadows extend beyond each card. Fade their clipping
+                // boundary into the shared backdrop instead of a hard shelf.
+                VStack(spacing:0) {
+                    LinearGradient(colors:[.clear,.black],startPoint:.top,endPoint:.bottom).frame(height:24)
+                    Rectangle().fill(.black)
+                    LinearGradient(colors:[.black,.clear],startPoint:.top,endPoint:.bottom).frame(height:24)
+                }
+            } else { Rectangle().fill(.black) }
+        }
+    }
+}
+
 private struct ModeGlassModifier: ViewModifier {
     let radius: CGFloat
     let interactive: Bool

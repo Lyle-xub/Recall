@@ -34,6 +34,7 @@ private final class ArchiveRecordControl: SCNNode {
     var onPresentationChanged:(()->Void)?
     private(set) var dayColumns:[ArchiveDayColumn] = []
     private var currentID:String?
+    private let hoverOutline = SCNNode()
     private(set) var hoveredID:String?
     private var focalDistance = ArchiveMotionSpring(value:33.5)
     private var aperture = ArchiveMotionSpring(value:5.8)
@@ -70,6 +71,14 @@ private final class ArchiveRecordControl: SCNNode {
     private var target = SCNVector3(-1.9,5.4,0.2)
 
     init() {
+        hoverOutline.name = "hover-outline";hoverOutline.categoryBitMask = 2
+        let material = SCNMaterial();material.lightingModel = .constant
+        material.writesToDepthBuffer = false;material.readsFromDepthBuffer = true
+        for (width,height,x,y) in [(5.37,0.035,0.0,3.25),(5.37,0.035,0.0,-3.25),(0.035,6.5,-2.675,0.0),(0.035,6.5,2.675,0.0)] {
+            let edge = SCNNode(geometry:SCNBox(width:width,height:height,length:0.015,chamferRadius:0))
+            edge.geometry?.materials = [material];edge.position = SCNVector3(x,y,0.095);edge.categoryBitMask = 2
+            hoverOutline.addChildNode(edge)
+        }
         let camera = SCNCamera()
         camera.usesOrthographicProjection = true
         camera.orthographicScale = 4.5
@@ -117,6 +126,7 @@ private final class ArchiveRecordControl: SCNNode {
         }
         updateImages(images)
         if selected != currentID {
+            hoveredID = nil
             onPresentationChanged?()
             if let previous = currentID,var motion = extractions[previous] {
                 motion.target = 0;extractions[previous] = motion
@@ -135,6 +145,7 @@ private final class ArchiveRecordControl: SCNNode {
         }
         if let currentID,let node = nodes[currentID] { shape(node,id:currentID,progress:Float(extractions[currentID]?.spring.value ?? 0)) }
         navigateArchive(to:timelinePosition)
+        updateHoverOutline()
         onPresentationChanged?()
     }
 
@@ -172,6 +183,7 @@ private final class ArchiveRecordControl: SCNNode {
         layoutRevision += 1;layoutUpdateCount += 1
         dayColumns = ArchiveDayLayout.columns(frames:frames,around:anchorDay ?? Date())
         framesByID = Dictionary(uniqueKeysWithValues:dayColumns.flatMap(\.records).map { ($0.id,$0) })
+        if let hoveredID,framesByID[hoveredID] == nil { self.hoveredID = nil }
         let rowCount = max(20,dayColumns.map { $0.records.count }.max() ?? 0)
         var entries:[(String,MemoryFrame?,Int,Double)] = []
         blankIDs.removeAll()
@@ -237,11 +249,21 @@ private final class ArchiveRecordControl: SCNNode {
     }
 
     func hover(_ id:String?) {
-        let next = id.flatMap { framesByID[$0] == nil ? nil:$0 }
+        let next = currentID == nil ? id.flatMap { framesByID[$0] == nil ? nil:$0 }:nil
         guard hoveredID != next else { return }
         hoveredID = next
+        updateHoverOutline()
         // Focus is useful even when Reduce Motion disables the wave.
         if reducedMotion { advance(dt:1,immediate:true) } else { wake() }
+    }
+    private func updateHoverOutline() {
+        guard currentID == nil,let id = hoveredID,let node = nodes[id] else {
+            hoverOutline.removeFromParentNode();return
+        }
+        if hoverOutline.parent !== node { hoverOutline.removeFromParentNode();node.addChildNode(hoverOutline) }
+        hoverOutline.childNodes.first?.geometry?.firstMaterial?.diffuse.contents = night
+            ? NSColor(red:0.62,green:0.91,blue:1,alpha:1)
+            : NSColor(red:0.04,green:0.35,blue:0.40,alpha:1)
     }
     func pointer(at point:CGPoint) {
         guard !reducedMotion,currentID == nil else { return }
@@ -254,8 +276,16 @@ private final class ArchiveRecordControl: SCNNode {
         let far = cameraNode.convertPosition(SCNVector3(x,y,-100),to:nil)
         pointer(rayNear:near,rayFar:far)
     }
-    func pointer(rayNear near:SCNVector3,rayFar far:SCNVector3) {
-        guard !reducedMotion,currentID == nil,abs(far.y-near.y) > 0.0001 else { return }
+    func pointer(rayNear near:SCNVector3,rayFar far:SCNVector3,recordID:String? = nil) {
+        guard currentID == nil else { return }
+        if let recordID,let slot = slots[recordID],framesByID[recordID] != nil {
+            // Use the actual hit sheet, including its lane offset and row
+            // spacing, rather than a guessed plane above the mountain.
+            hover(recordID)
+            guard !reducedMotion else { return }
+            acrossTarget = Double(slot.lane);crestTarget = slot.depth;wake();return
+        }
+        guard !reducedMotion,abs(far.y-near.y) > 0.0001 else { return }
         let t = (5.9-near.y)/(far.y-near.y)
         let x = near.x+(far.x-near.x)*t,z = near.z+(far.z-near.z)*t
         acrossTarget = max(-2,min(2,Double(x/(x < 0 ? 5.65:6.25))))
@@ -292,6 +322,7 @@ private final class ArchiveRecordControl: SCNNode {
         let next = min(maxScroll,max(0,scrollOffset+delta*(precise ? 0.018:0.42)))
         let nextHorizontal = min(8,max(-8,horizontalOffset+horizontal*(precise ? 0.018:0.42)))
         guard next != scrollOffset || nextHorizontal != horizontalOffset else { return }
+        hover(nil)
         scrollOffset = next;horizontalOffset = nextHorizontal
         crestTarget = Double(next)+Double(delta)*(precise ? 0.025:0.16)
         acrossTarget = Double(nextHorizontal)*0.12
@@ -506,10 +537,10 @@ private final class ArchiveRecordControl: SCNNode {
         }
         textureCache[key] = image; return image
     }
-    private static func informationTexture(_ frame:MemoryFrame,night:Bool,aspect:CGFloat)->NSImage {
+    static func informationTexture(_ frame:MemoryFrame,night:Bool,aspect:CGFloat)->NSImage {
         NSImage(size:NSSize(width:190*aspect,height:190),flipped:false) { rect in
-            (night ? NSColor(white:0.10,alpha:0.65):NSColor(white:0.98,alpha:0.65)).setFill();rect.fill()
-            let ink = night ? NSColor(white:0.94,alpha:1):NSColor(white:0.16,alpha:1)
+            (night ? NSColor(white:0.075,alpha:0.96):NSColor(white:0.98,alpha:0.94)).setFill();rect.fill()
+            let ink = night ? NSColor(white:0.98,alpha:1):NSColor(white:0.10,alpha:1)
             let paragraph = NSMutableParagraphStyle();paragraph.lineBreakMode = .byTruncatingTail
             func text(_ value:String,x:CGFloat,y:CGFloat,width:CGFloat,size:CGFloat,bold:Bool = false) {
                 (value as NSString).draw(in:NSRect(x:x,y:y,width:width,height:size*1.6),withAttributes:[.font:NSFont.systemFont(ofSize:size,weight:bold ? .semibold:.regular),.foregroundColor:ink,.paragraphStyle:paragraph])
@@ -525,16 +556,20 @@ private final class ArchiveRecordControl: SCNNode {
                 default:label = "收起";symbol = "arrow.up.left.and.arrow.down.right"
                 }
                 let path = NSBezierPath(roundedRect:button.rect,xRadius:button.rect.height*0.28,yRadius:button.rect.height*0.28)
-                (night ? NSColor.white.withAlphaComponent(0.06):NSColor.white.withAlphaComponent(0.36)).setFill();path.fill()
-                ink.withAlphaComponent(0.13).setStroke();path.lineWidth = 1.5;path.stroke()
+                (night ? NSColor.white.withAlphaComponent(0.09):NSColor.white.withAlphaComponent(0.68)).setFill();path.fill()
+                ink.withAlphaComponent(0.24).setStroke();path.lineWidth = 1.5;path.stroke()
                 let attributes:[NSAttributedString.Key:Any] = [.font:NSFont.systemFont(ofSize:31,weight:.medium),.foregroundColor:ink]
                 let labelSize = (label as NSString).size(withAttributes:attributes)
                 let left = button.rect.midX-(labelSize.width+48)/2
-                NSImage(systemSymbolName:symbol,accessibilityDescription:nil)?.withSymbolConfiguration(.init(pointSize:32,weight:.regular))?.draw(in:NSRect(x:left,y:button.rect.midY-16,width:32,height:32))
+                Self.footerSymbol(symbol,ink:ink)?.draw(in:NSRect(x:left,y:button.rect.midY-16,width:32,height:32))
                 (label as NSString).draw(at:NSPoint(x:left+48,y:button.rect.midY-labelSize.height/2),withAttributes:attributes)
             }
             return true
         }
+    }
+    static func footerSymbol(_ name:String,ink:NSColor)->NSImage? {
+        NSImage(systemSymbolName:name,accessibilityDescription:nil)?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize:32,weight:.semibold).applying(.init(paletteColors:[ink])))
     }
     private static func environment()->NSImage {
         NSImage(size:NSSize(width:1024,height:512),flipped:false) { rect in
@@ -601,13 +636,17 @@ final class ArchiveSceneView: SCNView {
     }
     var onSelect: ((String?)->Void)?
     var onHover: ((String?)->Void)?
-    var onPointer: ((SCNVector3,SCNVector3)->Void)?
+    var onPointer: ((SCNVector3,SCNVector3,String?)->Void)?
     var onAction: ((SCNHitTestResult)->Bool)?
     var onScroll: ((CGFloat,CGFloat,Bool)->Void)?
     private var pressPoint: CGPoint?
     private var dragged = false
     private var pointerTracking:NSTrackingArea?
     private var lastHitTime:TimeInterval = 0
+    private var aimedID:String?
+    private var aimPoint:CGPoint?
+    private var pendingPointer:CGPoint?
+    private var pointerDelivery:Task<Void,Never>?
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         guard pointerTracking == nil else { return }
@@ -617,20 +656,48 @@ final class ArchiveSceneView: SCNView {
     override func mouseEntered(with event:NSEvent) { mouseMoved(with:event) }
     override func mouseMoved(with event:NSEvent) {
         let p = convert(event.locationInWindow,from:nil)
-        onPointer?(unprojectPoint(SCNVector3(p.x,p.y,0)),unprojectPoint(SCNVector3(p.x,p.y,1)))
-        // High-rate mice should not run a geometry hit test for every event.
         let now = ProcessInfo.processInfo.systemUptime
-        if now-lastHitTime >= 1/60 { lastHitTime = now;onHover?(memoryID(at:p)) }
+        let travel = aimPoint.map { hypot(p.x-$0.x,p.y-$0.y) } ?? .infinity
+        if now-lastHitTime >= 1/60 || travel > 8 {
+            updatePointer(at:p)
+        } else {
+            // Deliver the final sample even when a fast mouse stops between
+            // ticks. Otherwise the highlight can remain on the previous card.
+            pendingPointer = p
+            if pointerDelivery == nil {
+                let delay = max(0,1/60-(now-lastHitTime))
+                pointerDelivery = Task { @MainActor [weak self] in
+                    do { try await Task.sleep(for:.seconds(delay)) } catch { return }
+                    guard let self,let point = self.pendingPointer else { return }
+                    self.updatePointer(at:point)
+                }
+            }
+        }
     }
-    override func mouseExited(with event:NSEvent) { onHover?(nil) }
+    private func updatePointer(at point:CGPoint) {
+        pointerDelivery?.cancel();pointerDelivery = nil;pendingPointer = nil
+        lastHitTime = ProcessInfo.processInfo.systemUptime;aimPoint = point;aimedID = memoryID(at:point)
+        onPointer?(unprojectPoint(SCNVector3(point.x,point.y,0)),unprojectPoint(SCNVector3(point.x,point.y,1)),aimedID)
+        onHover?(aimedID)
+    }
+    private func clearPointerAim() {
+        pointerDelivery?.cancel();pointerDelivery = nil;pendingPointer = nil
+        aimedID = nil;aimPoint = nil;onHover?(nil)
+    }
+    override func mouseExited(with event:NSEvent) { clearPointerAim() }
     override func scrollWheel(with event:NSEvent) {
+        clearPointerAim()
         onScroll?(-event.scrollingDeltaY,-event.scrollingDeltaX,event.hasPreciseScrollingDeltas)
     }
-    override func mouseDown(with event:NSEvent) { pressPoint = event.locationInWindow;dragged = false }
+    override func mouseDown(with event:NSEvent) {
+        if pendingPointer != nil { updatePointer(at:convert(event.locationInWindow,from:nil)) }
+        pressPoint = event.locationInWindow;dragged = false
+    }
     override func mouseDragged(with event:NSEvent) {
         guard let previous = pressPoint else { return }
         let p = event.locationInWindow
         if dragged || hypot(p.x-previous.x,p.y-previous.y) > 4 {
+            clearPointerAim()
             dragged = true;onScroll?(p.y-previous.y,previous.x-p.x,true);pressPoint = p
         }
     }
@@ -638,7 +705,13 @@ final class ArchiveSceneView: SCNView {
         if !dragged {
             let point = convert(event.locationInWindow,from:nil)
             let hit = hitTest(point,options:[.searchMode:SCNHitTestSearchMode.closest.rawValue,.categoryBitMask:1]).first
-            if let hit,onAction?(hit) == true { } else { onSelect?(memoryID(at:point)) }
+            if let hit,onAction?(hit) == true { } else {
+                // The wave can move geometry beneath a stationary mouse. Click
+                // the highlighted sheet, not a newly exposed neighbour.
+                let stable = aimPoint.map { hypot(point.x-$0.x,point.y-$0.y) <= 8 } ?? false
+                let aimed = aimedID.flatMap { archive?.hoveredID == $0 && archive?.recordIDs.contains($0) == true ? $0:nil }
+                onSelect?(stable ? aimed ?? memoryID(at:point):memoryID(at:point))
+            }
         }
         pressPoint = nil;dragged = false
     }
@@ -682,7 +755,7 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
         view.onViewportChange = onViewportChange
         view.onSelect = onSelect
         view.onHover = { [weak coordinator = context.coordinator] id in coordinator?.hover(id);onHoverRecord?(id) }
-        view.onPointer = { [weak coordinator = context.coordinator] near,far in coordinator?.pointer(rayNear:near,rayFar:far) }
+        view.onPointer = { [weak coordinator = context.coordinator] near,far,id in coordinator?.pointer(rayNear:near,rayFar:far,recordID:id) }
         view.onAction = { [weak coordinator = context.coordinator] hit in
             guard let (id,action) = coordinator?.action(at:hit) else { return false }
             onRecordAction(id,action);return true
