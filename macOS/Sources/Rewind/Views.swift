@@ -37,7 +37,7 @@ struct RoundButton: View {
 
 struct RootView: View {
     @ObservedObject var model: AppModel
-    @FocusState private var searchFocused: Bool
+    @State private var searchFocused = false
     @State private var searchEngaged = false
     @State private var archiveFocusedID: String?
     @Namespace private var searchGlassNamespace
@@ -224,11 +224,10 @@ struct RootView: View {
     private var searchBar: some View {
         HStack(spacing:14) {
             Image(systemName:"magnifyingglass").font(.system(size:23,weight:.medium))
-            TextField(showSearchActions ? "Search memories":"Search anything you’ve seen, said, or heard",text:$model.query)
-                .textFieldStyle(.plain).font(.system(size:showSearchActions ? 20:23,weight:.regular))
-                .transaction { $0.animation = nil }
-                .focused($searchFocused).onSubmit { model.showSearch() }
-                .accessibilityLabel("Search memories")
+            NativeSearchField(text:$model.query,focused:$searchFocused,
+                placeholder:showSearchActions ? "Search memories":"Search anything you’ve seen, said, or heard",
+                fontSize:showSearchActions ? 20:23,onSubmit:{model.showSearch()})
+                .frame(maxWidth:.infinity).transaction { $0.animation = nil }
             if !model.query.isEmpty {
                 Button { model.query = ""; model.showSearch() } label: { Image(systemName:"xmark.circle.fill").foregroundStyle(.secondary) }
                     .buttonStyle(ComfortableButtonStyle()).help("Clear search")

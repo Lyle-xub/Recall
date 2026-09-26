@@ -12,6 +12,75 @@ final class TransparentHostingView<Content: View>: NSHostingView<Content> {
     }
 }
 
+/// A single native editor owns text, composition and its placeholder. Opting
+/// out of vibrancy keeps AppKit from darkening placeholder ink inside glass.
+struct NativeSearchField:NSViewRepresentable {
+    @Binding var text:String
+    @Binding var focused:Bool
+    var placeholder:String
+    var fontSize:CGFloat
+    var onSubmit:()->Void
+    @Environment(\.colorScheme) private var scheme
+    func makeCoordinator()->Coordinator { Coordinator(self) }
+    func makeNSView(context:Context)->Field {
+        let field = Field()
+        field.isBordered = false;field.drawsBackground = false;field.focusRingType = .none
+        field.cell?.wraps = false;field.cell?.isScrollable = true
+        field.setContentHuggingPriority(.defaultLow,for:.horizontal)
+        field.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
+        field.delegate = context.coordinator
+        field.didFocus = { [weak coordinator = context.coordinator] in coordinator?.parent.focused = true }
+        field.setAccessibilityLabel("Search memories")
+        return field
+    }
+    func updateNSView(_ field:Field,context:Context) {
+        context.coordinator.parent = self
+        field.appearance = NSAppearance(named:scheme == .dark ? .darkAqua:.aqua)
+        field.font = .systemFont(ofSize:fontSize)
+        field.textColor = scheme == .dark ? .white:.black
+        field.placeholderAttributedString = NSAttributedString(string:placeholder,attributes:[
+            .font:NSFont.systemFont(ofSize:fontSize),
+            .foregroundColor:NSColor(white:scheme == .dark ? 0.78:0.40,alpha:1)])
+        let editor = field.currentEditor() as? NSTextView
+        if field.stringValue != text,editor?.hasMarkedText() != true { field.stringValue = text }
+        if let editor { editor.insertionPointColor = scheme == .dark ? .white:.black }
+        let needsFocus = focused
+        DispatchQueue.main.async { [weak field] in
+            guard let field,let window = field.window,
+                  context.coordinator.parent.focused == needsFocus else { return }
+            if needsFocus,field.currentEditor() == nil { window.makeFirstResponder(field) }
+            else if !needsFocus,field.currentEditor() != nil { window.makeFirstResponder(nil) }
+        }
+    }
+    func sizeThatFits(_ proposal:ProposedViewSize,nsView:Field,context:Context)->CGSize? {
+        CGSize(width:proposal.width ?? 200,height:ceil(NSFont.systemFont(ofSize:fontSize).boundingRectForFont.height))
+    }
+    final class Field:NSTextField {
+        var didFocus:(()->Void)?
+        override var allowsVibrancy:Bool { false }
+        override func becomeFirstResponder()->Bool {
+            let accepted = super.becomeFirstResponder()
+            if accepted { didFocus?() }
+            return accepted
+        }
+    }
+    final class Coordinator:NSObject,NSTextFieldDelegate {
+        var parent:NativeSearchField
+        init(_ parent:NativeSearchField) { self.parent = parent }
+        func controlTextDidBeginEditing(_ notification:Notification) { parent.focused = true }
+        func controlTextDidEndEditing(_ notification:Notification) { parent.focused = false }
+        func controlTextDidChange(_ notification:Notification) {
+            guard let field = notification.object as? NSTextField,
+                  (field.currentEditor() as? NSTextView)?.hasMarkedText() != true else { return }
+            parent.text = field.stringValue
+        }
+        func control(_ control:NSControl,textView:NSTextView,doCommandBy selector:Selector)->Bool {
+            guard selector == #selector(NSResponder.insertNewline(_:)) else { return false }
+            parent.onSubmit();return true
+        }
+    }
+}
+
 /// A nonzero-alpha surface keeps WindowServer from passing transparent-pixel
 /// clicks into other apps. Controls and Live Text are layered above this view.
 struct DesktopClickShield: View {
