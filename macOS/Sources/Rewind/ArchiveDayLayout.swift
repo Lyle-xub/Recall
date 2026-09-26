@@ -49,9 +49,12 @@ struct ArchiveCardMetrics {
         let ratio = max(0.15,aspect)
         let artWidth = min(width-inset*2,(height-verticalChrome)*ratio)
         let artHeight = artWidth/ratio
+        let artBottom = height/2-inset-artHeight
+        // Anchor the complete content block to the screenshot. A footer tied
+        // to the sheet's bottom edge separates as it returns to a tall sleeve.
         return Self(width:width,height:height,
-            artwork:CGRect(x:-artWidth/2,y:height/2-inset-artHeight,width:artWidth,height:artHeight),
-            footer:CGRect(x:-width/2+inset,y:-height/2+inset,width:width-inset*2,height:footerHeight))
+            artwork:CGRect(x:-artWidth/2,y:artBottom,width:artWidth,height:artHeight),
+            footer:CGRect(x:-artWidth/2,y:artBottom-contentGap-footerHeight,width:artWidth,height:footerHeight))
     }
     static func expanded(aspect:CGFloat,viewport:CGSize,verticalSpan:CGFloat)->Self {
         let maxHeight = min(verticalSpan*0.76,ArchiveViewportLayout.cardArea(in:viewport).height*verticalSpan/max(1,viewport.height))

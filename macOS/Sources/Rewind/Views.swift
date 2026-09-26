@@ -270,6 +270,8 @@ struct RootView: View {
         .font(style).tracking(1.8).foregroundStyle(.secondary.opacity(0.85))
         .padding(.horizontal,40)
         .position(x:size.width/2,y:size.height-34)
+        .opacity(model.timelineVisible ? 0:1)
+        .accessibilityHidden(model.timelineVisible)
         .allowsHitTesting(false)
     }
     private var recordingPrompt: some View {

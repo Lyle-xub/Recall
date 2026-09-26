@@ -65,6 +65,7 @@ import Combine
         guard let token = transition.setVisible(visible) else { return }
         let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         if visible {
+            model.timelineVisible = true
             if panel.parent == nil,let parent { parent.addChildWindow(panel,ordered:.above) }
             if !panel.isVisible { panel.alphaValue = 0; panel.orderFront(nil) }
         }
@@ -78,6 +79,7 @@ import Combine
                 guard let self,!visible,self.transition.isCurrent(token,visible:false) else { return }
                 if let parent = self.panel.parent { parent.removeChildWindow(self.panel) }
                 self.panel.orderOut(nil)
+                self.model.timelineVisible = false
             }
         })
     }

@@ -75,7 +75,13 @@ final class ArchiveRenderingTests:XCTestCase {
         let position = archive.cameraNode.convertPosition(card.worldPosition,from:nil)
         XCTAssertEqual(position.y,ArchiveViewportLayout.extractionCenterY(in:size,verticalSpan:span),accuracy:0.001,"Resizing must reposition an already settled card above the timeline")
         update(nil)
-        for _ in 0..<180 { archive.advance(dt:1/60) }
+        for tick in 0..<180 {
+            archive.advance(dt:1/60)
+            let artworkBottom = art.position.y-plane.height*art.scale.y/2
+            let footerTop = footer.position.y+footerPlane.height*footer.scale.y/2
+            XCTAssertEqual(artworkBottom-footerTop,ArchiveCardMetrics.contentGap,accuracy:0.0001,"The footer must stay attached to the screenshot throughout collapse (tick \(tick))")
+            XCTAssertEqual(art.position.x-plane.width*art.scale.x/2,footer.position.x-footerPlane.width*footer.scale.x/2,accuracy:0.0001)
+        }
         XCTAssertNil(archive.selectionSurface())
         XCTAssertTrue(archive.cameraNode.camera!.wantsDepthOfField)
         archive.stopMotion()

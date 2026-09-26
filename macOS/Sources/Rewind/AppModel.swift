@@ -28,6 +28,9 @@ import ServiceManagement
     @Published var searchPresented = false
     @Published var inspectorOpen = false
     @Published var timelineCursor: Date?
+    /// Includes the panel's exit animation so archive controls stay covered
+    /// until the native timeline has completely left the screen.
+    @Published var timelineVisible = false
     @Published var timelineSpan = 300.0
     @Published var timelineViewportWidth = 1200.0
     @Published var timelineActivity: [AppTimeSegment] = []

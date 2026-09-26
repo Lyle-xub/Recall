@@ -113,6 +113,9 @@ struct ArchiveStackView: View {
                     }.font(.system(size:11,weight:.medium)).buttonStyle(.plain)
                         .padding(.horizontal,12).liquidGlass(radius:18).padding(.bottom,22)
                 }
+                .opacity(model.timelineVisible ? 0:1)
+                .allowsHitTesting(!model.timelineVisible)
+                .accessibilityHidden(model.timelineVisible)
             }
             .task(id:active ? hoveredID:nil) {
                 guard active else { return }

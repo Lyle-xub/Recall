@@ -73,4 +73,15 @@ final class ArchiveDayLayoutTests:XCTestCase {
             XCTAssertLessThanOrEqual(center+halfHeight,size.height-116+0.001)
         }
     }
+    func testFooterStaysNextToArtworkAsSheetChangesShape() {
+        for aspect:CGFloat in [0.6,1.6,2.4] {
+            for height:CGFloat in [4.5,6.5,8] {
+                let card = ArchiveCardMetrics.make(width:5.35,height:height,aspect:aspect)
+                XCTAssertEqual(card.artwork.minY-card.footer.maxY,ArchiveCardMetrics.contentGap,accuracy:0.0001)
+                XCTAssertEqual(card.artwork.minX,card.footer.minX,accuracy:0.0001)
+                XCTAssertEqual(card.artwork.maxX,card.footer.maxX,accuracy:0.0001)
+                XCTAssertGreaterThanOrEqual(card.footer.minY,-height/2+ArchiveCardMetrics.inset-0.0001)
+            }
+        }
+    }
 }
