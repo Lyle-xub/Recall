@@ -154,7 +154,7 @@ struct TimelineView: View {
                     .onAppear { model.resizeTimeline(width:geo.size.width); model.refreshTimelineActivity(force:true) }
                     .onChange(of:geo.size.width) { _,width in model.resizeTimeline(width:width) }
                     .onChange(of:tick.date) { _,_ in model.refreshTimelineActivity() }
-            }.frame(height:TimelinePanelController.height)
+            }.frame(height:model.settings.glassArchiveEnabled ? ArchiveViewportLayout.timelineHeight:TimelinePanelController.height)
         }
         .accessibilityElement(children:.contain).accessibilityLabel("Timeline. Drag or scroll to rewind. Pinch to zoom.")
         .accessibilityAdjustableAction { direction in model.step(direction == .increment ? 1:-1) }

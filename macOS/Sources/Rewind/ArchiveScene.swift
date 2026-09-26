@@ -100,6 +100,7 @@ struct ThemeTogglePill: View {
 struct ArchiveStackView: View {
     @ObservedObject var model: AppModel
     @Binding var focusedID: String?
+    var active:Bool = true
     @State private var viewportRecords = ArchiveViewportRecords()
     @State private var hoveredID:String?
     @StateObject private var imageLoader = ArchiveImageLoader()
@@ -111,7 +112,7 @@ struct ArchiveStackView: View {
         GeometryReader { geo in
             ZStack {
                 ArchiveGlassRenderer(frames:frames,images:images,appearance:model.settings.appearance,
-                    selected:focusedID,day:model.archiveDay,timelinePosition:model.archiveTimelinePosition,regions:focusedID.flatMap { recognizedRegions[$0] } ?? [],size:geo.size,reduced:reduceMotion,onSelect:toggle,onRecordAction:recordAction,onHoverRecord:{ if hoveredID != $0 { hoveredID = $0 } },onViewportChange:{ viewportRecords = $0 })
+                    selected:focusedID,day:model.archiveDay,timelinePosition:model.archiveTimelinePosition,regions:focusedID.flatMap { recognizedRegions[$0] } ?? [],size:geo.size,reduced:reduceMotion,active:active,onSelect:toggle,onRecordAction:recordAction,onHoverRecord:{ if hoveredID != $0 { hoveredID = $0 } },onViewportChange:{ viewportRecords = $0 })
                     .accessibilityRepresentation {
                         VStack {
                             ForEach(frames) { frame in
@@ -129,6 +130,7 @@ struct ArchiveStackView: View {
                     .init(color:ArchiveTone.base(model.settings.appearance).opacity(0.04),location:0.08),
                     .init(color:.clear,location:0.23)],startPoint:.top,endPoint:.bottom)
                     .allowsHitTesting(false)
+                    .opacity(focusedID == nil ? 1:0)
                 VStack {
                     Spacer()
                     HStack(spacing:14) {
@@ -140,16 +142,23 @@ struct ArchiveStackView: View {
                         .padding(.horizontal,12).background(.regularMaterial,in:Capsule()).padding(.bottom,22)
                 }
             }
-            .task(id:hoveredID) {
+            .task(id:active ? hoveredID:nil) {
+                guard active else { return }
                 guard focusedID == nil,let id = hoveredID,let frame = frames.first(where: { $0.id == id }) else { return }
                 // Coalesce pointer sweeps instead of decoding every crossed card.
-                do { try await Task.sleep(for:.milliseconds(100)) } catch { return }
-                guard let pixels = await MemoryImagePipeline.previews.image(at:model.store.root.appendingPathComponent(frame.imagePath),maxPixels:1600),!Task.isCancelled else { return }
+                do { try await Task.sleep(for:.milliseconds(180)) } catch { return }
+                guard let pixels = await MemoryImagePipeline.previews.image(at:model.store.root.appendingPathComponent(frame.imagePath),maxPixels:1000),!Task.isCancelled else { return }
                 imageLoader.showDetail(pixels,for:frame.imagePath)
             }
-            .task(id:focusedID) {
+            .task(id:active ? focusedID:nil) {
+                guard active else { return }
                 guard let id = focusedID,let frame = frames.first(where: { $0.id == id }) else { return }
                 let url = model.store.root.appendingPathComponent(frame.imagePath)
+                // The existing thumbnail follows the extraction immediately.
+                // Upload full-size pixels after its busiest rotation phase.
+                if !reduceMotion {
+                    do { try await Task.sleep(for:.milliseconds(350)) } catch { return }
+                }
                 guard let pixels = await MemoryImagePipeline.previews.image(at:url,maxPixels:2600),!Task.isCancelled else { return }
                 imageLoader.showDetail(pixels,for:frame.imagePath)
                 if frame.regions.isEmpty,recognizedRegions[id] == nil {
@@ -157,7 +166,8 @@ struct ArchiveStackView: View {
                     if !Task.isCancelled { recognizedRegions[id] = regions }
                 }
             }
-            .task(id:model.archiveExtractionID) {
+            .task(id:active ? model.archiveExtractionID:nil) {
+                guard active else { return }
                 guard let id = model.archiveExtractionID,let frame = frames.first(where:{ $0.id == id }) else { return }
                 // The same physical sheet is extracted only once its real pixels
                 // are ready; the focused task then upgrades it for text selection.
@@ -174,10 +184,14 @@ struct ArchiveStackView: View {
             .onAppear { requestImages() }
             .onChange(of:frames.map(\.imagePath)) { _,_ in requestImages() }
             .onChange(of:viewportRecords) { _,_ in requestImages() }
+            .onChange(of:active) { _,isActive in
+                if isActive { requestImages() } else { hoveredID = nil;imageLoader.stop() }
+            }
             .onDisappear { imageLoader.stop() }
         }
     }
     private func requestImages() {
+        guard active else { return }
         imageLoader.request(frames,viewport:viewportRecords,root:model.store.root)
     }
     private func toggle(_ id:String?) {

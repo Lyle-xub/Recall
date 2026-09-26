@@ -32,7 +32,7 @@ import Combine
             guard let self,let parent = self.parent,parent.isVisible else { return event }
             // Hysteresis: once the strip is up, the pointer may roam its full
             // height without collapsing it mid-interaction.
-            let threshold = parent.frame.minY+(self.panel.isVisible ? Self.height+24:88)
+            let threshold = parent.frame.minY+(self.panel.isVisible ? self.panel.frame.height+24:88)
             self.hoverReveal = NSEvent.mouseLocation.y <= threshold
             return event
         }
@@ -83,7 +83,8 @@ import Combine
     }
     private func updateFrame() {
         guard let parent else { return }
-        let frame = NSRect(x:parent.frame.minX,y:parent.frame.minY,width:parent.frame.width,height:Self.height)
+        let height = model.settings.glassArchiveEnabled ? ArchiveViewportLayout.timelineHeight:Self.height
+        let frame = NSRect(x:parent.frame.minX,y:parent.frame.minY,width:parent.frame.width,height:height)
         if panel.frame != frame { panel.setFrame(frame,display:true) }
     }
 }
@@ -105,7 +106,7 @@ private struct AnimatedTimelineStrip: View {
             }
             TimelineView(model:model,jumpOpen:Binding(get:{model.timelineJumpOpen},set:{model.timelineJumpOpen = $0}))
                 .offset(y:motion.visible || reduceMotion ? 0:20)
-        }.frame(height:TimelinePanelController.height)
+        }.frame(height:model.settings.glassArchiveEnabled ? ArchiveViewportLayout.timelineHeight:TimelinePanelController.height)
         .preferredColorScheme(model.settings.glassArchiveEnabled ? ArchiveTone.colorScheme(model.settings.appearance):nil)
         .environment(\.glassArchiveAppearance,model.settings.glassArchiveEnabled)
         .onExitCommand { model.dismissTimeline() }

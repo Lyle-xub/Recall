@@ -19,7 +19,7 @@ private final class ArchiveRecordControl: SCNNode {
         var spring = ArchiveMotionSpring(value:0)
         var target:Double = 0
         let origin:SIMD3<Float>
-        let destination:SIMD3<Float>
+        var destination:SIMD3<Float>
         let rotation:simd_quatf
     }
     private var slots:[String:Slot] = [:]
@@ -47,6 +47,8 @@ private final class ArchiveRecordControl: SCNNode {
     private var across = ArchiveMotionSpring(value:0)
     private var acrossTarget:Double = 0
     private var timer:Timer?
+    private(set) var isActive = true
+    var isAnimating:Bool { timer != nil }
     private var previousTime:TimeInterval = 0
     private(set) var scrollOffset:CGFloat = 0
     private var horizontalOffset:CGFloat = 0
@@ -56,11 +58,13 @@ private final class ArchiveRecordControl: SCNNode {
     private var imageKeys:[String:ObjectIdentifier] = [:]
     private struct ShapeKey:Equatable { let width:CGFloat;let height:CGFloat;let aspect:CGFloat }
     private var shapeKeys:[String:ShapeKey] = [:]
+    private var informationAspects:[String:CGFloat] = [:]
     private(set) var shapeUpdateCount = 0
     private(set) var positionUpdateCount = 0
     private(set) var surfaceBuildCount = 0
     private(set) var textureUpdateCount = 0
     private(set) var layoutUpdateCount = 0
+    private(set) var informationTextureBuildCount = 0
     private var navigationTarget:Double?
     private var navigationMotion = ArchiveMotionSpring(value:0)
     private var maxScroll:CGFloat = 0
@@ -83,39 +87,47 @@ private final class ArchiveRecordControl: SCNNode {
         camera.usesOrthographicProjection = true
         camera.orthographicScale = 4.5
         camera.zNear = 0.1; camera.zFar = 100
-        camera.wantsHDR = true; camera.wantsExposureAdaptation = false
-        camera.exposureOffset = -0.65
+        // Recorded UI is already display-referred. HDR tone mapping and
+        // negative exposure turned source whites grey, including the footer.
+        camera.wantsHDR = false; camera.wantsExposureAdaptation = false
+        camera.exposureOffset = 0
         camera.wantsDepthOfField = true
         camera.focusDistance = 33.5
         camera.fStop = 5.8
         camera.apertureBladeCount = 8
-        camera.screenSpaceAmbientOcclusionIntensity = 0.22
-        camera.screenSpaceAmbientOcclusionRadius = 0.2
-        camera.bloomIntensity = 0.045; camera.bloomThreshold = 0.85; camera.bloomBlurRadius = 8
+        // Reflections and the physical rim supply the glass highlights without
+        // full-screen bloom / ambient-occlusion passes over screenshot pixels.
+        camera.screenSpaceAmbientOcclusionIntensity = 0
+        camera.bloomIntensity = 0
         cameraNode.camera = camera
         cameraNode.position = cameraHome
         cameraNode.look(at:target)
         scene.rootNode.addChildNode(cameraNode)
         let key = SCNNode(); key.light = SCNLight();key.light?.type = .directional
-        key.light?.intensity = 850; key.light?.color = NSColor(red:1,green:0.95,blue:0.84,alpha:1)
+        key.light?.intensity = 360; key.light?.color = NSColor(red:1,green:0.95,blue:0.84,alpha:1)
         key.position = SCNVector3(-6,12,8); key.look(at:SCNVector3Zero)
         scene.rootNode.addChildNode(key)
         let fill = SCNNode(); fill.light = SCNLight(); fill.light?.type = .omni
-        fill.light?.intensity = 260; fill.light?.color = NSColor(red:0.6,green:0.77,blue:1,alpha:1)
+        fill.light?.intensity = 110; fill.light?.color = NSColor(red:0.6,green:0.77,blue:1,alpha:1)
         fill.position = SCNVector3(10,7,-4);scene.rootNode.addChildNode(fill)
         let ambient = SCNNode();ambient.light = SCNLight();ambient.light?.type = .ambient
-        ambient.light?.intensity = 320; ambient.light?.color = NSColor.white
+        ambient.light?.intensity = 135; ambient.light?.color = NSColor.white
         scene.rootNode.addChildNode(ambient)
         scene.lightingEnvironment.contents = Self.environment()
-        scene.lightingEnvironment.intensity = 0.85
+        // Balance the lit glass for SDR separately from the unlit screenshots.
+        scene.lightingEnvironment.intensity = 0.36
         scene.background.contents = NSColor.clear
         scene.fogStartDistance = 36; scene.fogEndDistance = 49
         scene.fogColor = NSColor(red:0.90,green:0.89,blue:0.86,alpha:1)
     }
 
     func update(frames:[MemoryFrame],images:[String:NSImage],appearance:OverlayAppearance,selected:String?,size:CGSize,reduced:Bool,day:Date? = nil,timelinePosition:Date? = nil) {
+        let resized = viewport != size
         reducedMotion = reduced;viewport = size
         cameraNode.camera?.orthographicScale = 4.5*2.22/max(1,size.width/max(1,size.height))
+        if resized {
+            for id in Array(extractions.keys) { extractions[id]?.destination = extractionDestination() }
+        }
         let isNight = appearance == .deepNight
         scene.fogColor = isNight ? NSColor(red:0.04,green:0.05,blue:0.07,alpha:1):NSColor(red:0.90,green:0.89,blue:0.86,alpha:1)
         let center = Calendar.current.startOfDay(for:day ?? frames.max(by: { $0.timestamp < $1.timestamp })?.timestamp ?? Date())
@@ -135,9 +147,8 @@ private final class ArchiveRecordControl: SCNNode {
                 if var motion = extractions[selected] {
                     motion.target = 1;extractions[selected] = motion
                 } else {
-                    let destination = cameraNode.convertPosition(SCNVector3(0,0,-14),to:nil)
                     extractions[selected] = Extraction(target:1,origin:node.simdPosition,
-                        destination:SIMD3(Float(destination.x),Float(destination.y),Float(destination.z)),rotation:cameraNode.simdOrientation)
+                        destination:extractionDestination(),rotation:cameraNode.simdOrientation)
                 }
             }
             currentID = selected
@@ -145,8 +156,17 @@ private final class ArchiveRecordControl: SCNNode {
         }
         if let currentID,let node = nodes[currentID] { shape(node,id:currentID,progress:Float(extractions[currentID]?.spring.value ?? 0)) }
         navigateArchive(to:timelinePosition)
+        if resized,!extractions.isEmpty {
+            if reducedMotion { advance(dt:1,immediate:true) } else { wake() }
+        }
         updateHoverOutline()
         onPresentationChanged?()
+    }
+
+    private func extractionDestination()->SIMD3<Float> {
+        let center = ArchiveViewportLayout.extractionCenterY(in:viewport,verticalSpan:CGFloat(cameraNode.camera?.orthographicScale ?? 4.5)*2)
+        let point = cameraNode.convertPosition(SCNVector3(0,center,-14),to:nil)
+        return SIMD3(Float(point.x),Float(point.y),Float(point.z))
     }
 
     private func navigateArchive(to date:Date?) {
@@ -197,7 +217,7 @@ private final class ArchiveRecordControl: SCNNode {
         }
         let ids = Set(entries.map { $0.0 })
         for id in Array(nodes.keys) where !ids.contains(id) {
-            nodes.removeValue(forKey:id)?.removeFromParentNode();slots[id] = nil;heights[id] = nil;depths[id] = nil;extractions[id] = nil;surfaceKeys[id] = nil;imageAspects[id] = nil;imageKeys[id] = nil;shapeKeys[id] = nil
+            nodes.removeValue(forKey:id)?.removeFromParentNode();slots[id] = nil;heights[id] = nil;depths[id] = nil;extractions[id] = nil;surfaceKeys[id] = nil;imageAspects[id] = nil;imageKeys[id] = nil;shapeKeys[id] = nil;informationAspects[id] = nil
         }
         maxScroll = max(0,CGFloat(rowCount)-3)
         scrollOffset = min(scrollOffset,maxScroll)
@@ -211,6 +231,7 @@ private final class ArchiveRecordControl: SCNNode {
             guard surfaceKeys[id] != surfaceKey else { continue }
             surfaceKeys[id] = surfaceKey
             shapeKeys[id] = nil
+            informationAspects[id] = nil
             surfaceBuildCount += 1
             let surface = makeSheet(frame:frame,image:image,side:lane != 0,lane:lane)
             imageKeys[id] = image.map(ObjectIdentifier.init)
@@ -332,7 +353,7 @@ private final class ArchiveRecordControl: SCNNode {
         if reducedMotion { advance(dt:1,immediate:true) } else { wake() }
     }
     private func wake() {
-        guard timer == nil else { return }
+        guard isActive,timer == nil else { return }
         previousTime = ProcessInfo.processInfo.systemUptime
         let source = Timer(timeInterval:1/60,repeats:true) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -345,10 +366,16 @@ private final class ArchiveRecordControl: SCNNode {
         timer = source;RunLoop.main.add(source,forMode:.common)
     }
     func stopMotion() { timer?.invalidate();timer = nil }
+    func setActive(_ active:Bool) {
+        guard active != isActive else { return }
+        isActive = active
+        if active { wake() } else { stopMotion() }
+    }
 
     /// One clock drives the ridge, the extraction and the return. Geometry,
     /// artwork and controls stay attached to the same opaque root throughout.
     func advance(dt:Double,immediate:Bool = false) {
+        guard isActive else { return }
         SCNTransaction.begin();SCNTransaction.disableActions = true
         defer { SCNTransaction.commit() }
         if immediate { crest = ArchiveMotionSpring(value:crestTarget);across = ArchiveMotionSpring(value:acrossTarget) }
@@ -407,6 +434,9 @@ private final class ArchiveRecordControl: SCNNode {
         let desiredDistance = distance+(14-distance)*focus
         let idleAperture = hovered == nil ? 5.8:18.0
         let desiredAperture = idleAperture+(64-idleAperture)*focus
+        // An opened card is flat and in focus; the blur pass adds no detail.
+        let blur = focus < 0.995
+        if cameraNode.camera?.wantsDepthOfField != blur { cameraNode.camera?.wantsDepthOfField = blur }
         if immediate {
             focalDistance = ArchiveMotionSpring(value:desiredDistance)
             aperture = ArchiveMotionSpring(value:desiredAperture)
@@ -439,27 +469,39 @@ private final class ArchiveRecordControl: SCNNode {
         let t = CGFloat(ArchiveExtractionPath.smooth((progress-0.3)/0.7))
         let open = ArchiveCardMetrics.expanded(aspect:aspect,viewport:viewport,verticalSpan:CGFloat(cameraNode.camera?.orthographicScale ?? 4.5)*2)
         let width = 5.35+(open.width-5.35)*t,height = 6.5+(open.height-6.5)*t
+        if let frame = framesByID[id],let information = node.childNode(withName:"information",recursively:false) {
+            let footer = progress > 0 ? open.footer:ArchiveCardMetrics.make(width:5.35,height:6.5,aspect:aspect).footer
+            let informationAspect = footer.width/footer.height
+            if informationAspects[id] != informationAspect {
+                informationAspects[id] = informationAspect;informationTextureBuildCount += 1
+                information.geometry?.firstMaterial?.diffuse.contents = Self.informationTexture(frame,night:night,aspect:informationAspect)
+            }
+        }
+        for control in node.childNodes.compactMap({ $0 as? ArchiveRecordControl }) { control.isHidden = progress <= 0.98 }
         let key = ShapeKey(width:width,height:height,aspect:aspect)
         guard shapeKeys[id] != key else { return }
         shapeKeys[id] = key;shapeUpdateCount += 1
         let layout = ArchiveCardMetrics.make(width:width,height:height,aspect:aspect)
-        if let body = node.childNode(withName:"glass",recursively:false)?.geometry as? SCNBox { body.width = width;body.height = height }
-        if let art = node.childNode(withName:"artwork",recursively:false),let plane = art.geometry as? SCNPlane {
-            plane.width = layout.artwork.width;plane.height = layout.artwork.height
+        // Keep the mesh immutable during the spring. Changing SCNBox/SCNPlane
+        // dimensions made SceneKit tessellate and upload new buffers each tick.
+        if let body = node.childNode(withName:"glass",recursively:false) {
+            body.scale = SCNVector3(width/5.35,height/6.5,1)
+        }
+        if let art = node.childNode(withName:"artwork",recursively:false) {
+            art.scale = SCNVector3(layout.artwork.width/4.87,layout.artwork.height/3,1)
             art.position = SCNVector3(layout.artwork.midX,layout.artwork.midY,0.055)
         }
-        if let info = node.childNode(withName:"information",recursively:false),let plane = info.geometry as? SCNPlane {
-            plane.width = width-0.5;plane.height = 1.0;info.position = SCNVector3(0,-height/2+0.57,0.065)
+        if let info = node.childNode(withName:"information",recursively:false) {
+            info.scale = SCNVector3(layout.footer.width/4.85,layout.footer.height,1)
+            info.position = SCNVector3(layout.footer.midX,layout.footer.midY,0.065)
         }
         for child in node.childNodes {
-            if child.name == "rim",let box = child.geometry as? SCNBox { box.height = height-0.025;child.position.x = -width/2+0.025 }
-            if child.name == "top-edge",let box = child.geometry as? SCNBox { box.width = width;child.position.y = height/2-0.01 }
+            if child.name == "rim" { child.scale.y = (height-0.025)/(6.5-0.025);child.position.x = -width/2+0.025 }
+            if child.name == "top-edge" { child.scale.x = width/5.35;child.position.y = height/2-0.01 }
             if let control = child as? ArchiveRecordControl {
-                let w = width-0.5
-                if let button = ArchiveFooterLayout.buttons(in:CGSize(width:w,height:1.0)).first(where: { $0.action == control.action }) {
-                    control.position = SCNVector3(-w/2+button.rect.midX,-height/2+0.07+button.rect.midY,0.08)
-                    (control.geometry as? SCNPlane)?.width = button.rect.width
-                    (control.geometry as? SCNPlane)?.height = button.rect.height
+                if let button = ArchiveFooterLayout.buttons(in:layout.footer.size).first(where: { $0.action == control.action }) {
+                    control.position = SCNVector3(layout.footer.minX+button.rect.midX,layout.footer.minY+button.rect.midY,0.08)
+                    control.scale = SCNVector3(button.rect.width/0.48,button.rect.height/0.26,1)
                 }
             }
         }
@@ -504,8 +546,9 @@ private final class ArchiveRecordControl: SCNNode {
         }
         if let frame {
             let info = SCNPlane(width:4.85,height:1.0),material = SCNMaterial();material.lightingModel = .constant
-            let expanded = ArchiveCardMetrics.expanded(aspect:image.map { $0.size.width/max(1,$0.size.height) } ?? 1.6,viewport:viewport,verticalSpan:CGFloat(cameraNode.camera?.orthographicScale ?? 4.5)*2)
-            material.diffuse.contents = Self.informationTexture(frame,night:night,aspect:(expanded.width-0.5)/1.0);info.materials = [material]
+            // shape() supplies a compact footer, upgrading only the extracted
+            // card instead of allocating expanded textures for the entire rack.
+            info.materials = [material]
             let information = SCNNode(geometry:info);information.name = "information";root.addChildNode(information)
             for action in ["star","copy","rewind","close"] {
                 let region = SCNPlane(width:0.48,height:0.26),material = SCNMaterial();material.lightingModel = .constant
@@ -599,7 +642,7 @@ final class ArchiveSceneView: SCNView {
     private var viewportDelivery:Task<Void,Never>?
     private var viewportRefresh:Task<Void,Never>?
     func refreshViewport(force:Bool = false) {
-        guard bounds.width > 0,bounds.height > 0,let archive else { return }
+        guard bounds.width > 0,bounds.height > 0,let archive,archive.isActive else { return }
         let now = ProcessInfo.processInfo.systemUptime
         if !force,now-lastViewportTime < 0.1 {
             // Keep a trailing check: the final sliver of a card can enter the
@@ -737,6 +780,7 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
     var regions:[TextRegion] = []
     let size:CGSize
     let reduced:Bool
+    var active:Bool = true
     let onSelect:(String?)->Void
     let onRecordAction:(String,String)->Void
     var onHoverRecord:((String?)->Void)? = nil
@@ -749,7 +793,7 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
             view?.updateTextSelection();view?.refreshViewport();view?.needsDisplay = true
         }
         view.scene = context.coordinator.scene;view.pointOfView = context.coordinator.cameraNode
-        view.backgroundColor = .clear;view.antialiasingMode = .multisampling4X
+        view.backgroundColor = .clear;view.antialiasingMode = .multisampling2X
         view.preferredFramesPerSecond = 60
         view.rendersContinuously = false;view.isPlaying = false
         view.onViewportChange = onViewportChange
@@ -765,6 +809,9 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
     }
     static func dismantleNSView(_ view:SCNView,coordinator:ArchiveGlassScene) { coordinator.stopMotion();coordinator.onPresentationChanged = nil }
     func updateNSView(_ view:SCNView,context:Context) {
+        context.coordinator.setActive(active)
+        view.isHidden = !active
+        guard active else { return }
         (view as? ArchiveSceneView)?.onSelect = onSelect
         (view as? ArchiveSceneView)?.onViewportChange = onViewportChange
         (view as? ArchiveSceneView)?.selectedRegions = regions
@@ -774,6 +821,6 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
             onRecordAction(id,action);return true
         }
         context.coordinator.update(frames:frames,images:images,appearance:appearance,selected:selected,size:size,reduced:reduced,day:day,timelinePosition:timelinePosition)
-        (view as? ArchiveSceneView)?.refreshViewport(force:true)
+        (view as? ArchiveSceneView)?.refreshViewport()
     }
 }

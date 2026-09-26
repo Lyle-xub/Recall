@@ -57,10 +57,20 @@ final class ArchiveDayLayoutTests:XCTestCase {
             let span = 9*2.22/max(1,size.width/size.height)
             let card = ArchiveCardMetrics.expanded(aspect:1.6,viewport:size,verticalSpan:span)
             XCTAssertEqual(card.artwork.width/card.artwork.height,1.6,accuracy:0.0001)
-            XCTAssertEqual(card.height-card.artwork.height,1.4,accuracy:0.0001)
-            XCTAssertGreaterThan(card.artwork.width,4.87*1.5)
+            XCTAssertEqual(card.height-card.artwork.height,ArchiveCardMetrics.verticalChrome,accuracy:0.0001)
+            XCTAssertEqual(card.width/2-card.artwork.maxX,ArchiveCardMetrics.inset,accuracy:0.0001)
+            XCTAssertEqual(card.height/2-card.artwork.maxY,ArchiveCardMetrics.inset,accuracy:0.0001)
+            XCTAssertEqual(card.footer.minY+card.height/2,ArchiveCardMetrics.inset,accuracy:0.0001)
+            XCTAssertEqual(card.footer.minX,card.artwork.minX,accuracy:0.0001)
+            XCTAssertEqual(card.footer.maxX,card.artwork.maxX,accuracy:0.0001)
+            XCTAssertEqual(card.artwork.minY-card.footer.maxY,ArchiveCardMetrics.contentGap,accuracy:0.0001)
+            XCTAssertGreaterThan(card.artwork.width,4.87*1.3)
             XCTAssertLessThanOrEqual(card.width,span*size.width/size.height*0.88+0.001)
             XCTAssertLessThanOrEqual(card.height,span*0.76+0.001)
+            let center = size.height/2+ArchiveViewportLayout.extractionCenterY(in:size,verticalSpan:span)*size.height/span
+            let halfHeight = card.height*size.height/span/2
+            XCTAssertGreaterThanOrEqual(center-halfHeight,ArchiveViewportLayout.timelineHeight+16-0.001,"Native timeline input must not intercept footer buttons")
+            XCTAssertLessThanOrEqual(center+halfHeight,size.height-116+0.001)
         }
     }
 }

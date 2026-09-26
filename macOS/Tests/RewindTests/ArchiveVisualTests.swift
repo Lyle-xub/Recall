@@ -88,7 +88,7 @@ final class ArchiveVisualTests: XCTestCase {
         renderer.scene = moving.scene;renderer.pointOfView = moving.cameraNode
         moving.scene.background.contents = NSColor(red:0.90,green:0.89,blue:0.86,alpha:1)
         func snapshot(_ name:String) throws {
-            let image = renderer.snapshot(atTime:0,with:CGSize(width:2000,height:876),antialiasingMode:.multisampling4X)
+            let image = renderer.snapshot(atTime:0,with:CGSize(width:2000,height:876),antialiasingMode:.multisampling2X)
             let data = try XCTUnwrap(image.tiffRepresentation)
             let bitmap = try XCTUnwrap(NSBitmapImageRep(data:data))
             try XCTUnwrap(bitmap.representation(using:.png,properties:[:])).write(to:destination.appendingPathComponent(name+".png"))
@@ -123,7 +123,7 @@ final class ArchiveVisualTests: XCTestCase {
         }
         let selection = try XCTUnwrap(moving.selectionSurface())
         XCTAssertEqual(selection.0.id,id)
-        XCTAssertGreaterThan(selection.2.width,7.3,"Expanded screenshot should be substantially wider")
+        XCTAssertGreaterThan(selection.2.width*selection.1.scale.x,6.3,"Expanded screenshot should be substantially wider")
         let indexed = IndexedTextOverlay()
         indexed.frame = CGRect(x:0,y:0,width:1000,height:650)
         indexed.imageSize = indexed.frame.size;indexed.setRegions(selection.0.regions)

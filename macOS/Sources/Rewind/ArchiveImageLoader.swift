@@ -81,7 +81,7 @@ struct ArchiveViewportRecords:Equatable {
         if active,!missingPaths.isEmpty { worker = Task { [weak self] in await self?.run() } }
     }
     private func publishViewportIfReady() {
-        guard wanted.allSatisfy({ thumbnails[$0] != nil || failed.contains($0) }) else { return }
+        guard active,wanted.allSatisfy({ thumbnails[$0] != nil || failed.contains($0) }) else { return }
         var next = images,changed = false
         for path in wanted {
             recent.removeAll { $0 == path };recent.append(path)
@@ -105,17 +105,18 @@ struct ArchiveViewportRecords:Equatable {
         }
     }
     func showDetail(_ pixels:CGImage,for path:String) {
-        guard paths.contains(path) else { return }
+        guard active,paths.contains(path) else { return }
         detailPaths.removeAll { $0 == path };detailPaths.append(path)
-        var next = images
+        var next = images,changed = false
         if CGFloat(pixels.width) > (next[path]?.size.width ?? 0) {
             next[path] = NSImage(cgImage:pixels,size:NSSize(width:pixels.width,height:pixels.height))
+            changed = true
         }
         while detailPaths.count > 2 {
             let old = detailPaths.removeFirst()
-            if let thumbnail = thumbnails[old] { next[old] = thumbnail }
+            if let thumbnail = thumbnails[old],next[old] !== thumbnail { next[old] = thumbnail;changed = true }
         }
-        images = next
+        if changed { images = next;publicationCount += 1 }
     }
     func stop() { active = false;worker?.cancel() }
     func waitUntilIdle() async { await worker?.value }

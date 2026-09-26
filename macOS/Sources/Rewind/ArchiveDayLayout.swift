@@ -23,21 +23,41 @@ enum ArchiveDayLayout {
     }
 }
 
+/// Native timeline input and extracted cards share the same safe area. The
+/// transparent part of a separate NSPanel must not cover the card's buttons.
+enum ArchiveViewportLayout {
+    static let timelineHeight:CGFloat = 164
+    static func cardArea(in size:CGSize)->CGRect {
+        let top:CGFloat = 116,bottom = timelineHeight+16
+        return CGRect(x:size.width*0.06,y:bottom,width:size.width*0.88,height:max(1,size.height-top-bottom))
+    }
+    static func extractionCenterY(in size:CGSize,verticalSpan:CGFloat)->CGFloat {
+        (cardArea(in:size).midY-size.height/2)*verticalSpan/max(1,size.height)
+    }
+}
+
 struct ArchiveCardMetrics {
+    static let inset:CGFloat = 0.20
+    static let contentGap:CGFloat = 0.14
+    static let footerHeight:CGFloat = 1.0
+    static var verticalChrome:CGFloat { inset*2+contentGap+footerHeight }
     let width:CGFloat
     let height:CGFloat
     let artwork:CGRect
+    let footer:CGRect
     static func make(width:CGFloat,height:CGFloat,aspect:CGFloat)->Self {
         let ratio = max(0.15,aspect)
-        let artWidth = min(width-0.48,(height-1.4)*ratio)
+        let artWidth = min(width-inset*2,(height-verticalChrome)*ratio)
         let artHeight = artWidth/ratio
-        return Self(width:width,height:height,artwork:CGRect(x:-artWidth/2,y:height/2-0.20-artHeight,width:artWidth,height:artHeight))
+        return Self(width:width,height:height,
+            artwork:CGRect(x:-artWidth/2,y:height/2-inset-artHeight,width:artWidth,height:artHeight),
+            footer:CGRect(x:-width/2+inset,y:-height/2+inset,width:width-inset*2,height:footerHeight))
     }
     static func expanded(aspect:CGFloat,viewport:CGSize,verticalSpan:CGFloat)->Self {
-        let maxHeight = verticalSpan*0.76
+        let maxHeight = min(verticalSpan*0.76,ArchiveViewportLayout.cardArea(in:viewport).height*verticalSpan/max(1,viewport.height))
         let maxWidth = verticalSpan*max(1,viewport.width/max(1,viewport.height))*0.88
-        let artWidth = min(maxWidth-0.48,(maxHeight-1.4)*max(0.15,aspect))
-        return make(width:artWidth+0.48,height:artWidth/max(0.15,aspect)+1.4,aspect:aspect)
+        let artWidth = min(maxWidth-inset*2,(maxHeight-verticalChrome)*max(0.15,aspect))
+        return make(width:artWidth+inset*2,height:artWidth/max(0.15,aspect)+verticalChrome,aspect:aspect)
     }
 }
 

@@ -85,7 +85,7 @@ struct RootView: View {
                     } else { model.dismissTimeline() }
                 }.ignoresSafeArea()
                 if model.settings.glassArchiveEnabled {
-                ArchiveStackView(model:model,focusedID:$archiveFocusedID)
+                ArchiveStackView(model:model,focusedID:$archiveFocusedID,active:!expanded && model.selected == nil)
                     .opacity(!expanded && model.selected == nil ? 1:0)
                     .scaleEffect(expanded || model.selected != nil ? 0.96:1)
                     .allowsHitTesting(!expanded && model.selected == nil)
