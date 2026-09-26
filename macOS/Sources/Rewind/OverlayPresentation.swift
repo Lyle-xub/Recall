@@ -29,9 +29,10 @@ enum RecallWindowBehavior {
         self.read = read; self.write = write
     }
     func begin() {
-        guard previous == nil else { return }
-        let original = read(); previous = original
-        var options = original
+        if previous == nil { previous = read() }
+        // AppKit may update presentation options as a panel gains focus or the
+        // app becomes active. Reapply without overwriting the restore snapshot.
+        var options = read()
         options.remove(.autoHideDock); options.insert(.hideDock)
         write(options)
     }

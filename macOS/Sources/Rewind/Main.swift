@@ -92,6 +92,7 @@ import Combine
         if window?.isVisible == true { window.orderOut(nil) }
     }
     func applicationDidBecomeActive(_ notification:Notification) {
+        (window as? RewindOverlayWindow)?.refreshDockPresentation()
         Task { @MainActor in
             await Task.yield()
             guard self.window?.isVisible == true else { return }
@@ -201,7 +202,7 @@ import Combine
             await Task.yield()
             guard let self,self.window.isVisible else { return }
             let retainedForeground = foreground == NSWorkspace.shared.frontmostApplication?.processIdentifier
-            CaptureDiagnostics(root:self.model.store.root).write("Overlay shown; key=\(self.window.isKeyWindow); currentSpace=\(self.window.isOnActiveSpace); retainedForeground=\(retainedForeground)")
+            CaptureDiagnostics(root:self.model.store.root).write("Overlay shown; key=\(self.window.isKeyWindow); currentSpace=\(self.window.isOnActiveSpace); retainedForeground=\(retainedForeground); dockHidden=\(NSApp.currentSystemPresentationOptions.contains(.hideDock))")
         }
     }
     @objc func onboardingAction() {model.showOnboarding();show()}
@@ -243,12 +244,19 @@ final class RewindOverlayWindow: NSPanel {
         if appearing { visibilityChanged?(true) }
         presentation.begin()
         if !isVisible { alphaValue = 0 }
-        // Take keyboard focus without activating Recall and switching away
-        // from the app whose full-screen Space the user is currently viewing.
+        // Join the current Space before activation. Activating first can take
+        // the user to Recall's previous desktop; staying inactive means macOS
+        // never applies our Dock presentation options.
         orderFrontRegardless()
         super.makeKeyAndOrderFront(sender)
+        NSApp.activate(ignoringOtherApps:true)
+        refreshDockPresentation()
         timelineController?.present()
         if appearing {NSAnimationContext.runAnimationGroup {context in context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0:0.22;animator().alphaValue = 1}}
+    }
+    func refreshDockPresentation() {
+        guard isPresented else { return }
+        presentation.begin()
     }
     override func orderOut(_ sender: Any?) {
         dismiss(sender,hideApplication:false)
