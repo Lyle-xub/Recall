@@ -30,7 +30,7 @@ struct RoundButton: View {
     var action: () -> Void
     var body: some View {
         Button(action:action) {
-            Image(systemName:symbol).font(.system(size:16,weight:.medium)).foregroundStyle(Color.overlayControl).frame(width:50,height:50).liquidGlass(radius:25)
+            Image(systemName:symbol).font(.system(size:16,weight:.medium)).foregroundStyle(Color.overlayControl).frame(width:56,height:56).contentShape(Rectangle()).liquidGlass(radius:28)
         }.buttonStyle(ComfortableButtonStyle()).help(label).accessibilityLabel(label)
     }
 }
@@ -59,6 +59,7 @@ struct RootView: View {
               }
           } else { workspace }
         }
+        .environment(\.locale,RecallLanguage.locale)
         .alert("Recall needs your attention",isPresented:Binding(get:{model.error != nil},set:{if !$0 {model.error = nil}})) {
             if model.capturePermissionRequired {
                 Button("Open System Settings") {
@@ -111,7 +112,7 @@ struct RootView: View {
                 // Keep one search field and one glass container alive through
                 // archive -> results navigation, including the native IME editor.
                 searchToolbar(width:min(1020,geo.size.width-196))
-                    .frame(height:showSearchActions ? 58:72)
+                    .frame(height:showSearchActions ? 64:72)
                     .position(x:geo.size.width/2,y:compactSearch || model.settings.glassArchiveEnabled ? top+43:geo.size.height*0.425)
                     .zIndex(5)
                 HStack {
@@ -125,10 +126,10 @@ struct RootView: View {
                             Rectangle().fill(Color.primary.opacity(0.16)).frame(width:1,height:16)
                             Text("\(model.total)").font(.system(size:13,weight:.medium).monospacedDigit()).fixedSize().foregroundStyle(Color.overlayControl)
                             BareIconButton(symbol:model.recordingRequested ? "pause":"play",label:model.recordingActionTitle,size:13) { model.toggleRecording() }
-                            menu.liquidGlass(radius:25)
+                            menu.liquidGlass(radius:28)
                         }.transition(.opacity)
                     } else {
-                        menu.liquidGlass(radius:25)
+                        menu.liquidGlass(radius:28)
                     }
                 }.padding(.horizontal,34).position(x:geo.size.width/2,y:top+43).zIndex(10)
                 if let toast = model.toast {
@@ -173,9 +174,9 @@ struct RootView: View {
     }
     private func searchToolbar(width:CGFloat)->some View {
         SearchGlassGroup {
-          HStack(spacing:18) {
-            searchBar.frame(width:showSearchActions ? width-380:min(860,width),height:showSearchActions ? 58:72)
-                .modifier(SearchGlassSurface(id:"search",namespace:searchGlassNamespace,radius:showSearchActions ? 29:36))
+          HStack(spacing:16) {
+            searchBar.frame(width:showSearchActions ? width-400:min(860,width),height:showSearchActions ? 64:72)
+                .modifier(SearchGlassSurface(id:"search",namespace:searchGlassNamespace,radius:showSearchActions ? 32:36))
                 .shadow(color:.black.opacity(0.15),radius:22,y:10)
                 .background(SearchClickObserver { searchEngaged = true })
             if showSearchActions {
@@ -188,9 +189,9 @@ struct RootView: View {
                             }
                         }
                     } label: {
-                        Image(systemName:"square.grid.2x2").font(.system(size:20,weight:.regular)).foregroundStyle(Color.overlayControl).frame(width:58,height:58)
-                    }.menuStyle(.button).menuIndicator(.hidden).buttonStyle(.plain).frame(width:58,height:58)
-                        .modifier(SearchGlassSurface(id:"applications",namespace:searchGlassNamespace,radius:29))
+                        Image(systemName:"square.grid.2x2").font(.system(size:20,weight:.regular)).foregroundStyle(Color.overlayControl).frame(width:64,height:64).contentShape(Rectangle())
+                    }.menuStyle(.button).menuIndicator(.hidden).buttonStyle(.plain).frame(width:64,height:64).contentShape(Rectangle())
+                        .modifier(SearchGlassSurface(id:"applications",namespace:searchGlassNamespace,radius:32))
                         .transition(dropletTransition(0)).help("Filter by application").accessibilityLabel("Filter by application")
                     searchAction(symbol:model.starredOnly ? "star.fill":"star",label:"Starred memories",id:"starred",index:1,selected:model.starredOnly) {
                         model.starredOnly.toggle(); model.showSearch()
@@ -214,9 +215,9 @@ struct RootView: View {
     private func searchAction(symbol:String,label:String,id:String,index:Int,selected:Bool = false,action:@escaping ()->Void)->some View {
         Button(action:action) {
             Image(systemName:symbol).font(.system(size:20,weight:.regular)).foregroundStyle(Color.overlayControl)
-                .frame(width:58,height:58)
+                .frame(width:64,height:64).contentShape(Rectangle())
         }.buttonStyle(ComfortableButtonStyle())
-            .modifier(SearchGlassSurface(id:id,namespace:searchGlassNamespace,radius:29))
+            .modifier(SearchGlassSurface(id:id,namespace:searchGlassNamespace,radius:32))
             .overlay(alignment:.bottom) { if selected { Circle().fill(Color.accentColor).frame(width:4,height:4).padding(.bottom,6).allowsHitTesting(false) } }
             .transition(dropletTransition(index)).help(label).accessibilityLabel(label)
             .accessibilityAddTraits(selected ? .isSelected:[])
@@ -243,7 +244,7 @@ struct RootView: View {
             Button("App usage…",systemImage:"chart.bar.xaxis") {model.usageOpen = true}
             Button("Settings…",systemImage:"gearshape") {model.settingsOpen = true}
             if model.settings.glassArchiveEnabled {
-                Button(model.settings.appearance == .deepNight ? "切换到浅色模式":"切换到暗黑模式",
+                Button(model.settings.appearance == .deepNight ? "Switch to Light Mode":"Switch to Dark Mode",
                     systemImage:model.settings.appearance == .deepNight ? "sun.max":"moon") { model.toggleAppearance() }
             }
             Button("Welcome to Recall…",systemImage:"sparkle") {model.showOnboarding()}
@@ -256,8 +257,8 @@ struct RootView: View {
             Divider()
             Button("Quit Recall") {NSApplication.shared.terminate(nil)}.keyboardShortcut("q")
         } label: {
-            Image(systemName:"ellipsis").font(.system(size:17,weight:.semibold)).foregroundStyle(Color.overlayControl.opacity(0.78)).frame(width:50,height:50)
-        }.menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).frame(width:50,height:50).help("Recall menu").accessibilityLabel("Recall menu")
+            Image(systemName:"ellipsis").font(.system(size:17,weight:.semibold)).foregroundStyle(Color.overlayControl.opacity(0.78)).frame(width:56,height:56).contentShape(Rectangle())
+        }.menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).frame(width:56,height:56).contentShape(Rectangle()).help("Recall menu").accessibilityLabel("Recall menu")
     }
     private func archiveCaptions(size:CGSize,top:CGFloat)->some View {
         let style = Font.system(size:10,weight:.medium)
@@ -293,7 +294,7 @@ struct RootView: View {
             if let frame = model.selected {
                 AppBadge(name:frame.appName,bundleID:frame.bundleID,size:20)
                 VStack(alignment:.leading,spacing:2) {
-                    Text("Recorded · \(frame.timestamp.formatted(date:.omitted,time:.standard))").font(.system(size:10,weight:.medium)).foregroundStyle(.secondary)
+                    Text("Recorded · \(frame.timestamp.recallFormatted(date:.omitted,time:.standard))").font(.system(size:10,weight:.medium)).foregroundStyle(.secondary)
                     Text(frame.title).lineLimit(1).frame(maxWidth:210,alignment:.leading).font(.system(size:12,weight:.medium))
                 }
                 Divider().frame(height:16)

@@ -138,14 +138,16 @@ struct SettingsView: View {
                 }
             }
             SettingsCard(title:"Appearance",symbol:"dock.rectangle") {
-                SettingsRow(title:"Overlay appearance",detail:"暖昼 ivory archive or 深夜 dark scene.") {
-                    Picker("Overlay appearance",selection:$draft.appearance) {
-                        Text("暖昼").tag(OverlayAppearance.warmDay)
-                        Text("深夜").tag(OverlayAppearance.deepNight)
-                    }.labelsHidden().pickerStyle(.segmented).frame(width:154)
+                SettingsToggle(title:"Rhine Lab Mode",detail:"Browse memories as glass cards arranged by day.",value:$draft.glassArchiveEnabled)
+                if draft.glassArchiveEnabled {
+                    Divider().opacity(0.5)
+                    SettingsRow(title:"Appearance",detail:"Choose a light or dark scene for Rhine Lab Mode.") {
+                        Picker("Rhine Lab appearance",selection:$draft.appearance) {
+                            Text("Light").tag(OverlayAppearance.warmDay)
+                            Text("Dark").tag(OverlayAppearance.deepNight)
+                        }.labelsHidden().pickerStyle(.segmented).frame(width:154)
+                    }
                 }
-                Divider().opacity(0.5)
-                SettingsToggle(title:"玻璃档案首页",detail:"开启：按日期浏览玻璃卡片；关闭：恢复原来的透明桌面与时间线。",value:$draft.glassArchiveEnabled)
                 Divider().opacity(0.5)
                 SettingsToggle(title:"Show Recall in Dock",detail:"Keep an app icon in the Dock and app switcher.",value:$draft.showDockIcon)
                 Text("The menu bar icon and shortcuts remain available either way.").font(.system(size:11)).foregroundStyle(.secondary)

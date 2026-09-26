@@ -63,7 +63,7 @@ struct AppUsageView: View {
                     if let report,Calendar.current.isDate(report.day.start,inSameDayAs:date) {
                         overview(report)
                         applicationList(report)
-                        Text("Foreground app time recorded by Recall. Paused recording and unavailable screen time are excluded. Private apps appear only as Private activity.\(report.firstRecorded.map { " History begins " + $0.formatted(date:.abbreviated,time:.shortened) + "." } ?? "")")
+                        Text("Foreground app time recorded by Recall. Paused recording and unavailable screen time are excluded. Private apps appear only as Private activity.\(report.firstRecorded.map { " History begins " + $0.recallFormatted(date:.abbreviated,time:.shortened) + "." } ?? "")")
                             .font(.system(size:11)).foregroundStyle(.secondary).frame(maxWidth:.infinity,alignment:.leading)
                     } else if error == nil { ProgressView("Loading app activity…").frame(maxWidth:.infinity,minHeight:300) }
                     if let error {
@@ -101,7 +101,7 @@ struct AppUsageView: View {
                     Button { calendarOpen.toggle() } label: {
                         HStack(spacing:8) {
                             Image(systemName:"calendar").foregroundStyle(.blue)
-                            Text(date.formatted(.dateTime.year().month(.abbreviated).day())).fontWeight(.medium)
+                            Text(date.recallFormatted(.dateTime.year().month(.abbreviated).day())).fontWeight(.medium)
                             Image(systemName:"chevron.down").font(.system(size:9,weight:.semibold)).foregroundStyle(.secondary)
                         }.font(.system(size:12)).padding(.horizontal,13).frame(height:38)
                             .background(.white,in:Capsule()).overlay(Capsule().strokeBorder(.blue.opacity(0.08)))
@@ -146,7 +146,7 @@ struct AppUsageView: View {
                     BarMark(x:.value("Day",bucket.start,unit:.day),y:.value("Hours",seconds/3600))
                         .foregroundStyle(Calendar.current.isDate(bucket.start,inSameDayAs:date) ? category.color:Color(red:0.78,green:0.81,blue:0.85))
                         .cornerRadius(3)
-                        .accessibilityLabel(bucket.start.formatted(.dateTime.weekday().month().day()) + ", " + category.rawValue)
+                        .accessibilityLabel(bucket.start.recallFormatted(.dateTime.weekday().month().day()) + ", " + category.rawValue)
                         .accessibilityValue(UsageReport.duration(seconds))
                 }
             }
@@ -171,7 +171,7 @@ struct AppUsageView: View {
                 ForEach(categoryBuckets(bucket,identities:report.identities),id:\.0) { category,seconds in
                     BarMark(x:.value("Hour",bucket.start,unit:.hour),y:.value("Minutes",seconds/60))
                         .foregroundStyle(category.color).cornerRadius(2)
-                        .accessibilityLabel(bucket.start.formatted(.dateTime.hour()) + ", " + category.rawValue)
+                        .accessibilityLabel(bucket.start.recallFormatted(.dateTime.hour()) + ", " + category.rawValue)
                         .accessibilityValue(UsageReport.duration(seconds))
                 }
             }

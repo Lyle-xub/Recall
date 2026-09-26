@@ -72,7 +72,7 @@ struct DetailView: View {
                                             Button { model.jump(to:line.timestamp) } label: {
                                                 HStack(spacing:5) {
                                                     if showSource { Text(TranscriptPresentation.sourceLabel(line.speaker)) }
-                                                    Text(line.timestamp.formatted(date:.omitted,time:.standard)).monospacedDigit()
+                                                    Text(line.timestamp.recallFormatted(date:.omitted,time:.standard)).monospacedDigit()
                                                     Image(systemName:"arrow.up.backward").font(.system(size:8,weight:.semibold))
                                                 }.font(.system(size:10,weight:.medium)).foregroundStyle(.secondary)
                                                     .padding(.horizontal,10).frame(minHeight:28).contentShape(Capsule())

@@ -569,7 +569,7 @@ private final class ArchiveRecordControl: SCNNode {
         let isNight = night
         for column in dayColumns {
             let image = NSImage(size:NSSize(width:800,height:80),flipped:false) { _ in
-                let label = column.day.formatted(.dateTime.month(.twoDigits).day(.twoDigits))+"  ·  "+(column.records.isEmpty ? "暂无记录":"\(column.records.count) 张截图")
+                let label = column.day.recallFormatted(.dateTime.month(.twoDigits).day(.twoDigits))+"  ·  "+(column.records.isEmpty ? "No memories":"\(column.records.count) memories")
                 (label as NSString).draw(at:NSPoint(x:12,y:22),withAttributes:[.font:NSFont.monospacedSystemFont(ofSize:27,weight:.medium),.foregroundColor:isNight ? NSColor.white:NSColor.darkGray])
                 return true
             }
@@ -651,10 +651,10 @@ private final class ArchiveRecordControl: SCNNode {
             for button in ArchiveFooterLayout.buttons(in:rect.size) {
                 let label:String,symbol:String
                 switch button.action {
-                case "star":label = frame.starred ? "已收藏":"收藏";symbol = frame.starred ? "star.fill":"star"
-                case "copy":label = "复制文字";symbol = "doc.on.doc"
-                case "rewind":label = "回到此刻";symbol = "arrow.up.right"
-                default:label = "收起";symbol = "arrow.up.left.and.arrow.down.right"
+                case "star":label = frame.starred ? "Starred":"Star";symbol = frame.starred ? "star.fill":"star"
+                case "copy":label = "Copy Text";symbol = "doc.on.doc"
+                case "rewind":label = "Rewind";symbol = "arrow.up.right"
+                default:label = "Collapse";symbol = "arrow.up.left.and.arrow.down.right"
                 }
                 let path = NSBezierPath(roundedRect:button.rect,xRadius:button.rect.height*0.28,yRadius:button.rect.height*0.28)
                 (night ? NSColor.white.withAlphaComponent(0.09):NSColor.white.withAlphaComponent(0.68)).setFill();path.fill()

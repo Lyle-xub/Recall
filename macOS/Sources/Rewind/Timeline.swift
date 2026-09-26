@@ -176,7 +176,7 @@ struct TimelineView: View {
                 Text(relativeTime).font(.system(size:13,weight:.semibold,design:.rounded))
                     .monospacedDigit().padding(.horizontal,22).frame(height:44).contentShape(Rectangle())
                     .liquidGlass(radius:20)
-            }.buttonStyle(.plain).help(cursor.formatted(date:.complete,time:.standard))
+            }.buttonStyle(.plain).help(cursor.recallFormatted(date:.complete,time:.standard))
                 .popover(isPresented:$jumpOpen) {
                     VStack(spacing:16) {
                         DatePicker("Go to date",selection:$model.dateJump).datePickerStyle(.graphical)
@@ -192,7 +192,7 @@ struct TimelineView: View {
         if seconds < 60 { return "\(seconds) seconds ago" }
         if seconds < 3600 { let minutes = seconds/60; return "\(minutes) minute\(minutes == 1 ? "":"s") ago" }
         if seconds < 86400 { let hours = seconds/3600; return "\(hours) hour\(hours == 1 ? "":"s") ago" }
-        return date.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+        return date.recallFormatted(.dateTime.month(.abbreviated).day().hour().minute())
     }
 }
 
@@ -223,7 +223,7 @@ private struct TimelineRail: View {
                     let date = Date(timeIntervalSince1970:time)
                     let x = TimelineGeometry.x(for:date,cursor:cursor,scale:scale,width:size.width)
                     if abs(x-size.width/2) > 34,x > 24,x < size.width-90 {
-                        let label = span < 180 ? date.formatted(.dateTime.minute().second()):span < 86400 ? date.formatted(.dateTime.hour().minute()):date.formatted(.dateTime.month(.abbreviated).day().hour())
+                        let label = span < 180 ? date.recallFormatted(.dateTime.minute().second()):span < 86400 ? date.recallFormatted(.dateTime.hour().minute()):date.recallFormatted(.dateTime.month(.abbreviated).day().hour())
                         context.draw(Text(label).font(.system(size:10,weight:.medium,design:.rounded)).foregroundStyle(.secondary),at:CGPoint(x:x,y:size.height-76))
                         context.fill(Path(CGRect(x:x-0.5,y:size.height-64,width:1,height:5)),with:.color(.primary.opacity(0.16)))
                     }
@@ -300,7 +300,7 @@ private struct TimelineActivityRow: View {
             }.padding(.horizontal,10).frame(height:44).contentShape(RoundedRectangle(cornerRadius:10))
                 .background(TimelinePalette.color(for:segment).opacity(hovered ? 0.10:0),in:RoundedRectangle(cornerRadius:10))
         }.buttonStyle(.plain).onHover { hovered = $0 }.animation(.easeOut(duration:0.12),value:hovered)
-            .help(segment.appName+" · "+segment.start.formatted(date:.abbreviated,time:.standard))
+            .help(segment.appName+" · "+segment.start.recallFormatted(date:.abbreviated,time:.standard))
             .accessibilityLabel(segment.appName+", "+TimelineClock.range(segment.start,segment.end))
     }
 }

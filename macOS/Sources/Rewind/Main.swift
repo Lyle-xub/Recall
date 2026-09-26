@@ -156,7 +156,7 @@ import Combine
         shortcut.action = { [weak self] in
             guard let self else { return }
             let visible = (self.window as? RewindOverlayWindow)?.isPresented == true
-            if visible && NSApp.isActive { self.model.hideOverlay() } else { self.show() }
+            if visible && (self.window as? RewindOverlayWindow)?.ownsKeyboardFocus == true { self.model.hideOverlay() } else { self.show() }
         }
         shortcut.diagnostic = { [weak self] message in
             guard let self else { return }; CaptureDiagnostics(root:self.model.store.root).write(message)
@@ -169,7 +169,7 @@ import Combine
         let policy: NSApplication.ActivationPolicy = model.settings.showDockIcon ? .regular:.accessory
         if NSApp.activationPolicy() != policy {
             NSApp.setActivationPolicy(policy)
-            if wasVisible { NSApp.activate(ignoringOtherApps:true); window.makeKeyAndOrderFront(nil) }
+            if wasVisible { window.makeKeyAndOrderFront(nil) }
         }
         CaptureDiagnostics(root:model.store.root).write("Dock icon visible: \(NSApp.activationPolicy() == .regular)")
         showItem?.title = "Open Recall     " + model.settings.shortcuts.open.label
@@ -192,10 +192,17 @@ import Combine
         model.desktopInsets = EdgeInsets(top:max(0,screen.frame.maxY-screen.visibleFrame.maxY),leading:0,bottom:0,trailing:0)
     }
     @objc func show() {
+        let foreground = NSWorkspace.shared.frontmostApplication?.processIdentifier
         positionOverlay()
         NSApp.unhideWithoutActivation()
-        NSApp.activate(ignoringOtherApps:true);window.makeKeyAndOrderFront(nil)
+        window.makeKeyAndOrderFront(nil)
         NotificationCenter.default.post(name:Notification.Name("RewindPrepareSearch"),object:nil)
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self,self.window.isVisible else { return }
+            let retainedForeground = foreground == NSWorkspace.shared.frontmostApplication?.processIdentifier
+            CaptureDiagnostics(root:self.model.store.root).write("Overlay shown; key=\(self.window.isKeyWindow); currentSpace=\(self.window.isOnActiveSpace); retainedForeground=\(retainedForeground)")
+        }
     }
     @objc func onboardingAction() {model.showOnboarding();show()}
     @objc func usageAction() {model.onboardingOpen = false;show();model.usageOpen = true}
@@ -210,7 +217,22 @@ private final class RecallRecordingDot:NSView {
 
 final class RewindOverlayWindow: NSPanel {
     override var canBecomeKey: Bool {true}
-    override var canBecomeMain: Bool {true}
+    override var canBecomeMain: Bool {false}
+    override init(contentRect:NSRect,styleMask:NSWindow.StyleMask,backing:NSWindow.BackingStoreType,defer flag:Bool) {
+        // Set this at construction: changing the flag later does not reliably
+        // update WindowServer's activation policy. Key focus still works.
+        super.init(contentRect:contentRect,styleMask:styleMask.union(.nonactivatingPanel),backing:backing,defer:flag)
+        isFloatingPanel = true; hidesOnDeactivate = false; becomesKeyOnlyIfNeeded = false
+    }
+    var ownsKeyboardFocus:Bool {
+        guard isPresented,isOnActiveSpace else { return false }
+        var focused = NSApp.keyWindow
+        while let window = focused {
+            if window === self { return true }
+            focused = window.sheetParent ?? window.parent
+        }
+        return false
+    }
     private var transition = OverlayTransitionState()
     var isPresented: Bool { transition.visible }
     var timelineController: TimelinePanelController?
@@ -221,6 +243,9 @@ final class RewindOverlayWindow: NSPanel {
         if appearing { visibilityChanged?(true) }
         presentation.begin()
         if !isVisible { alphaValue = 0 }
+        // Take keyboard focus without activating Recall and switching away
+        // from the app whose full-screen Space the user is currently viewing.
+        orderFrontRegardless()
         super.makeKeyAndOrderFront(sender)
         timelineController?.present()
         if appearing {NSAnimationContext.runAnimationGroup {context in context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0:0.22;animator().alphaValue = 1}}

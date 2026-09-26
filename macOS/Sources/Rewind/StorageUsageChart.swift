@@ -51,7 +51,7 @@ struct StorageUsageChart: View {
                         .overlay(alignment:.leading) { Capsule().fill(Color(red:0.64,green:0.76,blue:0.86)).frame(width:geo.size.width * min(1,max(0,Double(capacity-free)/Double(capacity)))) }
                 }.frame(height:5).accessibilityLabel("Disk used: \(Int(Double(capacity-free)/Double(capacity)*100)) percent")
             }
-            Text("Size on disk includes memories in Trash and downloaded models. Updated \(usage.measuredAt.formatted(date:.omitted,time:.shortened)).")
+            Text("Size on disk includes memories in Trash and downloaded models. Updated \(usage.measuredAt.recallFormatted(date:.omitted,time:.shortened)).")
                 .font(.system(size:10)).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
             if usage.unreadableFiles > 0 { Text("Some files could not be measured; this total may be incomplete.").font(.system(size:11)).foregroundStyle(.orange) }
         }

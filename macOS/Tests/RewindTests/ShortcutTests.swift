@@ -21,14 +21,35 @@ final class ShortcutTests: XCTestCase {
         shortcut.receive(id:1,pressed:true)
         XCTAssertEqual(toggles,4,"Retry clears any held state")
     }
-    @MainActor func testTimelinePanelCanActivateWhenClicked() throws {
+    @MainActor func testTimelinePanelAcceptsInputWithoutActivatingAnotherSpace() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at:root) }
         let model = try AppModel(root:root)
         let parent = NSWindow(contentRect:.zero,styleMask:.borderless,backing:.buffered,defer:false)
         let controller = TimelinePanelController(parent:parent,model:model)
-        XCTAssertFalse(controller.panel.styleMask.contains(.nonactivatingPanel),"Clicking a timeline control must retain application activation")
+        XCTAssertTrue(controller.panel.styleMask.contains(.nonactivatingPanel),"Clicking the timeline must not switch away from a full-screen app")
         XCTAssertTrue(controller.panel.canBecomeKey)
+        XCTAssertFalse(controller.panel.canBecomeMain)
+        XCTAssertFalse(controller.panel.becomesKeyOnlyIfNeeded)
         XCTAssertFalse(controller.panel.hidesOnDeactivate)
+    }
+    @MainActor func testOverlayShortcutTracksPanelAndChildFocus() async throws {
+        let panel = RewindOverlayWindow(contentRect:NSRect(x:-1200,y:0,width:800,height:600),styleMask:.borderless,backing:.buffered,defer:false)
+        panel.isReleasedWhenClosed = false
+        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
+        XCTAssertFalse(panel.canBecomeMain)
+        XCTAssertFalse(panel.becomesKeyOnlyIfNeeded)
+        XCTAssertFalse(panel.ownsKeyboardFocus)
+        panel.makeKeyAndOrderFront(nil)
+        try await Task.sleep(for:.milliseconds(100))
+        XCTAssertTrue(panel.ownsKeyboardFocus,"A nonactivating panel must still let the shortcut dismiss it")
+        let child = TimelineStripWindow(contentRect:.zero,styleMask:[.borderless,.nonactivatingPanel],backing:.buffered,defer:false)
+        child.isReleasedWhenClosed = false;panel.addChildWindow(child,ordered:.above)
+        child.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(panel.ownsKeyboardFocus,"Input in the timeline belongs to the same overlay")
+        panel.removeChildWindow(child);child.orderOut(nil)
+        panel.orderOut(nil)
+        XCTAssertFalse(panel.ownsKeyboardFocus)
+        try await Task.sleep(for:.milliseconds(250))
     }
 }

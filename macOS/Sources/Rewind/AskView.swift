@@ -20,7 +20,7 @@ struct AskView: View {
                 }.buttonStyle(.plain).help("New conversation").accessibilityLabel("New conversation")
             }
             HStack(spacing:8) {
-                Label("\(model.appFilter ?? "All apps") · \(model.since.map { "Since " + $0.formatted(date:.abbreviated,time:.omitted) } ?? "All recorded history")",systemImage:"line.3.horizontal.decrease")
+                Label("\(model.appFilter ?? "All apps") · \(model.since.map { "Since " + $0.recallFormatted(date:.abbreviated,time:.omitted) } ?? "All recorded history")",systemImage:"line.3.horizontal.decrease")
                 if model.appFilter != nil || model.since != nil { Button("Clear scope") { model.appFilter = nil; model.since = nil }.buttonStyle(.plain).foregroundStyle(.blue) }
                 Spacer()
             }.font(.system(size:11)).foregroundStyle(.secondary)

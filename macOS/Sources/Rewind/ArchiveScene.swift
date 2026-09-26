@@ -50,7 +50,7 @@ struct BareIconButton: View {
         Button(action:action) {
             Image(systemName:symbol).font(.system(size:size,weight:.medium))
                 .foregroundStyle(Color.overlayControl.opacity(hovered ? 1:0.78))
-                .frame(width:34,height:34).contentShape(Rectangle())
+                .frame(width:44,height:44).contentShape(Rectangle())
                 .scaleEffect(hovered && !reduceMotion ? 1.12:1)
         }.buttonStyle(.plain).onHover { hovered = $0 }
             .animation(.spring(response:0.3,dampingFraction:0.7),value:hovered)
@@ -86,13 +86,13 @@ struct ArchiveStackView: View {
                     .accessibilityRepresentation {
                         VStack {
                             ForEach(frames) { frame in
-                                Button("\(focusedID == frame.id ? "收起":"展开") \(frame.title.isEmpty ? frame.appName:frame.title)，\(frame.timestamp.formatted(date:.abbreviated,time:.standard))") { toggle(frame.id) }
+                                Button("\(focusedID == frame.id ? "Collapse":"Expand") \(frame.title.isEmpty ? frame.appName:frame.title), \(frame.timestamp.recallFormatted(date:.abbreviated,time:.standard))") { toggle(frame.id) }
                             }
                             if let focusedID {
-                                Button("收起卡片") { toggle(focusedID) }
-                                Button("收藏记忆") { recordAction(focusedID,"star") }
-                                Button("复制识别文字") { recordAction(focusedID,"copy") }
-                                Button("回到此刻") { recordAction(focusedID,"rewind") }
+                                Button("Collapse card") { toggle(focusedID) }
+                                Button("Star memory") { recordAction(focusedID,"star") }
+                                Button("Copy recognized text") { recordAction(focusedID,"copy") }
+                                Button("Rewind to this moment") { recordAction(focusedID,"rewind") }
                             }
                         }
                     }
@@ -104,10 +104,10 @@ struct ArchiveStackView: View {
                 VStack {
                     Spacer()
                     HStack(spacing:14) {
-                        Button { focusedID = nil;model.moveArchiveDay(by:-1) } label: { Image(systemName:"chevron.left").frame(width:30,height:28) }.help("前一天")
-                        Text(model.archiveDay.formatted(.dateTime.year().month().day())).monospacedDigit()
-                        Text("一列一天").foregroundStyle(.secondary)
-                        Button { focusedID = nil;model.moveArchiveDay(by:1) } label: { Image(systemName:"chevron.right").frame(width:30,height:28) }.help("后一天")
+                        Button { focusedID = nil;model.moveArchiveDay(by:-1) } label: { Image(systemName:"chevron.left").frame(width:44,height:40).contentShape(Rectangle()) }.help("Previous day")
+                        Text(model.archiveDay.recallFormatted(.dateTime.year().month().day())).monospacedDigit()
+                        Text("One day per column").foregroundStyle(.secondary)
+                        Button { focusedID = nil;model.moveArchiveDay(by:1) } label: { Image(systemName:"chevron.right").frame(width:44,height:40).contentShape(Rectangle()) }.help("Next day")
                     }.font(.system(size:11,weight:.medium)).buttonStyle(.plain)
                         .padding(.horizontal,12).liquidGlass(radius:18).padding(.bottom,22)
                 }

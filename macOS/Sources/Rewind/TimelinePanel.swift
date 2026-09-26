@@ -19,15 +19,16 @@ import Combine
     private var mouseMonitor: Any?
     init(parent:NSWindow,model:AppModel) {
         self.parent = parent; self.model = model
-        panel = TimelineStripWindow(contentRect:.zero,styleMask:[.borderless],backing:.buffered,defer:false)
+        panel = TimelineStripWindow(contentRect:.zero,styleMask:[.borderless,.nonactivatingPanel],backing:.buffered,defer:false)
         panel.title = "Recall Timeline"
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = false
         panel.alphaValue = 1; panel.ignoresMouseEvents = false; panel.acceptsMouseMovedEvents = true
         panel.hidesOnDeactivate = false; panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
         panel.level = .statusBar
         panel.collectionBehavior = RecallWindowBehavior.collection
         panel.isReleasedWhenClosed = false; panel.isMovable = false
-        panel.contentView = TransparentHostingView(rootView:AnimatedTimelineStrip(model:model,motion:motion))
+        panel.contentView = TransparentHostingView(rootView:AnimatedTimelineStrip(model:model,motion:motion).environment(\.locale,RecallLanguage.locale))
         mouseMonitor = NSEvent.addLocalMonitorForEvents(matching:[.mouseMoved,.mouseEntered,.mouseExited]) { [weak self] event in
             guard let self,let parent = self.parent,parent.isVisible else { return event }
             // Hysteresis: once the strip is up, the pointer may roam its full

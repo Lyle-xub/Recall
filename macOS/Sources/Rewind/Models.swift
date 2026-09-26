@@ -34,7 +34,7 @@ struct MemoryFrame: Codable, Identifiable, Hashable, Sendable {
     var ocrKey:String? = nil
     var ocrRegionIDs:[String]? = nil
     var ocrMeetingRegionIDs:[String]? = nil
-    var timeLabel: String { timestamp.formatted(date: .abbreviated, time: .shortened) }
+    var timeLabel: String { timestamp.recallFormatted(date: .abbreviated, time: .shortened) }
 }
 
 struct RecordingSession: Codable, Identifiable, Sendable {
@@ -78,7 +78,7 @@ struct ModelProfile: Codable, Equatable, Sendable {
 
 enum OverlayAppearance: String, Codable {
     case warmDay, deepNight
-    var label: String { self == .warmDay ? "暖昼":"深夜" }
+    var label: String { self == .warmDay ? "Light":"Dark" }
 }
 
 struct AppSettings: Codable {

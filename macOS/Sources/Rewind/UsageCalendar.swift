@@ -4,7 +4,9 @@ struct UsageCalendar:View {
     let selection:Date
     let choose:(Date)->Void
     @State private var month:Date
-    private let calendar = Calendar.current
+    private let calendar:Calendar = {
+        var value = Calendar.current; value.locale = RecallLanguage.locale; return value
+    }()
     private var today:Date { calendar.startOfDay(for:Date()) }
     init(selection:Date,choose:@escaping(Date)->Void) {
         self.selection = selection; self.choose = choose
@@ -26,7 +28,7 @@ struct UsageCalendar:View {
     var body:some View {
         VStack(spacing:16) {
             HStack {
-                Text(month.formatted(.dateTime.year().month(.wide))).font(.system(size:15,weight:.semibold,design:.rounded))
+                Text(month.recallFormatted(.dateTime.year().month(.wide))).font(.system(size:15,weight:.semibold,design:.rounded))
                 Spacer()
                 monthButton("chevron.left",label:"Previous month") { move(-1) }
                 monthButton("chevron.right",label:"Next month") { move(1) }
@@ -45,7 +47,7 @@ struct UsageCalendar:View {
                                     .overlay(Circle().strokeBorder(isToday && !selected ? Color.blue.opacity(0.45):.clear))
                                     .contentShape(Circle())
                             }.buttonStyle(.plain).disabled(day > today)
-                                .accessibilityLabel(day.formatted(date:.complete,time:.omitted))
+                                .accessibilityLabel(day.recallFormatted(date:.complete,time:.omitted))
                                 .accessibilityAddTraits(selected ? .isSelected:[])
                         } else { Color.clear.frame(width:36,height:36).accessibilityHidden(true) }
                     }

@@ -19,7 +19,7 @@ final class ArchiveSearchTests:XCTestCase {
             model.settings.appearance = night ? .deepNight:.warmDay
             let size = CGSize(width:1200,height:800)
             let host = NSHostingView(rootView:RootView(model:model).frame(width:size.width,height:size.height))
-            let window = NSWindow(contentRect:CGRect(x:-1600,y:0,width:size.width,height:size.height),styleMask:[.borderless],backing:.buffered,defer:false)
+            let window = RewindOverlayWindow(contentRect:CGRect(x:-1600,y:0,width:size.width,height:size.height),styleMask:[.borderless],backing:.buffered,defer:false)
             window.isReleasedWhenClosed = false;window.contentView = host;window.makeKeyAndOrderFront(nil)
             defer { window.orderOut(nil) }
             try await Task.sleep(for:.milliseconds(150))
