@@ -109,6 +109,20 @@ public static class ImageArchive
     public static byte[] Display(string root, string path, int maxEdge)
     {
         using var image = Load(root, path, maxEdge);
+        // Imported PNG/JPEG files do not pass through the tile decoder's size
+        // limit. Bound their thumbnails too, before WinUI retains the pixels.
+        if (maxEdge > 0 && Math.Max(image.Width, image.Height) > maxEdge)
+        {
+            var scale = (double)maxEdge / Math.Max(image.Width, image.Height);
+            using var thumbnail = new Bitmap(Math.Max(1, (int)(image.Width * scale)), Math.Max(1, (int)(image.Height * scale)), PixelFormat.Format32bppArgb);
+            using (var graphics = Graphics.FromImage(thumbnail))
+            {
+                graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                graphics.DrawImage(image, new System.Drawing.Rectangle(0, 0, thumbnail.Width, thumbnail.Height));
+            }
+            return Encode(thumbnail, ImageFormat.Png);
+        }
         return Encode(image, ImageFormat.Png);
     }
 }

@@ -1,0 +1,47 @@
+﻿[
+    {
+        "file":  "Recall.exe",
+        "bytes":  410112,
+        "sha256":  "5F04EE5867347D50BB4A36970DAB4A9863D7E8691B58600C6994D6E5A46CB6F2"
+    },
+    {
+        "file":  "resources.pri",
+        "bytes":  2185096,
+        "sha256":  "E8E7B01D566F171D53EA56F0D8AC97F605CC7316A42280236F8212169225406A"
+    },
+    {
+        "file":  "Assets/Recall.ico",
+        "bytes":  110364,
+        "sha256":  "C8BE96047206DA02A5FC94AC1756AB603621E239A8D35E091EB1B08F44578A31"
+    },
+    {
+        "file":  "runtimes/neural-ocr/det.onnx",
+        "bytes":  9929594,
+        "sha256":  "090F04ABCD9D9A7498BC4EBF677E4CB9BDCE1FE4197DDB7E529F1EF44E1FF94F"
+    },
+    {
+        "file":  "runtimes/neural-ocr/rec.onnx",
+        "bytes":  21234383,
+        "sha256":  "6F327246B50388F3C176AE304BD95767EA6DC0C9AE92153EF8CBE210B3C14884"
+    },
+    {
+        "file":  "runtimes/llama/llama-server.exe",
+        "bytes":  9216,
+        "sha256":  "955FDD6AD1B6B49078DFD11E8DCC0F043B0B9D3604079EA4DA975CA2C7FB51E1"
+    },
+    {
+        "file":  "runtimes/whisper/whisper-cli.exe",
+        "bytes":  480768,
+        "sha256":  "0FF971E410240A0B97117432D771245698F376E06105C011959D2BFC4BB23311"
+    },
+    {
+        "file":  "tessdata/eng.traineddata",
+        "bytes":  4113088,
+        "sha256":  "7D4322BD2A7749724879683FC3912CB542F19906C83BCC1A52132556427170B2"
+    },
+    {
+        "file":  "tessdata/chi_sim.traineddata",
+        "bytes":  2469156,
+        "sha256":  "A5FCB6F0DB1E1D6D8522F39DB4E848F05984669172E584E8D76B6B3141E1F730"
+    }
+]

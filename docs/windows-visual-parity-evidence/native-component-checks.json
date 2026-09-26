@@ -1,0 +1,24 @@
+﻿[
+    {
+        "component":  "Neural OCR",
+        "exitCode":  0,
+        "recognizedAurora":  true,
+        "regions":  13,
+        "error":  "libpng warning: iCCP: extra compressed data\r\n"
+    },
+    {
+        "component":  "Tesseract fallback",
+        "exitCode":  0,
+        "recognizedAurora":  true,
+        "regions":  8,
+        "error":  "libpng warning: iCCP: extra compressed data\r\n"
+    },
+    {
+        "component":  "llama",
+        "exitCode":  0
+    },
+    {
+        "component":  "whisper",
+        "exitCode":  0
+    }
+]

@@ -24,7 +24,7 @@ internal sealed class NativeShell : IDisposable
         DwmSetWindowAttribute(handle, 33, ref enabled, 4);
         DwmSetWindowAttribute(handle, 17, ref enabled, 4);
         DwmSetWindowAttribute(handle, 38, ref enabled, 4);
-        SetWindowDisplayAffinity(handle, Environment.GetCommandLineArgs().Contains("--smoke-test") ? 0u : 0x11u);
+        SetWindowDisplayAffinity(handle, Environment.GetCommandLineArgs().Any(a => a is "--smoke-test" or "--visual-parity") ? 0u : 0x11u);
         callback = Dispatch;
         previous = SetWindowLongPtr(handle, -4, Marshal.GetFunctionPointerForDelegate(callback));
         var menu = new Forms.ContextMenuStrip();

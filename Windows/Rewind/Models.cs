@@ -78,6 +78,8 @@ public record ModelProfile
 }
 public record AppSettings
 {
+    public bool RhineLabMode { get; set; }
+    public bool DarkAppearance { get; set; }
     public ModelProfile Chat { get; set; } = ModelProfile.BuiltinChat;
     public ModelProfile Speech { get; set; } = ModelProfile.BuiltinSpeech;
     public bool TranscriptionEnabled

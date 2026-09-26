@@ -18,6 +18,8 @@ internal sealed class FrameSurface : Grid
         Padding = new(8);
         IsTabStop = true;
         Design.Rounded(this, 26);
+        image.Opacity = Design.Dark ? .78 : 1;
+        Children.Add(new Border { Background = Design.Brush(Microsoft.UI.Colors.Black), IsHitTestVisible = false });
         Children.Add(image);
         Children.Add(selection);
         ProtectedCursor = InputSystemCursor.Create(InputSystemCursorShape.IBeam);

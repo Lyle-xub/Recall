@@ -41,7 +41,7 @@ internal static class AppIcons
     public static FrameworkElement View(AppIdentity app, double size = 28)
     {
         var image = new Microsoft.UI.Xaml.Controls.Image { Width = size, Height = size, Stretch = Stretch.Uniform };
-        var host = new Border { Width = size, Height = size, CornerRadius = new(size * .2), Child = image };
+        var host = new Border { Width = size, Height = size, CornerRadius = new(size * .2), Child = image, Background = Design.GlassBrush, BorderBrush = Design.RimBrush, BorderThickness = new(1) };
         host.Loaded += async (_, _) => { var entry = await Load(app); if (entry.Png.Length == 0) { host.Child = Design.Text(app.Name.Length > 0 ? app.Name[..1] : "·", size * .65, true); return; } using var stream = new Windows.Storage.Streams.InMemoryRandomAccessStream(); using (var writer = new Windows.Storage.Streams.DataWriter(stream)) { writer.WriteBytes(entry.Png); await writer.StoreAsync(); writer.DetachStream(); } stream.Seek(0); var bitmap = new BitmapImage(); await bitmap.SetSourceAsync(stream); image.Source = bitmap; };
         return host;
     }

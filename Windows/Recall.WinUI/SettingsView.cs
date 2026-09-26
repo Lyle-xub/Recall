@@ -6,12 +6,14 @@ namespace Recall;
 internal sealed class SettingsView : Grid
 {
     readonly AppRuntime runtime; readonly Func<AppSettings, Task> save; readonly AppSettings draft; readonly StackPanel sections = new() { Spacing = 20 }; readonly TextBlock message = Design.Text("Changes apply when you save.", 12, color: Design.Muted); readonly Dictionary<string, PasswordBox> secrets = []; CancellationTokenSource? optimization;
+    readonly Dictionary<string, Button> tabButtons = [];
     public SettingsView(AppRuntime runtime, Func<AppSettings, Task> save, Action close)
     {
         this.runtime = runtime;
         this.save = save;
         draft = JsonSerializer.Deserialize<AppSettings>(JsonSerializer.Serialize(runtime.Settings))!;
-        MaxWidth = 930;
+        MaxWidth = 660;
+        Width = 660;
         HorizontalAlignment = HorizontalAlignment.Center;
         Background = Design.Brush(Microsoft.UI.Colors.White);
         CornerRadius = new(30);
@@ -29,16 +31,26 @@ internal sealed class SettingsView : Grid
         {
             Height = GridLength.Auto
         });
-        Children.Add(Design.Text("Settings", 28, true));
+        var tabs = new Grid { ColumnSpacing = 4 };
+        foreach (var name in new[] { "Recording", "Permissions", "Models", "Storage", "Shortcuts" })
+        {
+            tabs.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
+            var button = Design.Button(name, () => SelectTab(name));
+            button.Padding = new(8); button.MinHeight = 60; button.HorizontalAlignment = HorizontalAlignment.Stretch;
+            var glyph = name switch { "Recording" => "\uE7C8", "Permissions" => "\uE72E", "Models" => "\uE945", "Storage" => "\uE7F1", _ => "\uE765" };
+            var icon = Design.Symbol(glyph); icon.HorizontalAlignment = HorizontalAlignment.Center;
+            var label = Design.Text(name, 12, true); label.HorizontalAlignment = HorizontalAlignment.Center;
+            button.Content = Design.Stack(5, icon, label);
+            Grid.SetColumn(button, tabs.Children.Count); tabButtons[name] = button;
+            tabs.Children.Add(button);
+        }
+        var tabBar = Design.Card(tabs, 22, 5); tabBar.Background = Design.Brush(Color.FromArgb(255, 247, 250, 255));
+        Children.Add(Design.Stack(20, Design.Stack(4, Design.Text("Settings", 24, true), Design.Text("Your memories, under your control.", 13, color: Design.Muted)), tabBar));
         var scroll = Design.Scroll(sections);
         scroll.Margin = new(0, 22, 0, 18);
         Grid.SetRow(scroll, 1);
         Children.Add(scroll);
-        sections.Children.Add(Recording());
-        sections.Children.Add(Permissions());
-        sections.Children.Add(Models());
-        sections.Children.Add(Storage());
-        sections.Children.Add(Shortcuts());
+        SelectTab("Recording");
         var footer = new Grid { ColumnSpacing = 14 };
         footer.ColumnDefinitions.Add(new()
         {
@@ -62,6 +74,17 @@ internal sealed class SettingsView : Grid
         Grid.SetRow(footer, 2);
         Children.Add(footer);
         Unloaded += (_, _) => optimization?.Cancel();
+    }
+    public void SelectTab(string name)
+    {
+        optimization?.Cancel();
+        foreach (var (key, button) in tabButtons)
+        {
+            button.Background = Design.Brush(key == name ? Color.FromArgb(255, 224, 235, 254) : Microsoft.UI.Colors.Transparent);
+            button.BorderBrush = Design.Brush(key == name ? Color.FromArgb(255, 180, 207, 253) : Microsoft.UI.Colors.Transparent);
+        }
+        sections.Children.Clear();
+        sections.Children.Add(name switch { "Permissions" => Permissions(), "Models" => Models(), "Storage" => Storage(), "Shortcuts" => Shortcuts(), _ => Recording() });
     }
     static Border Section(string title, params UIElement[] children)
     {
@@ -107,7 +130,10 @@ internal sealed class SettingsView : Grid
         var index = Array.FindIndex(screens, x => x.DeviceName == draft.DisplayName);
         var excluded = Design.Input("Comma-separated app process names", string.Join(", ", draft.ExcludedApps));
         excluded.TextChanged += (_, _) => draft.ExcludedApps = excluded.Text.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-        return Section("Recording", Row("Display", Choice(screens.Select((x, i) => $"Display {i + 1} · {x.Bounds.Width} × {x.Bounds.Height}").ToArray(), index, i => draft.DisplayName = screens[i].DeviceName)), Row("System audio", Toggle(draft.SystemAudio, v => draft.SystemAudio = v)), Row("Microphone", Toggle(draft.Microphone, v => draft.Microphone = v)), Row("Automatic transcription", Toggle(draft.TranscriptionEnabled, v => draft.TranscriptionEnabled = v)), Row("Capture interval", Choice(["1 second", "3 seconds", "5 seconds", "10 seconds"], Array.IndexOf(new[] { 1, 3, 5, 10 }, draft.CaptureInterval), i => draft.CaptureInterval = new[] { 1, 3, 5, 10 }[i])), Row("Open at sign-in", Toggle(draft.LaunchAtLogin, v => draft.LaunchAtLogin = v)), Row("Show taskbar icon", Toggle(draft.ShowTaskbarIcon, v => draft.ShowTaskbarIcon = v), "Recall remains available in the system tray."), Design.Stack(7, Design.Text("Excluded apps", 14), excluded, Design.Text("Capture pauses while an excluded app is visible. Private activity is not named in the timeline.", 12, color: Design.Muted)), Design.Text("Capture pauses while Recall is open. Images use the original screen for text recognition, then save at 50% quality. Video uses 720 pixels, 1 fps and 100 kbps.", 12, color: Design.Muted));
+        var appearance = Row("Appearance", Choice(["Light", "Dark"], draft.DarkAppearance ? 1 : 0, i => draft.DarkAppearance = i == 1));
+        appearance.Visibility = draft.RhineLabMode ? Visibility.Visible : Visibility.Collapsed;
+        var rhine = Row("Rhine Lab Mode", Toggle(draft.RhineLabMode, v => { draft.RhineLabMode = v; appearance.Visibility = v ? Visibility.Visible : Visibility.Collapsed; }), "A glass archive arranged by day.");
+        return Section("Recording", rhine, appearance, Row("Display", Choice(screens.Select((x, i) => $"Display {i + 1} · {x.Bounds.Width} × {x.Bounds.Height}").ToArray(), index, i => draft.DisplayName = screens[i].DeviceName)), Row("System audio", Toggle(draft.SystemAudio, v => draft.SystemAudio = v)), Row("Microphone", Toggle(draft.Microphone, v => draft.Microphone = v)), Row("Automatic transcription", Toggle(draft.TranscriptionEnabled, v => draft.TranscriptionEnabled = v)), Row("Capture interval", Choice(["1 second", "3 seconds", "5 seconds", "10 seconds"], Array.IndexOf(new[] { 1, 3, 5, 10 }, draft.CaptureInterval), i => draft.CaptureInterval = new[] { 1, 3, 5, 10 }[i])), Row("Open at sign-in", Toggle(draft.LaunchAtLogin, v => draft.LaunchAtLogin = v)), Row("Show taskbar icon", Toggle(draft.ShowTaskbarIcon, v => draft.ShowTaskbarIcon = v), "Recall remains available in the system tray."), Design.Stack(7, Design.Text("Excluded apps", 14), excluded, Design.Text("Capture pauses while an excluded app is visible. Private activity is not named in the timeline.", 12, color: Design.Muted)), Design.Text("Capture pauses while Recall is open. Images use the original screen for text recognition, then save at 50% quality. Video uses 720 pixels, 1 fps and 100 kbps.", 12, color: Design.Muted));
     }
     FrameworkElement Permissions()
     {
@@ -156,11 +182,11 @@ internal sealed class SettingsView : Grid
         var content = Design.Stack(18);
         var reportHost = new Grid();
         content.Children.Add(reportHost);
-        var refresh = Design.Button("Refresh", async () => await Measure());
+        var refresh = Design.Button("Refresh", async () => await Measure(true));
         content.Children.Add(refresh);
-        async Task Measure()
+        async Task Measure(bool refresh = false)
         {
-            var report = await StorageService.Measure(runtime.Store);
+            var report = await StorageService.Measure(runtime.Store, refresh);
             reportHost.Children.Clear();
             var grid = new Grid { ColumnSpacing = 28 };
             grid.ColumnDefinitions.Add(new()
@@ -195,13 +221,13 @@ internal sealed class SettingsView : Grid
         }
         _ = Measure();
         content.Children.Add(Row("Keep history", Choice(["7 days", "30 days", "90 days", "Forever"], Array.IndexOf(new[] { 7, 30, 90, 0 }, draft.RetentionDays), i => draft.RetentionDays = new[] { 7, 30, 90, 0 }[i])));
-        var optimize = Design.Button("Optimize images and video", async () => { if (optimization != null) { optimization.Cancel(); return; } optimization = new(); try { var saved = await StorageService.Optimize(runtime.Store, new Progress<string>(s => message.Text = s), optimization.Token); message.Text = "Freed " + Design.Size(saved); await Measure(); } catch (OperationCanceledException) { message.Text = "Optimization stopped. Completed items were kept."; } catch (Exception ex) { message.Text = ex.Message; } finally { optimization.Dispose(); optimization = null; } });
+        var optimize = Design.Button("Optimize images and video", async () => { if (optimization != null) { optimization.Cancel(); return; } optimization = new(); try { var saved = await StorageService.Optimize(runtime.Store, new Progress<string>(s => message.Text = s), optimization.Token); message.Text = "Freed " + Design.Size(saved); await Measure(true); } catch (OperationCanceledException) { message.Text = "Optimization stopped. Completed items were kept."; } catch (Exception ex) { message.Text = ex.Message; } finally { optimization.Dispose(); optimization = null; } });
         content.Children.Add(optimize);
         var scope = CleanupScope.Trash;
         var keep = true;
         content.Children.Add(Row("Clear", Choice(["Trash", "Older than 30 days", "Older than 7 days", "All memories"], 0, i => scope = (CleanupScope)i)));
         content.Children.Add(Row("Keep starred memories", Toggle(true, v => keep = v)));
-        content.Children.Add(Design.Button("Review cleanup", async () => { var plan = await Task.Run(() => runtime.Store.CleanupPreview(scope, keep)); if (plan.Ids.Length == 0) { message.Text = "No memories match this cleanup."; return; } if (await Confirm("Clear these memories?", $"{plan.Ids.Length} memories · up to {Design.Size(plan.Bytes)}. This permanently removes their unshared files and text. Active recordings and saved models are kept.", "Clear memories")) { var removed = await Task.Run(() => runtime.Store.Cleanup(plan)); message.Text = $"Cleared {removed} memories"; await Measure(); } }));
+        content.Children.Add(Design.Button("Review cleanup", async () => { var plan = await Task.Run(() => runtime.Store.CleanupPreview(scope, keep)); if (plan.Ids.Length == 0) { message.Text = "No memories match this cleanup."; return; } if (await Confirm("Clear these memories?", $"{plan.Ids.Length} memories · up to {Design.Size(plan.Bytes)}. This permanently removes their unshared files and text. Active recordings and saved models are kept.", "Clear memories")) { var removed = await Task.Run(() => runtime.Store.Cleanup(plan)); message.Text = $"Cleared {removed} memories"; await Measure(true); } }));
         return Section("Storage", content);
     }
     static Microsoft.UI.Xaml.Shapes.Path Arc(double angle, double sweep, Color color)

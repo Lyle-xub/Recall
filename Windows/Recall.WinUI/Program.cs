@@ -5,9 +5,20 @@ namespace Recall;
 internal static class Program
 {
     private static Mutex? single;
+    static string? startupLog;
+    internal static void TraceStartup(string stage)
+    {
+        if (startupLog == null) return;
+        try { File.AppendAllText(startupLog, $"{DateTimeOffset.UtcNow:O} [{Environment.CurrentManagedThreadId}] {stage}{Environment.NewLine}"); }
+        catch (IOException) { }
+    }
     [STAThread]
     public static void Main(string[] args)
     {
+        // Recall's interface is English; this does not change the Windows
+        // input language or the language of recorded content.
+        System.Globalization.CultureInfo.DefaultThreadCurrentCulture = System.Globalization.CultureInfo.GetCultureInfo("en-US");
+        System.Globalization.CultureInfo.DefaultThreadCurrentUICulture = System.Globalization.CultureInfo.GetCultureInfo("en-US");
         if (args.Contains("--ocr"))
         {
             Recall.Ocr.OcrWorker.Run(args.Contains("--fallback"));
@@ -15,18 +26,49 @@ internal static class Program
         }
         if (args.Contains("--smoke-test"))
             AppPaths.DataRoot = Path.Combine(Path.GetTempPath(), "Recall-Smoke-" + Guid.NewGuid());
-        single = new Mutex(true, args.Contains("--smoke-test") ? "Local\\Recall.Native.Windows.Smoke" : "Local\\Recall.Native.Windows", out var first);
+        var parity = Array.IndexOf(args, "--visual-parity");
+        if (parity >= 0)
+        {
+            if (parity + 1 >= args.Length) throw new ArgumentException("A visual-parity output directory is required.");
+            AppPaths.DataRoot = Path.Combine(Path.GetFullPath(args[parity + 1]), "library");
+            Directory.CreateDirectory(Path.GetDirectoryName(AppPaths.DataRoot)!);
+            startupLog = Path.Combine(Path.GetDirectoryName(AppPaths.DataRoot)!, "startup.log");
+            TraceStartup("Main entered; session=" + System.Diagnostics.Process.GetCurrentProcess().SessionId);
+            AppDomain.CurrentDomain.UnhandledException += (_, e) => TraceStartup("Unhandled: " + e.ExceptionObject);
+        }
+        single = new Mutex(true, args.Contains("--smoke-test") || parity >= 0 ? "Local\\Recall.Native.Windows.Validation" : "Local\\Recall.Native.Windows", out var first);
         if (!first)
         {
+            TraceStartup("An existing validation instance owns the mutex");
             NativeShell.SignalExisting();
             return;
         }
-        WinRT.ComWrappersSupport.InitializeComWrappers();
-        Application.Start(_ => { DispatcherQueue.GetForCurrentThread().EnsureSystemDispatcherQueue(); SynchronizationContext.SetSynchronizationContext(new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread())); new App(args); });
+        try
+        {
+            TraceStartup("Initialize COM wrappers");
+            WinRT.ComWrappersSupport.InitializeComWrappers();
+            TraceStartup("Application.Start");
+            Application.Start(_ =>
+            {
+                TraceStartup("Application initialization callback");
+                DispatcherQueue.GetForCurrentThread().EnsureSystemDispatcherQueue();
+                TraceStartup("System dispatcher initialized");
+                SynchronizationContext.SetSynchronizationContext(new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread()));
+                new App(args);
+            });
+        }
+        catch (Exception error) { TraceStartup("Startup failure: " + error); throw; }
     }
 }
-internal sealed class App : Application
+internal sealed class App : Application, Microsoft.UI.Xaml.Markup.IXamlMetadataProvider
 {
+    // Code-built views still need the WinUI metadata provider for control
+    // templates and resources; no App.xaml is generated in this project.
+    Microsoft.UI.Xaml.XamlTypeInfo.XamlControlsXamlMetaDataProvider? metadata;
+    Microsoft.UI.Xaml.XamlTypeInfo.XamlControlsXamlMetaDataProvider Metadata => metadata ??= new();
+    public Microsoft.UI.Xaml.Markup.IXamlType GetXamlType(Type type) => Metadata.GetXamlType(type);
+    public Microsoft.UI.Xaml.Markup.IXamlType GetXamlType(string name) => Metadata.GetXamlType(name);
+    public Microsoft.UI.Xaml.Markup.XmlnsDefinition[] GetXmlnsDefinitions() => Metadata.GetXmlnsDefinitions();
     public static RecallWindow? CurrentWindow
     {
         get; private set;
@@ -35,19 +77,32 @@ internal sealed class App : Application
     public App(string[] args)
     {
         arguments = args;
-        Resources.MergedDictionaries.Add(new XamlControlsResources());
-        UnhandledException += (_, e) => { Directory.CreateDirectory(AppPaths.DataRoot); File.AppendAllText(Path.Combine(AppPaths.DataRoot, "errors.log"), DateTimeOffset.Now + " " + e.Exception + Environment.NewLine); };
+        Program.TraceStartup("Application constructor");
+        UnhandledException += (_, e) => { Program.TraceStartup("XAML unhandled: " + e.Exception); Directory.CreateDirectory(AppPaths.DataRoot); File.AppendAllText(Path.Combine(AppPaths.DataRoot, "errors.log"), DateTimeOffset.Now + " " + e.Exception + Environment.NewLine); };
     }
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
+        Program.TraceStartup("OnLaunched");
+        // Resource lookup requires the fully constructed Application and its
+        // metadata provider. Loading here avoids the native constructor fail-fast.
+        Resources.MergedDictionaries.Add(new XamlControlsResources());
+        Program.TraceStartup("XAML resources initialized");
         var runtime = await Task.Run(() => new AppRuntime());
+        Program.TraceStartup("Runtime initialized");
         var smoke = Array.IndexOf(arguments, "--smoke-test");
-        if (smoke >= 0)
+        var parity = Array.IndexOf(arguments, "--visual-parity");
+        if (smoke >= 0 || parity >= 0)
         {
             runtime.Settings.OnboardingComplete = true;
             runtime.Settings.LaunchFilmSeen = true;
         }
         CurrentWindow = new(runtime);
+        Program.TraceStartup("Window constructed");
+        if (parity >= 0)
+        {
+            await VisualParitySession.Start(CurrentWindow, runtime, arguments[parity + 1]);
+            return;
+        }
         if (smoke >= 0)
         {
             _ = SmokeRunner.Run(CurrentWindow, runtime, arguments[smoke + 1]);

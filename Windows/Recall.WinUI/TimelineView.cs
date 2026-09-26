@@ -5,7 +5,7 @@ namespace Recall;
 internal sealed class TimelineView : Grid
 {
     readonly AppRuntime runtime; readonly Action<MemoryFrame?> preview; readonly Canvas track = new(); readonly TextBlock label = Design.Text("Now", 14, true); readonly Border timePill; readonly Microsoft.UI.Dispatching.DispatcherQueueTimer timer;
-    DateTimeOffset center = DateTimeOffset.Now; double span = 300; bool live = true, dragging; double startX; DateTimeOffset startTime; long revision; bool refreshing, refreshAgain, previewAgain;
+    DateTimeOffset center = DateTimeOffset.Now; double span = 300; bool live = true, dragging, active; double startX; DateTimeOffset startTime; long revision; bool refreshing, refreshAgain, previewAgain;
     public TimelineView(AppRuntime runtime, Action<MemoryFrame?> preview)
     {
         this.runtime = runtime;
@@ -50,11 +50,17 @@ internal sealed class TimelineView : Grid
         Loaded += (_, _) => _ = Refresh();
         timer = DispatcherQueue.CreateTimer();
         timer.Interval = TimeSpan.FromSeconds(2);
-        timer.Tick += (_, _) => { if (live) center = DateTimeOffset.Now; _ = Refresh(); };
-        Loaded += (_, _) => timer.Start();
+        timer.Tick += (_, _) => { if (Visibility != Visibility.Visible) return; if (live) center = DateTimeOffset.Now; _ = Refresh(); };
+        Loaded += (_, _) => { if (active) timer.Start(); };
         Unloaded += (_, _) => timer.Stop();
     }
     public bool IsLive => live;
+    public void SetActive(bool value)
+    {
+        active = value; Visibility = value ? Visibility.Visible : Visibility.Collapsed;
+        if (value) { timer.Start(); _ = Refresh(); }
+        else { timer.Stop(); Interlocked.Increment(ref revision); refreshAgain = previewAgain = false; }
+    }
     public void Select(MemoryFrame f)
     {
         live = false;
@@ -78,6 +84,7 @@ internal sealed class TimelineView : Grid
     }
     async Task Refresh(bool updatePreview = false)
     {
+        if (!active) return;
         previewAgain |= updatePreview;
         if (refreshing)
         {
@@ -94,7 +101,7 @@ internal sealed class TimelineView : Grid
                 previewAgain = false;
                 await RefreshCore(update);
                 await Task.Delay(30);
-            } while (refreshAgain && IsLoaded);
+            } while (refreshAgain && IsLoaded && active);
         }
         finally { refreshing = false; }
     }

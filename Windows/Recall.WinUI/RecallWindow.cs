@@ -9,7 +9,7 @@ namespace Recall;
 internal sealed class RecallWindow : Window
 {
     readonly ClearBackdrop backdrop = new(); readonly AppRuntime runtime; readonly NativeShell shell; readonly Grid root = new(), page = new(); readonly TimelineView timeline;
-    readonly Grid toolbar = new(); readonly TextBox search = Design.Input("Search anything you’ve seen, said, or heard", height: 72); readonly StackPanel actions = new() { Orientation = Orientation.Horizontal, Spacing = 18 };
+    readonly RhineArchiveView archive; readonly Button back; readonly Grid toolbar = new(); readonly TextBox search = Design.Input("Search anything you’ve seen, said, or heard", height: 72); readonly StackPanel actions = new() { Orientation = Orientation.Horizontal, Spacing = 16 };
     readonly TextBlock notice = Design.Text("", 13, color: Design.Muted); readonly Microsoft.UI.Dispatching.DispatcherQueueTimer statusTimer;
     Storyboard? searchAnimation; CancellationTokenSource? queryCancellation; DetailView? detail; bool expanded, animating, quitting; string mode = "home"; string? appFilter; bool starred, trash; MemoryFrame? selected; string? lastSearchSignature; DateTimeOffset? searchSince;
     public bool IsShown
@@ -23,13 +23,19 @@ internal sealed class RecallWindow : Window
         SystemBackdrop = backdrop;
         Content = root;
         root.Background = Design.Brush(Color.FromArgb(1, 255, 255, 255));
-        root.RequestedTheme = ElementTheme.Light;
+        Design.SetDark(runtime.Settings.DarkAppearance);
+        root.RequestedTheme = runtime.Settings.DarkAppearance ? ElementTheme.Dark : ElementTheme.Light;
         shell = new(this, Toggle, () => { runtime.Recording.Request(!runtime.Recording.State.Requested); UpdateStatus(); }, () => Navigate("settings"), Quit);
         search.SizeChanged += (_, _) => Backdrop();
         var error = shell.Configure(runtime.Settings.Shortcuts, runtime.Settings.ShowTaskbarIcon);
         if (error != null)
             notice.Text = error;
         timeline = new(runtime, Preview);
+        archive = new(runtime, OpenFrame);
+        archive.ExpansionChanged += open => toolbar.Visibility = open || mode is "settings" or "onboarding" ? Visibility.Collapsed : Visibility.Visible;
+        archive.TimelineRequested += () => { timeline.SetActive(true); archive.SetTimeline(true); };
+        back = Design.Icon("\uE72B", "Back", () => Navigate("home"), 56);
+        back.HorizontalAlignment = HorizontalAlignment.Left; back.VerticalAlignment = VerticalAlignment.Top; back.Margin = new(28, 16, 0, 0);
         BuildToolbar();
         root.PointerPressed += (_, e) => { if (ReferenceEquals(e.OriginalSource, root) || ReferenceEquals(e.OriginalSource, page)) { _ = Hide(); e.Handled = true; } };
         root.KeyDown += Keys;
@@ -38,8 +44,8 @@ internal sealed class RecallWindow : Window
         statusTimer = DispatcherQueue.CreateTimer();
         statusTimer.Interval = TimeSpan.FromMilliseconds(800);
         statusTimer.Tick += (_, _) => { if (IsShown) detail?.RefreshStatus(); };
-        SizeChanged += (_, _) => { search.MaxWidth = Math.Max(230, Math.Min(expanded ? 640 : 860, root.ActualWidth - (expanded ? 576 : 196))); if (mode == "home") toolbar.Margin = new(24, Math.Max(72, root.ActualHeight * .425 - 36), 24, 0); };
-        root.SizeChanged += (_, _) => Backdrop();
+        SizeChanged += (_, _) => LayoutToolbar();
+        root.SizeChanged += (_, _) => { LayoutToolbar(); Backdrop(); };
         toolbar.LayoutUpdated += (_, _) => Backdrop();
         Compose();
     }
@@ -56,7 +62,7 @@ internal sealed class RecallWindow : Window
                 var point = item.TransformToVisual(root).TransformPoint(new(0, 0));
                 circles.Add(new(point.X, point.Y, item.ActualWidth, item.ActualHeight));
             }
-        backdrop.Update(mode != "home", root.ActualWidth, root.ActualHeight, rect, circles);
+        backdrop.Update(mode != "home" || runtime.Settings.RhineLabMode, root.ActualWidth, root.ActualHeight, rect, circles);
     }
     public void Show()
     {
@@ -87,13 +93,14 @@ internal sealed class RecallWindow : Window
         animating = true;
         queryCancellation?.Cancel();
         detail?.Stop();
+        archive.SetActive(false);
+        timeline.SetActive(false);
         await Design.Fade(root, 0, 180);
         shell.Hide();
         IsShown = false;
         statusTimer.Stop();
         detail?.Dispose();
         detail = null;
-        root.Children.Clear();
         page.Children.Clear();
         mode = "home";
         selected = null;
@@ -134,22 +141,22 @@ internal sealed class RecallWindow : Window
         search.MaxWidth = 860;
         search.FontSize = 22;
         search.Padding = new(54, 15, 20, 15);
-        search.Background = Design.Brush(Color.FromArgb(220, 255, 255, 255));
-        search.BorderBrush = Design.Brush(Color.FromArgb(220, 255, 255, 255));
+        search.Background = Design.GlassBrush;
+        search.BorderBrush = Design.RimBrush;
         search.BorderThickness = new(1.3);
         search.CornerRadius = new(38);
         var glass = new Grid();
-        glass.Children.Add(new Border { CornerRadius = new(38), Child = new DesktopBlur() });
+
         Design.Rounded(glass, 38);
         glass.Children.Add(search);
         var magnify = new FontIcon { Glyph = "\uE721", Foreground = Design.Brush(Design.Ink), FontSize = 25, HorizontalAlignment = HorizontalAlignment.Left, Margin = new(20, 0, 0, 0), IsHitTestVisible = false };
         glass.Children.Add(magnify);
         toolbar.Children.Add(glass);
-        var buttons = new[] { Design.Icon("\uE71D", "Filter applications", Apps, 58), Design.Icon("\uE734", "Starred memories", () => { starred = !starred; Navigate("search"); }, 58), Design.Icon("\uE945", "Ask Recall", () => Navigate("ask"), 58), Design.Icon("\uE9D9", "App usage", () => Navigate("usage"), 58), Design.Icon("\uE713", "Settings", () => Navigate("settings"), 58) };
+        var buttons = new[] { Design.Icon("\uE71D", "Filter applications", Apps, 64), Design.Icon("\uE734", "Starred memories", () => { starred = !starred; Navigate("search"); }, 64), Design.Icon("\uE945", "Ask Recall", () => Navigate("ask"), 64), Design.Icon("\uE9D9", "App usage", () => Navigate("usage"), 64), Design.Icon("\uE713", "Settings", () => Navigate("settings"), 64) };
         foreach (var button in buttons)
             actions.Children.Add(button);
         Grid.SetColumn(actions, 1);
-        actions.Margin = new(18, 0, 0, 0);
+        actions.Margin = new(16, 0, 0, 0);
         actions.VerticalAlignment = VerticalAlignment.Center;
         actions.Visibility = Visibility.Collapsed;
         toolbar.Children.Add(actions);
@@ -158,49 +165,29 @@ internal sealed class RecallWindow : Window
         search.TextChanged += (_, _) => { if (search.Text.Length > 0 && mode == "home") Navigate("search"); if (mode == "search") _ = Search(); };
         search.KeyDown += (_, e) => { if (e.Key == VirtualKey.Enter) { Navigate("search"); e.Handled = true; } };
     }
+    void LayoutToolbar()
+    {
+        var top = mode != "home" || runtime.Settings.RhineLabMode || selected != null;
+        var width = Math.Max(230, Math.Min(1020, root.ActualWidth - 196));
+        search.Width = expanded ? Math.Max(230, width - 400) : Math.Min(860, Math.Max(230, root.ActualWidth - 196));
+        search.MaxWidth = search.Width;
+        search.Height = search.MinHeight = expanded ? 64 : 72;
+        search.FontSize = expanded ? 20 : 22;
+        search.PlaceholderText = expanded ? "Search memories" : "Search anything you’ve seen, said, or heard";
+        search.CornerRadius = new(search.Height / 2);
+        toolbar.Margin = new(24, top ? 11 : Math.Max(72, root.ActualHeight * .425 - 36), 24, 0);
+    }
     void Expand()
     {
-        if (expanded)
-            return;
         expanded = true;
         actions.Visibility = Visibility.Visible;
-        search.MinHeight = 58;
-        search.FontSize = 19;
-        search.CornerRadius = new(30);
-        var storyboard = new Storyboard();
-        searchAnimation = storyboard;
-        var squeeze = new DoubleAnimation { From = search.ActualWidth > 0 ? search.ActualWidth : 860, To = Math.Clamp(Math.Min(1020, root.ActualWidth - 196) - 380, 230, 640), Duration = TimeSpan.FromMilliseconds(430), EnableDependentAnimation = true, EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
-        Storyboard.SetTarget(squeeze, search);
-        Storyboard.SetTargetProperty(squeeze, "Width");
-        storyboard.Children.Add(squeeze);
-        if (Design.Motion)
-            storyboard.Begin();
-        else
-            search.Width = Math.Clamp(Math.Min(1020, root.ActualWidth - 196) - 380, 230, 640);
-        for (var i = 0; i < actions.Children.Count; i++)
-        {
-            var child = actions.Children[i];
-            Design.Spring(child, 9, .55f, i * 42);
-            var v = ElementCompositionPreview.GetElementVisual(child);
-            var a = v.Compositor.CreateVector3KeyFrameAnimation();
-            a.InsertKeyFrame(0, new(-70 * (i + 1), 0, 0));
-            a.InsertKeyFrame(.7f, new(7, 0, 0));
-            a.InsertKeyFrame(1, Vector3.Zero);
-            a.Duration = TimeSpan.FromMilliseconds(620 + i * 35);
-            if (Design.Motion)
-                v.StartAnimation("Translation", a);
-        }
+        LayoutToolbar();
     }
     void Collapse()
     {
-        searchAnimation?.Stop();
-        searchAnimation = null;
-        expanded = false;
-        actions.Visibility = Visibility.Collapsed;
-        search.Width = 860;
-        search.MinHeight = 72;
-        search.FontSize = 22;
-        search.CornerRadius = new(36);
+        searchAnimation?.Stop(); searchAnimation = null;
+        expanded = false; actions.Visibility = Visibility.Collapsed;
+        LayoutToolbar();
     }
     public void Navigate(string target)
     {
@@ -213,6 +200,8 @@ internal sealed class RecallWindow : Window
         lastSearchSignature = null;
         if (target != "home")
             Expand();
+        else if (!runtime.Settings.RhineLabMode)
+            Collapse();
         Compose();
         if (target == "home")
         {
@@ -223,71 +212,55 @@ internal sealed class RecallWindow : Window
     }
     void Compose()
     {
-        root.Children.Clear();
+        // Keep the native editor attached across navigation and composition.
+        // Reparenting a focused TextBox destroys the IME surface and flashes it.
+        if (root.Children.Count == 0)
+        {
+            root.Children.Add(archive); root.Children.Add(page);
+            root.Children.Add(timeline); root.Children.Add(toolbar);
+            root.Children.Add(back); root.Children.Add(notice);
+        }
         page.Children.Clear();
-        root.Children.Add(page);
-        if (mode != "home")
-        {
-            page.Children.Add(new DesktopBlur());
-            page.Children.Add(new Border { Background = Design.Brush(Color.FromArgb(174, 247, 248, 251)), IsHitTestVisible = false });
-        }
-        if (mode == "onboarding")
-        {
-            var onboarding = new OnboardingView(runtime, () => Navigate("home"));
-            page.Children.Add(onboarding);
-            return;
-        }
-        root.Children.Add(toolbar);
-        toolbar.Margin = mode == "home" ? new(24, Math.Max(72, root.ActualHeight * .425 - 36), 24, 0) : new(24, 28, 24, 0);
-        if (mode == "home")
-        {
-            root.Children.Add(timeline);
-            var record = Design.Button(runtime.Recording.State.Requested ? "Pause recording" : "Start recording", () => { runtime.Recording.Request(!runtime.Recording.State.Requested); Compose(); });
-            record.HorizontalAlignment = HorizontalAlignment.Left;
-            record.VerticalAlignment = VerticalAlignment.Bottom;
-            record.Margin = new(24, 0, 0, 18);
-            root.Children.Add(record);
-        }
-        else
-        {
-            var close = Design.Icon("\uE711", "Back to timeline", () => Navigate("home"));
-            close.Margin = new(22, 30, 0, 0);
-            close.HorizontalAlignment = HorizontalAlignment.Left;
-            close.VerticalAlignment = VerticalAlignment.Top;
-            root.Children.Add(close);
-        }
+        var night = mode != "settings" && runtime.Settings.DarkAppearance;
+        Design.SetDark(night); root.RequestedTheme = night ? ElementTheme.Dark : ElementTheme.Light;
+        root.Background = Design.Brush(night ? Color.FromArgb(215, 17, 20, 26) : Color.FromArgb(1, 255, 255, 255));
+        var rhine = runtime.Settings.RhineLabMode && mode == "home";
+        archive.SetActive(rhine);
+        if (rhine) { Expand(); _ = archive.Refresh(); }
+        timeline.SetActive(mode == "home" && !rhine);
+        back.Visibility = mode == "home" ? Visibility.Collapsed : Visibility.Visible;
+        toolbar.Visibility = mode is "onboarding" or "settings" ? Visibility.Collapsed : Visibility.Visible;
         notice.HorizontalAlignment = HorizontalAlignment.Center;
-        notice.VerticalAlignment = VerticalAlignment.Bottom;
-        notice.Margin = new(200, 0, 200, 10);
-        notice.IsHitTestVisible = false;
-        root.Children.Add(notice);
+        notice.VerticalAlignment = VerticalAlignment.Bottom; notice.Margin = new(200, 0, 200, 10); notice.IsHitTestVisible = false;
+        LayoutToolbar();
         switch (mode)
         {
-            case "search":
-                _ = Search();
-                break;
-            case "detail":
-                if (selected != null)
-                {
-                    detail = new(runtime, selected, OpenFrame);
-                    Place(detail);
-                }
-                ;
-                break;
-            case "ask":
-                Place(new AskView(runtime, OpenFrame));
-                break;
-            case "settings":
-                Place(new SettingsView(runtime, ApplySettings, () => Navigate("home")));
-                break;
-            case "usage":
-                Place(new UsageView(runtime));
-                break;
+            case "onboarding": page.Children.Add(new OnboardingView(runtime, () => Navigate("home"))); break;
+            case "search": _ = Search(); break;
+            case "detail": if (selected != null) { detail = new(runtime, selected, OpenFrame); Place(detail); } break;
+            case "ask": Place(new AskView(runtime, OpenFrame)); break;
+            case "settings": Place(new SettingsView(runtime, ApplySettings, () => Navigate("home"))); break;
+            case "usage": Place(new UsageView(runtime)); break;
         }
     }
+    internal async Task ValidationState(bool? rhine, bool? dark, string? target, string? query, string? app, string? frame, DateTime? day, string? settingsTab, bool showTimeline)
+    {
+        if (rhine.HasValue) runtime.Settings.RhineLabMode = rhine.Value;
+        if (dark.HasValue) runtime.Settings.DarkAppearance = dark.Value;
+        appFilter = app;
+        if (query != null) search.Text = query;
+        Navigate(target ?? "home");
+        if (runtime.Settings.RhineLabMode && mode == "home") { await archive.Refresh(day); if (frame != null) archive.Open(frame); }
+        if (showTimeline) { timeline.SetActive(true); archive.SetTimeline(true); }
+        else archive.SetTimeline(false);
+        if (settingsTab != null) page.Children.OfType<SettingsView>().FirstOrDefault()?.SelectTab(settingsTab);
+    }
+    internal object ValidationDiagnostics => new { mode, query = search.Text, appFilter, rhine = archive.Diagnostics };
+    internal void ValidationAction(string? action) { if (action == "collapse") archive.Collapse(); }
+    internal void ValidationRetarget(int step) => archive.ValidationRetarget(step);
     void Place(FrameworkElement element)
     {
-        element.Margin = new(40, 112, 40, 36);
+        element.Margin = mode == "settings" ? new(40, 8, 40, 8) : new(42, 120, 42, 36);
         page.Children.Add(element);
         element.PointerPressed += (_, e) => e.Handled = true;
         Design.Spring(element, 12, .99f);
@@ -330,7 +303,8 @@ internal sealed class RecallWindow : Window
     }
     void Preview(MemoryFrame? frame)
     {
-        if (mode != "home" || frame != null && selected?.Id == frame.Id)
+        if (runtime.Settings.RhineLabMode && mode == "home") { if (frame != null) archive.Seek(frame); return; }
+        if (runtime.Settings.RhineLabMode || mode != "home" || frame != null && selected?.Id == frame.Id)
             return;
         selected = frame;
         while (page.Children.Count > 0)
@@ -378,15 +352,15 @@ internal sealed class RecallWindow : Window
             var stars = starred;
             var deleted = trash;
             var since = searchSince;
-            var frames = await Task.Run(() => runtime.Store.Frames(query, filter, stars, deleted, since: since, limit: 180), ct);
+            var result = await Task.Run(() => (Frames: runtime.Store.Frames(query, filter, stars, deleted, since: since, limit: 180), Apps: runtime.Store.AppNames()), ct);
             if (ct.IsCancellationRequested || mode != "search")
                 return;
+            var frames = result.Frames;
             var signature = query + appFilter + starred + trash + searchSince + string.Join("/", frames.Select(x => x.Id));
             if (signature == lastSearchSignature)
                 return;
             lastSearchSignature = signature;
-            while (page.Children.Count > 2)
-                page.Children.RemoveAt(page.Children.Count - 1);
+            page.Children.Clear();
             var content = new Grid();
             content.RowDefinitions.Add(new()
             {
@@ -396,12 +370,20 @@ internal sealed class RecallWindow : Window
             {
                 Height = new(1, GridUnitType.Star)
             });
-            var header = Design.Row(14, Design.Text(trash ? "Trash" : starred ? "Starred" : "Memories", 20, true), Design.Text(frames.Count == 180 ? "180+ results" : $"{frames.Count} results", 13, color: Design.Muted));
-            if (appFilter != null)
-                header.Children.Add(Design.Button(appFilter + " ×", () => { appFilter = null; _ = Search(); }));
-            header.Margin = new(8, 0, 0, 18);
+            var header = Design.Row(12);
+            var starsButton = Design.Button("Starred", () => { starred = !starred; _ = Search(); });
+            starsButton.Content = Design.Row(10, Design.Symbol("\uE735", 20, Color.FromArgb(255, 0, 180, 206)), Design.Text("Starred", 14, true));
+            header.Children.Add(starsButton);
+            foreach (var name in result.Apps)
+            {
+                var chip = Design.Button(name, () => { appFilter = appFilter == name ? null : name; _ = Search(); });
+                chip.Content = Design.Row(10, AppIcons.View(AppIcons.Identity(frames.FirstOrDefault(f => f.AppName == name) ?? new MemoryFrame { AppName = name }), 24), Design.Text(name, 14, true));
+                header.Children.Add(chip);
+            }
+            foreach (Button chip in header.Children) { chip.Height = 47; chip.MinWidth = 134; chip.CornerRadius = new(20); }
+            header.Margin = new(6, 6, 6, 37);
             content.Children.Add(header);
-            var grid = new GridView { SelectionMode = ListViewSelectionMode.None, IsItemClickEnabled = true, Padding = new(0), HorizontalAlignment = HorizontalAlignment.Stretch };
+            var grid = new GridView { SelectionMode = ListViewSelectionMode.None, IsItemClickEnabled = true, Padding = new(0), Margin = new(-13, 0, -13, 0), HorizontalAlignment = HorizontalAlignment.Stretch };
             ScrollViewer.SetVerticalScrollBarVisibility(grid, ScrollBarVisibility.Hidden);
             ScrollViewer.SetHorizontalScrollBarVisibility(grid, ScrollBarVisibility.Disabled);
             foreach (var frame in frames)
@@ -447,10 +429,19 @@ internal sealed class RecallWindow : Window
     }
     GridViewItem ResultItem(MemoryFrame frame)
     {
-        var stack = new StackPanel { Spacing = 10, Width = Math.Clamp((root.ActualWidth - 150) / 3, 250, 440) };
-        var photo = new Image { Height = 180, Stretch = Stretch.UniformToFill };
-        photo.Loaded += async (_, _) => { try { photo.Source = await MemoryImages.Load(runtime.Store, frame.ImagePath, 600); } catch { } };
-        photo.Unloaded += (_, _) => photo.Source = null;
+        // Integer widths leave room for all three columns after XAML's layout
+        // rounding. Half-gaps at the edges are offset by the grid's margin.
+        var cardWidth = Math.Max(200, Math.Floor((root.ActualWidth - 84 - 52) / 3) - 1);
+        var stack = new StackPanel { Spacing = 12, Width = cardWidth - 22 };
+        var photoHeight = (cardWidth - 22) / 1.6;
+        var photo = new Image { Height = photoHeight, Stretch = Stretch.Uniform, Opacity = Design.Dark ? .78 : 1 };
+        CancellationTokenSource? imageLoad = null;
+        photo.Loaded += async (_, _) =>
+        {
+            imageLoad?.Cancel(); imageLoad?.Dispose(); imageLoad = new(); var token = imageLoad.Token;
+            try { var bitmap = await MemoryImages.Load(runtime.Store, frame.ImagePath, 600, token); if (!token.IsCancellationRequested) photo.Source = bitmap; } catch { }
+        };
+        photo.Unloaded += (_, _) => { imageLoad?.Cancel(); photo.Source = null; };
         var preview = new Grid();
         preview.Children.Add(photo);
         var marks = new Canvas { IsHitTestVisible = false };
@@ -460,11 +451,11 @@ internal sealed class RecallWindow : Window
             marks.Children.Clear();
             if (photo.Source is not BitmapImage bitmap || bitmap.PixelWidth == 0 || preview.ActualWidth == 0)
                 return;
-            var scale = Math.Max(preview.ActualWidth / bitmap.PixelWidth, 180.0 / bitmap.PixelHeight);
+            var scale = Math.Min(preview.ActualWidth / bitmap.PixelWidth, photoHeight / bitmap.PixelHeight);
             var w = bitmap.PixelWidth * scale;
             var h = bitmap.PixelHeight * scale;
             var x = (preview.ActualWidth - w) / 2;
-            var y = (180 - h) / 2;
+            var y = (photoHeight - h) / 2;
             var terms = MemorySearch.Terms(search.Text);
             if (terms.Length == 0)
                 return;
@@ -478,14 +469,14 @@ internal sealed class RecallWindow : Window
         }
         photo.ImageOpened += (_, _) => Highlight();
         preview.SizeChanged += (_, _) => Highlight();
-        var border = new Border { Child = preview, CornerRadius = new(20), Background = Design.Brush(Color.FromArgb(240, 237, 240, 246)) };
-        Design.Rounded(border, 20);
+        var border = new Border { Child = preview, CornerRadius = new(19), Background = Design.Brush(Microsoft.UI.Colors.Black) };
+        Design.Rounded(border, 19);
         stack.Children.Add(border);
-        var label = Design.Text(frame.Title, 14, true);
+        var label = Design.Text(frame.Title, 13, true);
         label.MaxLines = 1;
         label.TextTrimming = TextTrimming.CharacterEllipsis;
-        stack.Children.Add(Design.Row(10, AppIcons.View(AppIcons.Identity(frame), 25), Design.Stack(3, label, Design.Text(frame.TimeLabel, 12, color: Design.Muted))));
-        var card = new GridViewItem { Content = stack, Tag = frame, Margin = new(6, 6, 12, 20), Padding = new(8), CornerRadius = new(24) };
+        stack.Children.Add(Design.Row(10, AppIcons.View(AppIcons.Identity(frame), 29), Design.Stack(3, label, Design.Text(frame.TimeLabel, 11, color: Design.Muted))));
+        var card = new GridViewItem { Content = Design.Card(stack, 29, 10), Tag = frame, Margin = new(13, 0, 13, 28), Padding = new(0), CornerRadius = new(29), Template = Design.ResultTemplate, UseSystemFocusVisuals = false };
         return card;
     }
     async void Import()
@@ -540,6 +531,8 @@ internal sealed class RecallWindow : Window
         var shortcuts = runtime.Settings.Shortcuts;
         if (key == shortcuts.Back)
         {
+            if (runtime.Settings.RhineLabMode && mode == "home" && timeline.Visibility == Visibility.Visible)
+            { timeline.SetActive(false); archive.SetTimeline(false); e.Handled = true; return; }
             if (mode == "home")
                 _ = Hide();
             else

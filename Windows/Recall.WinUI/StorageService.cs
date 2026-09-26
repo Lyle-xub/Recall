@@ -10,7 +10,37 @@ internal record StorageReport(List<StorageBucket> Buckets, long Free, long Capac
 }
 internal static class StorageService
 {
-    public static Task<StorageReport> Measure(MemoryStore store) => Task.Run(() => { var buckets = new long[6]; foreach (var file in Directory.EnumerateFiles(store.Root, "*", SearchOption.AllDirectories)) { try { var relative = Path.GetRelativePath(store.Root, file); var ext = Path.GetExtension(file).ToLowerInvariant(); var index = relative.StartsWith("models" + Path.DirectorySeparatorChar) ? 3 : ext is ".jpg" or ".png" or ".heic" or ".recallframe" ? 0 : ext is ".mp4" or ".mov" ? 1 : ext is ".wav" or ".m4a" ? 2 : relative.StartsWith("memory.sqlite") ? 4 : 5; buckets[index] += new FileInfo(file).Length; } catch (IOException) { } } var drive = new DriveInfo(Path.GetPathRoot(store.Root)!); return new StorageReport(new[] { "Images", "Video", "Audio", "Models", "Search index", "Other" }.Select((name, i) => new StorageBucket(name, buckets[i], Design.Pastels[i])).ToList(), drive.AvailableFreeSpace, drive.TotalSize); });
+    static readonly object reportGate = new();
+    static readonly Dictionary<string, (DateTime At, Task<StorageReport> Work)> reports = [];
+    public static Task<StorageReport> Measure(MemoryStore store, bool refresh = false)
+    {
+        lock (reportGate)
+        {
+            if (reports.TryGetValue(store.Root, out var recent) &&
+                (!recent.Work.IsCompleted || !refresh && recent.Work.IsCompletedSuccessfully && DateTime.UtcNow - recent.At < TimeSpan.FromSeconds(10))) return recent.Work;
+            var work = Task.Run(() =>
+            {
+                var buckets = new long[6];
+                // Directory enumeration supplies cached metadata. Avoid a
+                // second filesystem query for every file and never follow links.
+                var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = System.IO.FileAttributes.ReparsePoint };
+                foreach (var file in new DirectoryInfo(store.Root).EnumerateFiles("*", options))
+                {
+                    try
+                    {
+                        var relative = Path.GetRelativePath(store.Root, file.FullName); var ext = file.Extension.ToLowerInvariant();
+                        var index = relative.StartsWith("models" + Path.DirectorySeparatorChar) ? 3 : ext is ".jpg" or ".png" or ".heic" or ".recallframe" ? 0 : ext is ".mp4" or ".mov" ? 1 : ext is ".wav" or ".m4a" ? 2 : relative.StartsWith("memory.sqlite") ? 4 : 5;
+                        buckets[index] += file.Length;
+                    }
+                    catch (IOException) { }
+                }
+                var drive = new DriveInfo(Path.GetPathRoot(store.Root)!);
+                return new StorageReport(new[] { "Images", "Video", "Audio", "Models", "Search index", "Other" }.Select((name, i) => new StorageBucket(name, buckets[i], Design.Pastels[i])).ToList(), drive.AvailableFreeSpace, drive.TotalSize);
+            });
+            reports[store.Root] = (DateTime.UtcNow, work);
+            return work;
+        }
+    }
     public static async Task<long> Optimize(MemoryStore store, IProgress<string> progress, CancellationToken ct)
     {
         long saved = 0;

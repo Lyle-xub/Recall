@@ -2,13 +2,53 @@ using System.Numerics;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Microsoft.UI.Xaml.Markup;
 namespace Recall;
 
 internal static class Design
 {
-    public static readonly Color Ink = Color.FromArgb(255, 61, 67, 73), Muted = Color.FromArgb(255, 126, 134, 145), Blue = Color.FromArgb(255, 92, 151, 235);
+    public static bool Dark { get; private set; }
+    public static Color Ink => Dark ? Color.FromArgb(255, 237, 238, 241) : Color.FromArgb(255, 43, 44, 47);
+    public static Color Muted => Dark ? Color.FromArgb(255, 184, 187, 193) : Color.FromArgb(255, 112, 115, 120);
+    public static readonly Color Blue = Color.FromArgb(255, 92, 151, 235);
+    static readonly SolidColorBrush inkBrush = new(Ink), mutedBrush = new(Muted);
+    public static readonly SolidColorBrush GlassBrush = new(Color.FromArgb(104, 255, 255, 255));
+    public static readonly SolidColorBrush RimBrush = new(Color.FromArgb(135, 255, 255, 255));
+    public static void SetDark(bool dark)
+    {
+        Dark = dark; inkBrush.Color = Ink; mutedBrush.Color = Muted;
+        GlassBrush.Color = dark ? Color.FromArgb(174, 51, 54, 59) : Color.FromArgb(104, 255, 255, 255);
+        RimBrush.Color = dark ? Color.FromArgb(62, 255, 255, 255) : Color.FromArgb(135, 255, 255, 255);
+    }
     public static readonly Color[] Pastels = [Color.FromArgb(255, 116, 174, 228), Color.FromArgb(255, 144, 205, 195), Color.FromArgb(255, 172, 165, 225), Color.FromArgb(255, 234, 185, 153), Color.FromArgb(255, 201, 188, 222), Color.FromArgb(255, 190, 200, 211)];
-    public static SolidColorBrush Brush(Color color) => new(color);
+    public static SolidColorBrush Brush(Color color) => color == Ink ? inkBrush : color == Muted ? mutedBrush : new(color);
+    static ControlTemplate? buttonTemplate, inputTemplate, resultTemplate;
+    public static ControlTemplate ResultTemplate => resultTemplate ??= (ControlTemplate)XamlReader.Load("""
+        <ControlTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" TargetType="GridViewItem"><ContentPresenter Content="{TemplateBinding Content}"/></ControlTemplate>
+        """);
+    public static ControlTemplate GlassButtonTemplate => buttonTemplate ??= (ControlTemplate)XamlReader.Load("""
+        <ControlTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" TargetType="Button">
+          <Grid x:Name="Root">
+            <VisualStateManager.VisualStateGroups><VisualStateGroup x:Name="CommonStates">
+              <VisualState x:Name="Normal"/>
+              <VisualState x:Name="PointerOver"><Storyboard><DoubleAnimation Storyboard.TargetName="Surface" Storyboard.TargetProperty="Opacity" To="0.86" Duration="0:0:0.12"/></Storyboard></VisualState>
+              <VisualState x:Name="Pressed"><Storyboard><DoubleAnimation Storyboard.TargetName="Surface" Storyboard.TargetProperty="Opacity" To="0.64" Duration="0:0:0.08"/></Storyboard></VisualState>
+              <VisualState x:Name="Disabled"><Storyboard><DoubleAnimation Storyboard.TargetName="Root" Storyboard.TargetProperty="Opacity" To="0.4" Duration="0"/></Storyboard></VisualState>
+            </VisualStateGroup></VisualStateManager.VisualStateGroups>
+            <Border x:Name="Surface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"/>
+            <ContentPresenter Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" Padding="{TemplateBinding Padding}" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"/>
+          </Grid>
+        </ControlTemplate>
+        """);
+    static ControlTemplate SearchInputTemplate => inputTemplate ??= (ControlTemplate)XamlReader.Load("""
+        <ControlTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" TargetType="TextBox">
+          <Grid>
+            <Border x:Name="BorderElement" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"/>
+            <ScrollViewer x:Name="ContentElement" Foreground="{TemplateBinding Foreground}" Padding="{TemplateBinding Padding}" Margin="{TemplateBinding BorderThickness}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Hidden" IsTabStop="False" ZoomMode="Disabled" AutomationProperties.AccessibilityView="Raw"/>
+            <TextBlock x:Name="PlaceholderTextContentPresenter" Text="{TemplateBinding PlaceholderText}" Foreground="{TemplateBinding PlaceholderForeground}" Padding="{TemplateBinding Padding}" Margin="{TemplateBinding BorderThickness}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" IsHitTestVisible="False"/>
+          </Grid>
+        </ControlTemplate>
+        """);
     public static TextBlock Text(string text, double size = 15, bool strong = false, Color? color = null) => new() { Text = text, FontSize = size, FontWeight = strong ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal, Foreground = Brush(color ?? Ink), TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
     public static StackPanel Stack(double spacing = 12, params UIElement[] children)
     {
@@ -23,10 +63,10 @@ internal static class Design
         p.Orientation = Orientation.Horizontal;
         return p;
     }
-    public static Border Card(UIElement child, double radius = 24, double padding = 22) => new() { Child = child, CornerRadius = new(radius), Padding = new(padding), Background = Brush(Color.FromArgb(238, 255, 255, 255)), BorderBrush = Brush(Color.FromArgb(160, 255, 255, 255)), BorderThickness = new(1) };
+    public static Border Card(UIElement child, double radius = 24, double padding = 22) => new() { Child = child, CornerRadius = new(radius), Padding = new(padding), Background = GlassBrush, BorderBrush = RimBrush, BorderThickness = new(1) };
     public static Button Button(string title, Action click, bool primary = false)
     {
-        var b = new Button { Content = Text(title, 14, true, primary ? Microsoft.UI.Colors.White : Ink), MinHeight = 44, Padding = new(20, 10, 20, 10), CornerRadius = new(22), BorderThickness = new(1), BorderBrush = Brush(Color.FromArgb(26, 80, 90, 110)), Background = Brush(primary ? Blue : Color.FromArgb(230, 247, 248, 250)) };
+        var b = new Button { Template = GlassButtonTemplate, Content = Text(title, 14, true, primary ? Microsoft.UI.Colors.White : Ink), MinHeight = 44, Padding = new(20, 10, 20, 10), CornerRadius = new(22), BorderThickness = new(1), BorderBrush = RimBrush, Background = primary ? Brush(Blue) : GlassBrush };
         b.Click += (_, _) => click();
         return b;
     }
@@ -91,9 +131,10 @@ internal static class Design
         return new Viewbox { Width = size, Height = size, Child = canvas };
     }
     public static ScrollViewer Scroll(UIElement content) => new() { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, HorizontalContentAlignment = HorizontalAlignment.Stretch, IsVerticalRailEnabled = true };
-    public static TextBox Input(string placeholder, string value = "", double height = 44) => new() { PlaceholderText = placeholder, Text = value, MinHeight = height, CornerRadius = new(height / 2), Padding = new(18, 10, 18, 10), BorderThickness = new(1), BorderBrush = Brush(Color.FromArgb(32, 80, 90, 110)), Background = Brush(Color.FromArgb(180, 255, 255, 255)), Foreground = Brush(Ink), FontSize = 15, SelectionHighlightColor = Brush(Color.FromArgb(90, 130, 180, 239)) };
+    public static TextBox Input(string placeholder, string value = "", double height = 44) => new() { Template = SearchInputTemplate, PlaceholderText = placeholder, PlaceholderForeground = mutedBrush, Text = value, MinHeight = height, VerticalContentAlignment = VerticalAlignment.Center, CornerRadius = new(height / 2), Padding = new(18, 10, 18, 10), BorderThickness = new(1), BorderBrush = RimBrush, Background = GlassBrush, Foreground = inkBrush, FontSize = 15, SelectionHighlightColor = Brush(Color.FromArgb(90, 130, 180, 239)) };
     public static Image Asset(string name, double width = 64) => new() { Source = new BitmapImage(new Uri(Path.Combine(AppContext.BaseDirectory, "Assets", name))), Width = width, Height = width, Stretch = Stretch.Uniform };
-    public static bool Motion => new Windows.UI.ViewManagement.UISettings().AnimationsEnabled;
+    internal static bool? ValidationMotion;
+    public static bool Motion => ValidationMotion ?? new Windows.UI.ViewManagement.UISettings().AnimationsEnabled;
     public static void Spring(UIElement element, float fromY = 18, float fromScale = .94f, int delay = 0)
     {
         element.Opacity = 1;
@@ -157,6 +198,7 @@ internal sealed class ClearBackdrop : SystemBackdrop
     readonly Windows.UI.Composition.Compositor compositor = new();
     ICompositionSupportsSystemBackdrop? target;
     Windows.UI.Composition.CompositionBrush? brush;
+    Windows.UI.Composition.CompositionEffectFactory? maskFactory;
     string? lastKey; bool full; double width = 1920, height = 1080; Rect search; List<Rect> buttons = [];
     public void Update(bool full, double width, double height, Rect search, List<Rect> buttons)
     {
@@ -221,9 +263,16 @@ internal sealed class ClearBackdrop : SystemBackdrop
         var surface = compositor.CreateVisualSurface();
         surface.SourceVisual = maskRoot;
         surface.SourceSize = maskRoot.Size;
-        var mask = compositor.CreateMaskBrush();
-        mask.Source = compositor.CreateHostBackdropBrush();
-        mask.Mask = compositor.CreateSurfaceBrush(surface);
+        // Backdrop brushes cannot be a CompositionMaskBrush.Source. An effect
+        // accepts the backdrop and mask as supported source parameters.
+        maskFactory ??= compositor.CreateEffectFactory(new Microsoft.Graphics.Canvas.Effects.AlphaMaskEffect
+        {
+            Source = new Windows.UI.Composition.CompositionEffectSourceParameter("Backdrop"),
+            AlphaMask = new Windows.UI.Composition.CompositionEffectSourceParameter("Mask")
+        });
+        var mask = maskFactory.CreateBrush();
+        mask.SetSourceParameter("Backdrop", compositor.CreateHostBackdropBrush());
+        mask.SetSourceParameter("Mask", compositor.CreateSurfaceBrush(surface));
         var old = brush;
         brush = mask;
         target.SystemBackdrop = mask;

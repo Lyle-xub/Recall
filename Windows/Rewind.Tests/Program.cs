@@ -7,6 +7,7 @@ var tests = 0;
 void Assert(bool condition, string message) { if (!condition) throw new Exception(message); tests++; }
 try
 {
+    RhineMotionTests.Run(Assert);
     using (var store = new MemoryStore(root))
     {
         var now = DateTimeOffset.Now;

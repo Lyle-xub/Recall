@@ -1,0 +1,124 @@
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Text.Json;
+
+namespace Recall;
+
+/// An explicit, isolated native validation session. No recording or real library.
+/// Commands drive app state; real pointer/keyboard interaction is tested separately.
+internal sealed class VisualParitySession
+{
+    readonly RecallWindow window;
+    readonly string output;
+    readonly Microsoft.UI.Dispatching.DispatcherQueueTimer timer;
+    readonly List<double> renderIntervals = [];
+    long lastRender;
+    string? lastCommand;
+    bool busy;
+    static System.Windows.Forms.Form? referenceBackdrop;
+    static readonly JsonSerializerOptions json = new() { PropertyNameCaseInsensitive = true, WriteIndented = true };
+    VisualParitySession(RecallWindow window, string output)
+    {
+        this.window = window; this.output = output;
+        timer = window.DispatcherQueue.CreateTimer();
+        timer.Interval = TimeSpan.FromMilliseconds(200);
+        timer.Tick += async (_, _) => await Tick();
+        timer.Start();
+    }
+    public static async Task Start(RecallWindow window, AppRuntime runtime, string output)
+    {
+        Directory.CreateDirectory(output);
+        var fixtures = Path.Combine(output, "fixtures");
+        using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(fixtures, "fixture.json")));
+        Directory.CreateDirectory(Path.Combine(runtime.Store.Root, "frames"));
+        foreach (var item in manifest.RootElement.GetProperty("frames").EnumerateArray())
+        {
+            var id = item.GetProperty("id").GetString()!;
+            if (!id.StartsWith("parity-", StringComparison.Ordinal) || id.Any(c => !char.IsLetterOrDigit(c) && c != '-')) throw new InvalidDataException("Only controlled parity fixtures are accepted.");
+            var relative = "frames/" + id + ".png";
+            File.Copy(Path.Combine(fixtures, relative), Path.Combine(runtime.Store.Root, relative), true);
+            runtime.Store.Save(new MemoryFrame { Id = id, Timestamp = item.GetProperty("timestamp").GetDateTimeOffset(), AppName = item.GetProperty("appName").GetString()!, Title = item.GetProperty("title").GetString()!, ImagePath = relative, Text = item.GetProperty("text").GetString()!, Starred = item.GetProperty("starred").GetBoolean(), TextState = RecognitionState.Complete });
+        }
+        runtime.Settings.RecordingRequested = false;
+        // RDP can disable OS animations. Exercise the real spring path in
+        // this isolated test session without changing the user's OS setting.
+        var systemAnimationsEnabled = new Windows.UI.ViewManagement.UISettings().AnimationsEnabled;
+        Design.ValidationMotion = true;
+        // A controlled desktop prevents private windows leaking into evidence
+        // and keeps acrylic comparisons independent of the user's wallpaper.
+        var bounds = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position).Bounds;
+        referenceBackdrop = new System.Windows.Forms.Form { FormBorderStyle = System.Windows.Forms.FormBorderStyle.None, Bounds = bounds, ShowInTaskbar = false, BackColor = System.Drawing.Color.FromArgb(219, 219, 216) };
+        referenceBackdrop.Paint += (_, e) =>
+        {
+            using var gradient = new System.Drawing.Drawing2D.LinearGradientBrush(bounds, System.Drawing.Color.FromArgb(233, 230, 221), System.Drawing.Color.FromArgb(190, 204, 215), 35);
+            e.Graphics.FillRectangle(gradient, bounds);
+        };
+        referenceBackdrop.Show();
+        window.Show();
+        window.Navigate("search");
+        await Task.Delay(500);
+        _ = new VisualParitySession(window, output);
+        var screen = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position);
+        await File.WriteAllTextAsync(Path.Combine(output, "environment.json"), JsonSerializer.Serialize(new { capturedAt = DateTimeOffset.UtcNow, os = Environment.OSVersion.ToString(), processorCount = Environment.ProcessorCount, screen = new { screen.Bounds.Width, screen.Bounds.Height }, scale = ((FrameworkElement)window.Content).XamlRoot.RasterizationScale, logicalWidth = ((FrameworkElement)window.Content).ActualWidth, logicalHeight = ((FrameworkElement)window.Content).ActualHeight, records = runtime.Store.Count, synthetic = true, systemAnimationsEnabled, validationAnimationsEnabled = Design.Motion }, json));
+    }
+    void OnRendering(object? sender, object e)
+    {
+        var now = Stopwatch.GetTimestamp();
+        if (lastRender != 0 && renderIntervals.Count < 20000) renderIntervals.Add((now - lastRender) * 1000.0 / Stopwatch.Frequency);
+        lastRender = now;
+    }
+    async Task Tick()
+    {
+        if (busy) return;
+        var file = Path.Combine(output, "control.json");
+        if (!File.Exists(file)) return;
+        busy = true;
+        string? name = null;
+        try
+        {
+            var text = await File.ReadAllTextAsync(file);
+            if (text == lastCommand) return;
+            using var command = JsonDocument.Parse(text);
+            lastCommand = text;
+            var request = command.RootElement;
+            name = request.GetProperty("name").GetString()!;
+            if (string.IsNullOrWhiteSpace(name) || name is "." or ".." || name != Path.GetFileName(name)) throw new InvalidDataException("Capture name must be a filename.");
+            string? Field(string key) => request.TryGetProperty(key, out var value) ? value.GetString() : null;
+            bool? Flag(string key) => request.TryGetProperty(key, out var value) ? value.GetBoolean() : null;
+            if (Flag("captureOnly") != true)
+                await window.ValidationState(Flag("rhine"), Flag("dark"), Field("page"), Field("query"), Field("app"), Field("selected"), DateTime.TryParse(Field("day"), out var day) ? day : null, Field("tab"), Flag("timeline") == true);
+            window.ValidationAction(Field("action"));
+            await Task.Delay(request.TryGetProperty("settleMs", out var settle) ? Math.Clamp(settle.GetInt32(), 0, 10000) : 1200);
+            renderIntervals.Clear(); lastRender = 0;
+            var measureSeconds = request.TryGetProperty("measureSeconds", out var seconds) ? Math.Clamp(seconds.GetDouble(), 0, 60) : 0;
+            if (Flag("sampleRendering") != false) CompositionTarget.Rendering += OnRendering;
+            var count = request.TryGetProperty("frames", out var frames) ? Math.Clamp(frames.GetInt32(), 1, 120) : 1;
+            var directory = Path.Combine(output, name);
+            Directory.CreateDirectory(directory);
+            var process = Process.GetCurrentProcess();
+            var cpu = process.TotalProcessorTime;
+            var elapsed = Stopwatch.StartNew();
+            if (request.TryGetProperty("motionSamples", out var motion))
+                for (var step = 0; step < Math.Clamp(motion.GetInt32(), 0, 120); step++) { window.ValidationRetarget(step); await Task.Delay(250); }
+            if (measureSeconds > 0) await Task.Delay(TimeSpan.FromSeconds(measureSeconds));
+            for (var index = 0; index < count; index++)
+            {
+                var screen = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position);
+                await Task.Run(() =>
+                {
+                    using var bitmap = new Bitmap(screen.Bounds.Width, screen.Bounds.Height);
+                    using (var graphics = Graphics.FromImage(bitmap)) graphics.CopyFromScreen(screen.Bounds.Location, System.Drawing.Point.Empty, screen.Bounds.Size);
+                    bitmap.Save(Path.Combine(directory, $"{index:000}.png"), ImageFormat.Png);
+                });
+                if (count > 1) await Task.Delay(100);
+            }
+            process.Refresh();
+            var cpuMs = (process.TotalProcessorTime - cpu).TotalMilliseconds;
+            await File.WriteAllTextAsync(Path.Combine(directory, "metrics.json"), JsonSerializer.Serialize(new { screenshotCount = count, elapsedMs = elapsed.Elapsed.TotalMilliseconds, cpuMilliseconds = cpuMs, cpuPercentOfOneCore = cpuMs / elapsed.Elapsed.TotalMilliseconds * 100, workingSetBytes = process.WorkingSet64, peakWorkingSetBytes = process.PeakWorkingSet64, privateBytes = process.PrivateMemorySize64, renderingCallbackIntervalsMs = renderIntervals.ToArray(), state = window.ValidationDiagnostics, note = "Rendering callbacks measure UI scheduling, not GPU present time; capture overhead is included. sampleRendering=false measures idle without a rendering observer." }, json));
+            await File.WriteAllTextAsync(Path.Combine(output, "completed.json"), JsonSerializer.Serialize(new { name, ok = true }, json));
+        }
+        catch (Exception error) { await File.WriteAllTextAsync(Path.Combine(output, "completed.json"), JsonSerializer.Serialize(new { name, ok = false, error = error.ToString() }, json)); }
+        finally { CompositionTarget.Rendering -= OnRendering; busy = false; }
+    }
+}
