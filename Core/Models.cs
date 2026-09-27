@@ -58,13 +58,19 @@ public record MemoryFrame
     {
         get; init;
     }
+    // Set only when this card's original pixels were submitted as this exact
+    // native recording sample. Wall-clock screenshots leave these fields unset.
+    public long? VisualTicks { get; init; }
+    public int? VisualWidth { get; init; }
+    public int? VisualHeight { get; init; }
+    public bool VisualSampleVerified { get; init; }
     [JsonIgnore] public string TimeLabel => Timestamp.LocalDateTime.ToString("MMM d, yyyy h:mm tt");
 }
 public enum RecognitionState
 {
     Pending, Working, Complete, Empty, Failed, Disabled
 }
-public record RecordingSession(string Id, DateTimeOffset StartedAt, DateTimeOffset? EndedAt, string VideoPath, bool HasAudio, string? SystemAudioPath = null, string? MicrophoneAudioPath = null, double SystemAudioOffset = 0, double MicrophoneAudioOffset = 0, RecognitionState SpeechState = RecognitionState.Pending, string? SpeechError = null, bool SeparateAudio = false);
+public record RecordingSession(string Id, DateTimeOffset StartedAt, DateTimeOffset? EndedAt, string VideoPath, bool HasAudio, string? SystemAudioPath = null, string? MicrophoneAudioPath = null, double SystemAudioOffset = 0, double MicrophoneAudioOffset = 0, RecognitionState SpeechState = RecognitionState.Pending, string? SpeechError = null, bool SeparateAudio = false, bool UnifiedVisualArchive = false, bool VisualArchiveReady = false, string? VideoCodec = null, int? VideoWidth = null, int? VideoHeight = null, long? VideoDurationTicks = null, long? VideoSampleCount = null, string? VideoDiagnostic = null);
 public record TranscriptLine(string Id, string SessionId, DateTimeOffset Timestamp, string Speaker, string Text);
 public record ModelProfile
 {

@@ -5,7 +5,6 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Text;
-using ScreenRecorderLib;
 using Tesseract;
 using NAudio.Wave;
 using NAudio.CoreAudioApi;
@@ -16,15 +15,14 @@ namespace Rewind;
 public sealed class CaptureService : IDisposable
 {
     private readonly MemoryStore store;
-    private Recorder? recorder;
-    private Recorder? stoppingRecorder;
+    private VisualVideoWriter? recorder;
+    private Stopwatch? segmentClock;
     private AudioTrackCapture? systemTrack, microphoneTrack;
     private TesseractEngine? ocr;
     private readonly NeuralOcrClient neural = new();
     private CancellationTokenSource? cts;
     private Task? loop;
     private RecordingSession? session;
-    private TaskCompletionSource? finished;
     private volatile bool privacyPaused;
     private MemoryFrame? previous;
     private readonly Channel<string> indexing = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
@@ -53,11 +51,18 @@ public sealed class CaptureService : IDisposable
     }
     private async Task IndexLoop()
     {
+        foreach (var sessionId in store.UnfinishedVisualSessions())
+        {
+            if (lifetime.IsCancellationRequested) return;
+            try { foreach (var frame in store.FinalizeVisualSession(sessionId, reference => VisualVideoReader.Verify(store.Root, reference))) FrameAdded?.Invoke(frame); }
+            catch (Exception ex) { Error?.Invoke("Visual archive recovery retained original captures. " + ex.Message); }
+        }
         await foreach (var id in indexing.Reader.ReadAllAsync())
         {
             if (lifetime.IsCancellationRequested)
                 break;
-            await indexGate.WaitAsync(lifetime.Token);
+            try { await indexGate.WaitAsync(lifetime.Token); }
+            catch (OperationCanceledException) { break; }
             try
             {
             var frame = store.Frame(id);
@@ -68,7 +73,7 @@ public sealed class CaptureService : IDisposable
                 store.Recognition(id, RecognitionState.Working);
                 FrameAdded?.Invoke(store.Frame(id)!);
                 var recognitionFile = File.Exists(original) ? original : store.SafePath(frame.ImagePath)!;
-                if (recognitionFile.EndsWith(".recallframe"))
+                if (recognitionFile.EndsWith(".recallframe", StringComparison.OrdinalIgnoreCase) || recognitionFile.EndsWith(".recallvideo", StringComparison.OrdinalIgnoreCase))
                 {
                     using var source = ImageArchive.Load(store.Root, frame.ImagePath);
                     source.Save(original, ImageFormat.Png);
@@ -84,7 +89,7 @@ public sealed class CaptureService : IDisposable
                     if (store.Frame(id) == null)
                         return;
                     var archived = frame.ImagePath;
-                    if (File.Exists(original))
+                    if (File.Exists(original) && !(frame.SessionId is { } archiveSession && store.Session(archiveSession)?.UnifiedVisualArchive == true))
                     {
                         using var bitmap = new Bitmap(original);
                         archived = ImageArchive.Pack(store.Root, bitmap);
@@ -113,7 +118,12 @@ public sealed class CaptureService : IDisposable
                         catch (IOException) { }
                     }
                 });
-                if (File.Exists(original))
+                if (frame.SessionId is { } visualSession && store.Session(visualSession)?.UnifiedVisualArchive == true)
+                {
+                    store.FinalizeVisualSession(visualSession, reference => VisualVideoReader.Verify(store.Root, reference));
+                    if (frame.ImagePath.EndsWith(".recallvideo", StringComparison.OrdinalIgnoreCase) && File.Exists(original)) File.Delete(original);
+                }
+                else if (File.Exists(original))
                     File.Delete(original);
                 if (File.Exists(meetingOriginal))
                     File.Delete(meetingOriginal);
@@ -137,6 +147,7 @@ public sealed class CaptureService : IDisposable
             using(var image=ImageArchive.Load(store.Root,frame.ImagePath)) image.Save(temporary,ImageFormat.Png);
             var result=await OcrEngine.Recognize(temporary,language,ct);
             store.Recognized(id,result.Text,result.Regions);
+            if (frame.SessionId is { } sessionId) store.FinalizeVisualSession(sessionId, reference => VisualVideoReader.Verify(store.Root, reference));
             FrameAdded?.Invoke(store.Frame(id)!);
             return new {completed=1,id};
         }
@@ -190,6 +201,7 @@ public sealed class CaptureService : IDisposable
         {
             var last = DateTimeOffset.MinValue;
             var lastWindow = IntPtr.Zero;
+            var lastVideo = DateTimeOffset.MinValue;
             Task? snapshot = null;
             CancellationTokenSource? snapshotCancellation = null;
             try
@@ -222,13 +234,14 @@ public sealed class CaptureService : IDisposable
                     {
                         await snapshot;
                     }
-                    if (!excluded && (snapshot == null || snapshot.IsCompleted) && (DateTimeOffset.Now - last >= TimeSpan.FromSeconds(settings.CaptureInterval) || NativeWindows.GetForegroundWindow() != lastWindow))
+                    var cardDue = DateTimeOffset.Now - last >= TimeSpan.FromSeconds(settings.CaptureInterval) || NativeWindows.GetForegroundWindow() != lastWindow;
+                    if (!excluded && (snapshot == null || snapshot.IsCompleted) && (cardDue || DateTimeOffset.Now - lastVideo >= TimeSpan.FromSeconds(1)))
                     {
                         snapshotCancellation?.Dispose();
                         snapshotCancellation = CancellationTokenSource.CreateLinkedTokenSource(workerSource.Token);
-                        last = DateTimeOffset.Now;
-                        lastWindow = NativeWindows.GetForegroundWindow();
-                        snapshot = Snapshot(settings, snapshotCancellation.Token);
+                        lastVideo = DateTimeOffset.Now;
+                        if (cardDue) { last = lastVideo; lastWindow = NativeWindows.GetForegroundWindow(); }
+                        snapshot = Snapshot(settings, snapshotCancellation.Token, cardDue);
                     }
                     if (session != null && DateTimeOffset.Now - session.StartedAt > TimeSpan.FromMinutes(5))
                     {
@@ -279,35 +292,14 @@ public sealed class CaptureService : IDisposable
     }
     private void StartSegment(AppSettings settings)
     {
-        var s = new RecordingSession(Guid.NewGuid().ToString(), DateTimeOffset.Now, null, $"recordings/{Guid.NewGuid()}.mp4", settings.SystemAudio || settings.Microphone, SpeechState: settings.TranscriptionEnabled ? RecognitionState.Pending : RecognitionState.Disabled, SeparateAudio: true);
-        var options = RecorderOptions.DefaultMainMonitor;
-        if (settings.DisplayName != null)
-            options.SourceOptions = new SourceOptions { RecordingSources = [new DisplayRecordingSource(settings.DisplayName)] };
         var screen = Screen.AllScreens.FirstOrDefault(x => x.DeviceName == settings.DisplayName) ?? Screen.PrimaryScreen!;
-        var scale = Math.Min(1.0, (double)settings.VideoMaxEdge / Math.Max(screen.Bounds.Width, screen.Bounds.Height));
-        options.OutputOptions.OutputFrameSize = new ScreenSize(Math.Max(2, (int)(screen.Bounds.Width * scale) / 2 * 2), Math.Max(2, (int)(screen.Bounds.Height * scale) / 2 * 2));
-        options.VideoEncoderOptions = new VideoEncoderOptions { Encoder = new H264VideoEncoder { BitrateMode = H264BitrateControlMode.CBR }, Framerate = 1, Bitrate = settings.VideoBitrate, IsHardwareEncodingEnabled = true, IsFixedFramerate = true };
-        options.AudioOptions = new AudioOptions { IsAudioEnabled = false };
-        options.MouseOptions = new MouseOptions { IsMousePointerEnabled = true, IsMouseClicksDetected = false };
-        var r = Recorder.CreateRecorder(options);
-        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var source = cts!;
-        finished = completion;
-        r.OnRecordingComplete += (_, _) => completion.TrySetResult();
-        r.OnRecordingFailed += (_, e) =>
-        {
-            completion.TrySetException(new InvalidOperationException(e.Error));
-            // A recorder can report failure while an intentional stop is being
-            // finalized. A late callback from an old segment must not cancel
-            // the next one or change the user's recording preference.
-            if (!ReferenceEquals(recorder, r) || !ReferenceEquals(cts, source) ||
-                source.IsCancellationRequested || ReferenceEquals(Volatile.Read(ref stoppingRecorder), r))
-                return;
-            source.Cancel();
-            Error?.Invoke(e.Error);
-            Interrupted?.Invoke(e.Error);
-        };
-        recorder = r;
+        var s = new RecordingSession(Guid.NewGuid().ToString(), DateTimeOffset.Now, null, $"recordings/{Guid.NewGuid()}.mp4", settings.SystemAudio || settings.Microphone,
+            SpeechState: settings.TranscriptionEnabled ? RecognitionState.Pending : RecognitionState.Disabled, SeparateAudio: true,
+            UnifiedVisualArchive: true, VideoWidth: screen.Bounds.Width, VideoHeight: screen.Bounds.Height);
+        var writer = new VisualVideoWriter(Path.Combine(store.Root, s.VideoPath), screen.Bounds.Width, screen.Bounds.Height);
+        recorder = writer;
+        segmentClock = Stopwatch.StartNew();
+        s = s with { VideoCodec = writer.Codec, VideoDiagnostic = writer.Diagnostic };
         session = s;
         privacyPaused = false;
         store.SaveSession(s);
@@ -317,62 +309,69 @@ public sealed class CaptureService : IDisposable
                 systemTrack = new(store.Root, $"recordings/{s.Id}-system.m4a", s.StartedAt, false);
             if (settings.Microphone)
                 microphoneTrack = new(store.Root, $"recordings/{s.Id}-microphone.m4a", s.StartedAt, true);
-            r.Record(Path.Combine(store.Root, s.VideoPath));
         }
-        catch { if (systemTrack != null) _ = systemTrack.Stop(); if (microphoneTrack != null) _ = microphoneTrack.Stop(); systemTrack = microphoneTrack = null; r.Dispose(); recorder = null; session = null; store.SaveSession(s with { EndedAt = DateTimeOffset.Now, SpeechState = RecognitionState.Failed, SpeechError = "Capture could not start." }); throw; }
+        catch
+        {
+            if (systemTrack != null) _ = systemTrack.Stop();
+            if (microphoneTrack != null) _ = microphoneTrack.Stop();
+            systemTrack = microphoneTrack = null;
+            writer.Dispose(); recorder = null; session = null; segmentClock = null;
+            store.SaveSession(s with { EndedAt = DateTimeOffset.Now, SpeechState = RecognitionState.Failed, SpeechError = "Capture could not start." });
+            throw;
+        }
     }
     private async Task<RecordingSession?> StopSegment()
     {
-        if (recorder == null || session == null)
-            return null;
-        var r = recorder;
+        if (recorder == null || session == null) return null;
+        var writer = recorder;
         var s = session;
-        if (previous != null)
+        recorder = null; session = null;
+        var endTicks = segmentClock?.Elapsed.Ticks ?? 0;
+        segmentClock = null;
+        if (previous != null) { store.Extend(previous.Id, DateTimeOffset.Now); previous = null; }
+        var system = systemTrack; var microphone = microphoneTrack;
+        systemTrack = microphoneTrack = null;
+        // Stop both live audio sources immediately, before video finalization
+        // can wait on a driver or decoder. Each task retains its own resources.
+        var systemStop = system?.Stop(); var microphoneStop = microphone?.Stop();
+        // Each track owns its finalization. Failure or timeout in video cannot
+        // abandon audio, release a writer still in use, or affect a new segment.
+        var finalization = Task.Run(() => { try { writer.Finish(endTicks); } finally { writer.Dispose(); } });
+        try
         {
-            store.Extend(previous.Id, DateTimeOffset.Now);
-            previous = null;
+            await finalization.WaitAsync(TimeSpan.FromSeconds(20));
+            // Check an exact decoded native sample before marking the container
+            // ready; individual card samples are checked again at promotion.
+            using (var decoded = VisualVideoReader.Load(store.Root, new VisualArchive(1, s.VideoPath, 0, writer.Width, writer.Height))) { }
+            s = s with { VisualArchiveReady = true, VideoCodec = writer.Codec, VideoDiagnostic = writer.Diagnostic,
+                VideoDurationTicks = writer.DurationTicks, VideoSampleCount = writer.SampleCount };
+        }
+        catch (Exception ex)
+        {
+            if (writer.Codec == "hevc") VisualVideoWriter.DisableHevc("HEVC failed video verification in this process.");
+            s = s with { VideoCodec = writer.Codec, VideoDiagnostic = "Video finalization or decoding failed; original captures were retained. " + ex.Message };
+            Error?.Invoke(s.VideoDiagnostic);
+            _ = finalization.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
         }
         try
         {
-            Volatile.Write(ref stoppingRecorder, r);
-            r.Stop();
-            if (finished != null)
-                await finished.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            if (systemStop != null && await systemStop)
+                s = s with { SystemAudioPath = system!.RelativePath, SystemAudioOffset = system.Offset };
         }
-        finally
+        catch (Exception ex) { Error?.Invoke("System audio track: " + ex.Message); }
+        try
         {
-            r.Dispose();
-            recorder = null;
-            session = null;
-            Volatile.Write(ref stoppingRecorder, null);
-            try
-            {
-                if (systemTrack != null && await systemTrack.Stop())
-                    s = s with
-                    {
-                        SystemAudioPath = systemTrack.RelativePath,
-                        SystemAudioOffset = systemTrack.Offset
-                    };
-            }
-            catch (Exception ex) { Error?.Invoke("System audio track: " + ex.Message); }
-            finally { systemTrack = null; }
-            try
-            {
-                if (microphoneTrack != null && await microphoneTrack.Stop())
-                    s = s with
-                    {
-                        MicrophoneAudioPath = microphoneTrack.RelativePath,
-                        MicrophoneAudioOffset = microphoneTrack.Offset
-                    };
-            }
-            catch (Exception ex) { Error?.Invoke("Microphone track: " + ex.Message); }
-            finally { microphoneTrack = null; }
+            if (microphoneStop != null && await microphoneStop)
+                s = s with { MicrophoneAudioPath = microphone!.RelativePath, MicrophoneAudioOffset = microphone.Offset };
         }
-        s = s with
-        {
-            EndedAt = DateTimeOffset.Now
-        };
+        catch (Exception ex) { Error?.Invoke("Microphone track: " + ex.Message); }
+        s = s with { EndedAt = DateTimeOffset.Now };
         store.SaveSession(s);
+        if (s.VisualArchiveReady)
+        {
+            await Task.Run(() => store.FinalizeVisualSession(s.Id, reference => VisualVideoReader.Verify(store.Root, reference)));
+            foreach (var frame in store.MetadataFrames().Where(f => f.SessionId == s.Id)) FrameAdded?.Invoke(frame);
+        }
         return s;
     }
     public async Task<RecordingSession?> Stop()
@@ -425,10 +424,11 @@ public sealed class CaptureService : IDisposable
         }
         finally { ocrGate.Release(); }
     }
-    private Task Snapshot(AppSettings settings, CancellationToken token)
+    private Task Snapshot(AppSettings settings, CancellationToken token, bool makeCard = true)
     {
-        var foreground = NativeWindows.Info(NativeWindows.GetForegroundWindow());
-        if (foreground.Pid == Environment.ProcessId || settings.ExcludedApps.Contains(foreground.Process, StringComparer.OrdinalIgnoreCase))
+        var foregroundHandle = NativeWindows.GetForegroundWindow();
+        var foreground = NativeWindows.Info(foregroundHandle);
+        if (VisibleExcluded(settings.ExcludedApps))
             return Task.CompletedTask;
         var screen = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == settings.DisplayName) ?? Screen.PrimaryScreen ?? Screen.AllScreens[0];
         var now = DateTimeOffset.Now;
@@ -436,6 +436,16 @@ public sealed class CaptureService : IDisposable
         using (var graphics = Graphics.FromImage(bitmap))
             graphics.CopyFromScreen(screen.Bounds.Location, System.Drawing.Point.Empty, screen.Bounds.Size);
         token.ThrowIfCancellationRequested();
+        // Reject a capture spanning a focus/privacy transition: its window
+        // attribution and sample must describe the same observed desktop.
+        if (foregroundHandle != NativeWindows.GetForegroundWindow() || VisibleExcluded(settings.ExcludedApps)) return Task.CompletedTask;
+        var visualTicks = recorder?.Append(bitmap, segmentClock?.Elapsed.Ticks ?? 0);
+        if (session != null && recorder != null && session.VideoCodec != recorder.Codec)
+        {
+            session = session with { VideoCodec = recorder.Codec, VideoDiagnostic = recorder.Diagnostic };
+            store.SaveSession(session);
+        }
+        if (!makeCard || foreground.Pid == Environment.ProcessId) return Task.CompletedTask;
         var data = bitmap.LockBits(new System.Drawing.Rectangle(0, 0, bitmap.Width, bitmap.Height), ImageLockMode.ReadWrite, PixelFormat.Format32bppArgb);
         string hash;
         try
@@ -456,24 +466,23 @@ public sealed class CaptureService : IDisposable
         if (previous != null)
             store.Extend(previous.Id, now);
         var id = Guid.NewGuid().ToString();
-        var relative = $"frames/{id}.jpg";
-        var original = Path.Combine(store.Root, "frames", id + ".ocr.png");
+        var relative = $"frames/{id}.ocr.png";
+        var original = Path.Combine(store.Root, relative);
+        // Every unified card retains its own lossless full-size source until
+        // its exact video sample AND OCR are durable. Reuse only recognition.
+        bitmap.Save(original, ImageFormat.Png);
         var shared = store.ExactImage(hash);
-        if (shared == null || !File.Exists(store.SafePath(shared.ImagePath)))
-        {
-            shared = null;
-            bitmap.Save(original, ImageFormat.Png);
-            SaveJpeg(bitmap, Path.Combine(store.Root, relative), settings.ImageQuality);
-        }
-        else
-            relative = shared.ImagePath;
-        var meetingPath = shared != null ? shared.MeetingImagePath : CaptureMeetingCrop(bitmap, screen.Bounds, id);
-        var frame = new MemoryFrame { Id = id, Timestamp = now, MeetingImagePath = meetingPath, MeetingRegions = shared?.MeetingRegions ?? [], EndTimestamp = now, AppName = foreground.App, ProcessName = foreground.Process, ExecutablePath = NativeWindows.Executable(foreground.Pid), Title = foreground.Title, ImagePath = relative, SessionId = session?.Id, PixelHash = hash, ImageQuality = shared?.ImageQuality ?? settings.ImageQuality, Text = shared?.Text ?? "", Regions = shared?.Regions ?? [], TextState = shared?.TextState ?? RecognitionState.Pending };
+        var meetingPath = CaptureMeetingCrop(bitmap, screen.Bounds, id);
+        var frame = new MemoryFrame { Id = id, Timestamp = now, MeetingImagePath = meetingPath, EndTimestamp = now,
+            AppName = foreground.App, ProcessName = foreground.Process, ExecutablePath = NativeWindows.Executable(foreground.Pid), Title = foreground.Title,
+            ImagePath = relative, SessionId = session?.Id, PixelHash = hash, ImageQuality = 1,
+            Text = shared?.Text ?? "", Regions = shared?.Regions ?? [], TextState = meetingPath == null && shared?.MeetingImagePath == null &&
+                shared?.TextState is RecognitionState.Complete or RecognitionState.Empty ? shared.TextState : RecognitionState.Pending,
+            VisualTicks = visualTicks, VisualWidth = bitmap.Width, VisualHeight = bitmap.Height, VisualSampleVerified = visualTicks != null };
         store.Save(frame);
         previous = frame;
         FrameAdded?.Invoke(frame);
-        if (shared == null)
-            QueueIndex(frame.Id);
+        if (frame.TextState is not (RecognitionState.Complete or RecognitionState.Empty)) QueueIndex(frame.Id);
         return Task.CompletedTask;
     }
     private string? CaptureMeetingCrop(Bitmap screen, System.Drawing.Rectangle bounds, string id)

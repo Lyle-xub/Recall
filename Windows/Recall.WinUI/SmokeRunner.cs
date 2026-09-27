@@ -70,6 +70,40 @@ internal static class SmokeRunner
             var session = runtime.Store.Sessions().OrderByDescending(x => x.StartedAt).First();
             Check(session.EndedAt != null && new FileInfo(runtime.Store.SafePath(session.VideoPath)!).Length > 1000, "Native video capture finalizes MP4");
             Check(session.SeparateAudio, "New archive separates audio");
+            Check(session.UnifiedVisualArchive && session.VisualArchiveReady, "Native capture commits a unified visual archive");
+            Check(session.VideoCodec is "hevc" or "h264", "Native capture reports the codec actually selected");
+            Check(session.VideoWidth > 0 && session.VideoHeight > 0 && session.VideoSampleCount > 0, "Native capture records dimensions and sample evidence");
+            var archiveDeadline = DateTime.UtcNow.AddSeconds(60);
+            MemoryFrame? recorded = null;
+            while (DateTime.UtcNow < archiveDeadline)
+            {
+                recorded = runtime.Store.AllFrames().FirstOrDefault(x => x.SessionId == session.Id && x.ImagePath.EndsWith(".recallvideo", StringComparison.OrdinalIgnoreCase));
+                if (recorded != null) break;
+                await Task.Delay(250);
+            }
+            Check(recorded != null, "Real screen capture finishes OCR and promotes an exact video-backed card");
+            var reference = VisualArchive.Read(runtime.Store.SafePath(recorded!.ImagePath)!);
+            Check(reference.Video == session.VideoPath && reference.Ticks == recorded.VisualTicks,
+                "Card points to its submitted recording sample, not a wall-clock estimate");
+            using (var decoded = ImageArchive.Load(runtime.Store.Root, recorded.ImagePath))
+                Check(decoded.Width == reference.Width && decoded.Height == reference.Height && decoded.Width == session.VideoWidth && decoded.Height == session.VideoHeight,
+                    "Native archive card decodes at original capture dimensions");
+            Check(!File.Exists(Path.Combine(runtime.Store.Root, "frames", recorded.Id + ".ocr.png")),
+                "Validated video replaces the temporary OCR pixels after indexing");
+            var export = Path.Combine(output, "archive-export");
+            runtime.Store.Export(export, [recorded]);
+            using (var decoded = ImageArchive.Load(export, recorded.ImagePath))
+                Check(decoded.Width == reference.Width && decoded.Height == reference.Height,
+                    "Exported video-backed card decodes independently of the live library");
+            await File.WriteAllTextAsync(Path.Combine(output, "unified-archive.json"), JsonSerializer.Serialize(new
+            {
+                session.Id, session.VideoCodec, session.VideoWidth, session.VideoHeight, session.VideoSampleCount,
+                session.VideoDurationTicks, reference.Ticks, reference.Timescale,
+                archiveBytes = new FileInfo(runtime.Store.SafePath(session.VideoPath)!).Length,
+                exactNativeDecodeVerified = true,
+                originalOcrSpoolReleased = true,
+                exportDecodeVerified = true
+            }, new JsonSerializerOptions { WriteIndented = true }));
             success = true;
         }
         catch (Exception ex) { results.Add(new { error = ex.ToString() }); }

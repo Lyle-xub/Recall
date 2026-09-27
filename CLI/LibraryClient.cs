@@ -40,9 +40,8 @@ public sealed class LibraryClient(string root)
         if (operation == "index-one")
         {
             var input = Wire.Element(args);var frame = LibraryCommands.Require(store,input);
-            var path = store.SafePath(frame.ImagePath) ?? throw new RecallException("invalid_path","Unsafe image path.");
-            var result = await OcrEngine.Recognize(path,input.Text("language") ?? "eng",ct);
-            store.Recognized(frame.Id,result.Text,result.Regions);return Wire.Element(new { completed=1,id=frame.Id });
+            await ArchiveOcr.Recognize(store,frame,input.Text("language") ?? "eng",ct);
+            return Wire.Element(new { completed=1,id=frame.Id });
         }
         return Wire.Element(LibraryCommands.Execute(store, operation, Wire.Element(args)));
     }

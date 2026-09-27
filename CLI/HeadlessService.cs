@@ -36,7 +36,7 @@ public sealed class HeadlessService
             Wire.Atomic(Path.Combine(root,".recall-control","startup-error.json"),new {code=(e as RecallException)?.Code??"service_failed",message=e.Message});
         }
     }
-    public static async Task Ensure(LibraryClient client,CancellationToken ct)
+    public static async Task Ensure(LibraryClient client,CancellationToken ct,bool preferWindowsNative=false)
     {
         if(LibraryControlClient.Owner(client.Root)!=null) return;
         LibraryLease? startup=null;
@@ -53,11 +53,13 @@ public sealed class HeadlessService
         if(LibraryFormats.Detect(client.Root)==LibraryFormat.Missing) throw new RecallException("not_found","Initialize a library explicitly before starting capture.");
         if(LibraryFormats.Detect(client.Root)==LibraryFormat.Unknown)throw new RecallException("unsupported_schema","Unrecognized library schema.");
         var native=LibraryFormats.Detect(client.Root)==LibraryFormat.MacOS;
-        var executable=native ? LibraryClient.MacHelper??throw new RecallException("engine_missing","The native Mac helper is missing.") : Environment.ProcessPath!;
+        var windowsDesktop=preferWindowsNative && !native ? WindowsDesktop.Discover() : null;
+        var executable=windowsDesktop ?? (native ? LibraryClient.MacHelper??throw new RecallException("engine_missing","The native Mac helper is missing.") : Environment.ProcessPath!);
         // Unix gets separate pipes; Windows must disable *all* inherited
         // handles, not just replace its standard handles (see the launcher).
         var info=new ProcessStartInfo(executable) {UseShellExecute=false,CreateNoWindow=true,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true};
-        if(native) {info.ArgumentList.Add("--headless-service");info.ArgumentList.Add("--data-dir");info.ArgumentList.Add(client.Root);}
+        if(windowsDesktop!=null) {foreach(var argument in WindowsDesktop.Arguments(client.Root))info.ArgumentList.Add(argument);}
+        else if(native) {info.ArgumentList.Add("--headless-service");info.ArgumentList.Add("--data-dir");info.ArgumentList.Add(client.Root);}
         else
         {
             if(Path.GetFileNameWithoutExtension(executable).Equals("dotnet",StringComparison.OrdinalIgnoreCase)) info.ArgumentList.Add(typeof(CliApplication).Assembly.Location);
@@ -111,8 +113,8 @@ public sealed class HeadlessService
             if(command=="index-one")
             {
                 var frame=LibraryCommands.Require(store,args);
-                var result=await OcrEngine.Recognize(store.SafePath(frame.ImagePath)??throw new RecallException("invalid_path","Unsafe image path."),args.Text("language")??"eng",CancellationToken.None);
-                store.Recognized(frame.Id,result.Text,result.Regions);return new {completed=1,id=frame.Id};
+                await ArchiveOcr.Recognize(store,frame,args.Text("language")??"eng",CancellationToken.None);
+                return new {completed=1,id=frame.Id};
             }
             if(command=="optimize") return await PortableMaintenance.Optimize(store,CancellationToken.None);
             return LibraryCommands.Execute(store,command,args);

@@ -10,6 +10,14 @@ if(args.Length>=2 && args[0]=="--detached-argument-probe") {await File.WriteAllT
 
 if(args is ["--inference-test-child"]) {await Task.Delay(TimeSpan.FromSeconds(60));return;}
 
+if(Environment.GetEnvironmentVariable("RECALL_TEST_ARCHIVE_OCR")=="1" && args.Length>1 && args[1]=="stdout")
+{
+    using var input=File.OpenRead(args[0]);var header=new byte[24];input.ReadExactly(header);
+    if(!header.AsSpan(0,8).SequenceEqual(new byte[]{137,80,78,71,13,10,26,10}))throw new Exception("OCR received archive metadata instead of PNG pixels");
+    var width=System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(16,4));var height=System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(20,4));
+    Console.WriteLine($"1\t1\t0\t0\t0\t0\t0\t0\t{width}\t{height}\t-1\t\n5\t1\t1\t1\t1\t1\t0\t0\t{width}\t{height}\t99\tBitmap{width}x{height}");return;
+}
+
 var root = Path.Combine(Path.GetTempPath(), "recall-cli-tests-" + Guid.NewGuid());
 var host = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet";
 var packaged = Environment.GetEnvironmentVariable("RECALL_CLI_BINARY");
@@ -27,8 +35,10 @@ async Task<JsonElement> Run(string library, int expected, params string[] words)
 Directory.CreateDirectory(root);
 try
 {
+    if(args.Contains("--archive-media-only")) {await ArchiveMediaChecks.Run(root,Assert,Run);Console.WriteLine($"{tests} archive media assertions passed.");return;}
     await MigrationChecks.Run(root,Assert);
     if(args.Contains("--migration-only")) {Console.WriteLine($"{tests} migration assertions passed.");return;}
+    await ArchiveMediaChecks.Run(root,Assert,Run);
     var windows = Path.Combine(root, "windows");
     await Run(windows, 0, "--help"); Assert(!Directory.Exists(windows), "Help does not create a library");
     await Run(windows, 3, "records", "list"); Assert(!Directory.Exists(windows), "Read does not initialize missing library");

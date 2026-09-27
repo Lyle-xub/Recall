@@ -9,7 +9,7 @@ namespace Rewind;
 public sealed record ArchiveFrame(string Id, DateTimeOffset Timestamp, string AppName,
     string Title, string ImagePath, bool Starred);
 
-public sealed class MemoryStore : IDisposable
+public sealed partial class MemoryStore : IDisposable
 {
     public string Root
     {
@@ -42,7 +42,7 @@ public sealed class MemoryStore : IDisposable
         {
             db = new(new SqliteConnectionStringBuilder { DataSource = Path.Combine(Root, "memory.sqlite"), Mode = readOnly ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWrite, DefaultTimeout = 15, Pooling = false }.ToString());
             db.Open();
-            try {if(!readOnly)RecoverPendingCleanups();}catch {db.Dispose();throw;}
+            try {if(!readOnly){RecoverPendingVisualArchives();RecoverPendingCleanups();}}catch {db.Dispose();throw;}
             return;
         }
         Directory.CreateDirectory(Root);
@@ -81,7 +81,7 @@ public sealed class MemoryStore : IDisposable
             foreach (var frame in legacy)
                 Save(frame);
         }
-        try {RecoverPendingCleanups();}catch {db.Dispose();throw;}
+        try {RecoverPendingVisualArchives();RecoverPendingCleanups();}catch {db.Dispose();throw;}
         } catch { db?.Dispose(); location?.Dispose(); throw; }
     }
     private static double Seconds(DateTimeOffset date) => date.ToUnixTimeMilliseconds() / 1000.0;
@@ -154,8 +154,8 @@ public sealed class MemoryStore : IDisposable
                     f = f with
                     {
                         Text = reader.GetString(1),
-                        Regions = JsonSerializer.Deserialize<List<TextRegion>>(reader.GetString(2)) ?? [],
-                        MeetingRegions = JsonSerializer.Deserialize<List<TextRegion>>(reader.GetString(3)) ?? []
+                        Regions = CompactOcrRegions.Decode(reader.GetString(2)),
+                        MeetingRegions = CompactOcrRegions.Decode(reader.GetString(3))
                     };
                 rows.Add(f);
             }
@@ -172,7 +172,7 @@ public sealed class MemoryStore : IDisposable
             var regions = JsonSerializer.Serialize(frame.Regions);
             var meeting = JsonSerializer.Serialize(frame.MeetingRegions);
             var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new[] { frame.Text, regions, meeting }))));
-            Execute("INSERT OR IGNORE INTO ocr_payloads(id,text,regions,meeting_regions) VALUES($p0,$p1,$p2,$p3)", hash, frame.Text, regions, meeting);
+            Execute("INSERT OR IGNORE INTO ocr_payloads(id,text,regions,meeting_regions) VALUES($p0,$p1,$p2,$p3)", hash, frame.Text, CompactOcrRegions.Encode(frame.Regions), CompactOcrRegions.Encode(frame.MeetingRegions));
             var compact = frame with
             {
                 OcrId = hash,
@@ -492,8 +492,9 @@ public sealed class MemoryStore : IDisposable
             var ids = selected.Select(f => f.Id).ToHashSet();
             var kept = all.Where(f => !ids.Contains(f.Id)).ToList();
             var removedSessions = sessions.Where(s => s.EndedAt != null && selected.Any(f => f.SessionId == s.Id) && !kept.Any(f => f.SessionId == s.Id)).ToList();
-            var files = selected.SelectMany(Media).Except(kept.SelectMany(Media)).Concat(removedSessions.SelectMany(Media)).Distinct().Where(p => OwnedMediaPath(p) != null).ToArray();
-            return new(selected.Select(f => f.Id).ToArray(), files, files.Sum(p => File.Exists(SafePath(p)) ? new FileInfo(SafePath(p)!).Length : 0), keepStarred);
+            var retained = kept.SelectMany(Media).Concat(sessions.Except(removedSessions).SelectMany(Media)).ToHashSet(ArchivePaths.MediaComparer);
+            var files = selected.SelectMany(Media).Concat(removedSessions.SelectMany(Media)).Except(retained, ArchivePaths.MediaComparer).Distinct().Where(p => OwnedMediaPath(p) != null).ToArray();
+            return new(selected.Select(f => f.Id).ToArray(), files, files.Sum(MediaSize), keepStarred);
         }
     }
     public int Cleanup(CleanupPlan plan)
@@ -510,7 +511,8 @@ public sealed class MemoryStore : IDisposable
                 var actual = removed.Select(f => f.Id).ToHashSet();
                 var kept = all.Where(f => !actual.Contains(f.Id)).ToList();
                 var removedSessions = sessions.Where(s => s.EndedAt != null && removed.Any(f => f.SessionId == s.Id) && !kept.Any(f => f.SessionId == s.Id)).ToList();
-                var paths = removed.SelectMany(Media).Except(kept.SelectMany(Media)).Concat(removedSessions.SelectMany(Media)).Distinct().ToList();
+                var retained = kept.SelectMany(Media).Concat(sessions.Except(removedSessions).SelectMany(Media)).ToHashSet(ArchivePaths.MediaComparer);
+                var paths = removed.SelectMany(Media).Concat(removedSessions.SelectMany(Media)).Except(retained, ArchivePaths.MediaComparer).Distinct().ToList();
                 var control=Path.Combine(Root,".recall-control");
                 Directory.CreateDirectory(control);
                 if(!OperatingSystem.IsWindows())File.SetUnixFileMode(control,UnixFileMode.UserRead|UnixFileMode.UserWrite|UnixFileMode.UserExecute);
@@ -551,11 +553,12 @@ public sealed class MemoryStore : IDisposable
             // A prepared receipt precedes the SQLite transaction. Existing rows
             // mean rollback; absent rows mean its deletion committed before exit.
             if(recovery.Ids.Any(id=>Frame(id)!=null) || recovery.Sessions.Any(id=>Session(id)!=null)){File.Delete(receipt);continue;}
-            var referenced=MetadataFrames().SelectMany(Media).Concat(Sessions().SelectMany(Media)).ToHashSet();
+            var referenced=ReferencedMediaPaths();
             try
             {
                 foreach(var relative in recovery.Files.Where(p=>!referenced.Contains(p)))
                     if(OwnedMediaPath(relative) is { } full && File.Exists(full))File.Delete(full);
+                RemovePackedMedia(recovery.Files.Where(p=>!referenced.Contains(p)));
                 File.Delete(receipt);
             }
             catch(Exception e) when(e is IOException or UnauthorizedAccessException)
@@ -609,6 +612,7 @@ public sealed class MemoryStore : IDisposable
     {
         lock (gate)
         {
+            CompactOcrPayloads();
             Execute("INSERT INTO ocr_fts(ocr_fts,rank) VALUES('integrity-check',1)");
             Execute("PRAGMA wal_checkpoint(PASSIVE)");
             Execute("VACUUM");
@@ -617,22 +621,25 @@ public sealed class MemoryStore : IDisposable
     }
     private IEnumerable<string> Media(MemoryFrame f)
     {
-        foreach (var path in new[] { f.ImagePath, f.MeetingImagePath, $"frames/{f.Id}.ocr.png", $"frames/{f.Id}-meeting.ocr.png" }.Where(p => !string.IsNullOrEmpty(p)).Cast<string>())
-        {
-            yield return path;
-            if (path.EndsWith(".recallframe") && SafePath(path) is { } full && File.Exists(full))
-            {
-                foreach (var tile in ScreenManifest.Read(full).Tiles)
-                    yield return tile.Path;
-            }
-        }
+        foreach (var path in new[] { f.ImagePath, f.MeetingImagePath }.Where(p => !string.IsNullOrEmpty(p)).Cast<string>())
+            foreach (var dependency in MediaDependencies(path)) yield return dependency;
+        // The main lossless OCR spool becomes obsolete only after a completed
+        // card is committed to an exact video reference. Meeting OCR is separate.
+        if (!f.ImagePath.EndsWith(".recallvideo", StringComparison.OrdinalIgnoreCase) || f.TextState is not (RecognitionState.Complete or RecognitionState.Empty))
+            if (OwnedMediaPath($"frames/{f.Id}.ocr.png") != null) yield return $"frames/{f.Id}.ocr.png";
+        if (OwnedMediaPath($"frames/{f.Id}-meeting.ocr.png") != null) yield return $"frames/{f.Id}-meeting.ocr.png";
     }
     public bool ReferencesImage(string path)
     {
         lock (gate)
         {
-            using var cmd = Command("SELECT COUNT(*) FROM frames WHERE json_extract(json,'$.ImagePath')=$p0 OR json_extract(json,'$.MeetingImagePath')=$p0", path);
-            return Convert.ToInt32(cmd.ExecuteScalar()) > 0;
+            // Normal spool retirement is indexed and does not scan historical OCR.
+            var collation = OperatingSystem.IsWindows() ? " COLLATE NOCASE" : "";
+            using var command = Command("SELECT count(*) FROM frames WHERE json_extract(json,'$.ImagePath')=$p0" + collation + " OR json_extract(json,'$.MeetingImagePath')=$p0" + collation, path);
+            if (Convert.ToInt64(command.ExecuteScalar()) > 0) return true;
+            if (TilePackStore.IsTilePath(path) || path.StartsWith("recordings/", StringComparison.Ordinal))
+                return ReferencedMediaPaths().Contains(path);
+            return false;
         }
     }
     private static IEnumerable<string> Media(RecordingSession s) => new[] { s.VideoPath, s.SystemAudioPath, s.MicrophoneAudioPath, $"recordings/{s.Id}.wav" }.Where(p => !string.IsNullOrEmpty(p)).Cast<string>();
@@ -643,21 +650,23 @@ public sealed class MemoryStore : IDisposable
         {
         Directory.CreateDirectory(destination);
         var sessions = frames.Select(x => x.SessionId).Distinct().Where(x => x != null).Select(x => Session(x!)).Where(x => x != null).Cast<RecordingSession>().ToList();
-        var required=frames.SelectMany(f=>new[]{f.ImagePath,f.MeetingImagePath}).Where(p=>!string.IsNullOrEmpty(p)).Cast<string>().Concat(sessions.SelectMany(s=>new[]{s.VideoPath,s.SystemAudioPath,s.MicrophoneAudioPath}.Where(p=>!string.IsNullOrEmpty(p)).Cast<string>())).ToHashSet();
-        foreach(var path in required.ToArray().Where(p=>p.EndsWith(".recallframe")))
-            if(SafePath(path) is { } manifest && File.Exists(manifest))foreach(var tile in ScreenManifest.Read(manifest).Tiles)required.Add(tile.Path);
-        foreach(var sidecar in frames.SelectMany(f=>new[]{$"frames/{f.Id}.ocr.png",$"frames/{f.Id}-meeting.ocr.png"}).Where(p=>File.Exists(SafePath(p))))required.Add(sidecar);
-        var names=required.Concat(sessions.Select(s=>$"recordings/{s.Id}.wav").Where(p=>File.Exists(SafePath(p)))).Distinct();
-        foreach (var name in names)
-            if (OwnedMediaPath(name) is { } source && File.Exists(source))
+        var required = frames.SelectMany(f => new[] { f.ImagePath, f.MeetingImagePath }.Where(p => !string.IsNullOrEmpty(p)).Cast<string>())
+            .SelectMany(MediaDependencies).Concat(sessions.SelectMany(s => new[] { s.VideoPath, s.SystemAudioPath, s.MicrophoneAudioPath }.Where(p => !string.IsNullOrEmpty(p)).Cast<string>())).ToHashSet(StringComparer.Ordinal);
+        foreach (var sidecar in frames.SelectMany(f => new[] { $"frames/{f.Id}.ocr.png", $"frames/{f.Id}-meeting.ocr.png" }).Where(p => File.Exists(SafePath(p)))) required.Add(sidecar);
+        foreach (var wav in sessions.Select(s => $"recordings/{s.Id}.wav").Where(p => File.Exists(SafePath(p)))) required.Add(wav);
+        foreach (var name in required)
+        {
+            var source = ArchivePaths.Owned(Root, name);
+            var target = ArchivePaths.Owned(destination, name);
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            if (TilePackStore.IsTilePath(name))
             {
-                var target = Path.GetFullPath(Path.Combine(destination, name));
-                if (!target.StartsWith(Path.GetFullPath(destination) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-                    continue;
-                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                File.Copy(source, target, true);
+                var bytes = TilePackStore.ReadTile(Root, name) ?? throw new RecallException("not_found", "A referenced screenshot block is missing; no export was published.");
+                File.WriteAllBytes(target, bytes);
             }
-            else throw new RecallException("not_found","A referenced media file is missing or unsafe; no export was published.");
+            else if (File.Exists(source)) File.Copy(source, target, true);
+            else throw new RecallException("not_found", "A referenced media file is missing or unsafe; no export was published.");
+        }
         File.WriteAllText(Path.Combine(destination, "frames.json"), JsonSerializer.Serialize(frames));
         File.WriteAllText(Path.Combine(destination, "sessions.json"), JsonSerializer.Serialize(sessions));
         File.WriteAllText(Path.Combine(destination, "transcripts.json"), JsonSerializer.Serialize(sessions.SelectMany(s => Transcript(s.Id))));

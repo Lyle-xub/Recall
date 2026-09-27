@@ -56,7 +56,7 @@ static class HumanOutputChecks
             var chinese=await Call(["help"],Env(variables:[("LANG","zh_CN.UTF-8")]));assert(chinese.Out.Contains("用法")&&chinese.Out.Contains("search"),"Locale selects Chinese labels while command names remain stable");
             foreach(var words in new[]{new[]{"help","search"},new[]{"search","--help"},new[]{"records","--help"},new[]{"help","records","get"},new[]{"records"}})assert((await Call(words)).Exit==0,"Topic/group help: "+string.Join(' ',words));
             foreach(var words in new[]{new[]{"--help","--bogus","x"},new[]{"search","--help","--bogus","x"},new[]{"help","unknown"},new[]{"--color","bad","help"},new[]{"--lang","fr","help"},new[]{"search","--limit","0"}})assert((await Call(words)).Exit==2,"Invalid options/topics stay errors even with help: "+string.Join(' ',words));
-            var version=await Call(["--version","--json"]);assert(version.Out.Contains("0.5.1"),"Version comes from the0.5.1 assembly source");
+            var version=await Call(["--version","--json"]);assert(version.Out.Contains(CommandHelp.Version),"Version comes from the CLI assembly source");
             foreach(var (command,payload,expected) in Shapes())
             {
                 using var doc=JsonDocument.Parse(payload);var output=new StringWriter();var a=new Arguments(command.Split(' '));var presenter=new HumanOutput(output,new TerminalStyle(a,Env()),a);presenter.Render(doc.RootElement);

@@ -12,5 +12,7 @@
   <ItemGroup>
     <ProjectReference Include="../../Core/Recall.Core.csproj" />
     <Compile Include="../Rewind/ImageArchive.cs" Link="ImageArchive.cs" />
+    <Compile Include="../Rewind/VisualVideoArchive.cs" Link="VisualVideoArchive.cs" />
+    <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
   </ItemGroup>
 </Project>

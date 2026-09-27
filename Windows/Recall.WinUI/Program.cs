@@ -119,6 +119,7 @@ internal sealed class App : Application, Microsoft.UI.Xaml.Markup.IXamlMetadataP
             runtime.Settings.LaunchFilmSeen = true;
         }
         CurrentWindow = new(runtime);
+        runtime.RegisterServiceExit(() => CurrentWindow.DispatcherQueue.TryEnqueue(async () => await CurrentWindow.Quit()));
         Program.TraceStartup("Window constructed");
         if (parity >= 0)
         {
@@ -130,7 +131,7 @@ internal sealed class App : Application, Microsoft.UI.Xaml.Markup.IXamlMetadataP
             _ = SmokeRunner.Run(CurrentWindow, runtime, arguments[smoke + 1]);
             return;
         }
-        if (!arguments.Contains("--background"))
+        if (!arguments.Contains("--background") && !arguments.Contains("--cli-service"))
             CurrentWindow.Show();
     }
 }

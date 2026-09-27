@@ -509,8 +509,8 @@ internal sealed class DetailView : Grid, IDisposable
                     videoSurface?.SetOrientation(orientationCorrection + rotationSteps, matchedAspect, rotationSteps);
                     videoSurface?.ConfirmFallbackOrientation();
                     var duration = sender.PlaybackSession.NaturalDuration.TotalSeconds;
-                    var seconds = Math.Max(0, (frame.Timestamp - session.StartedAt).TotalSeconds);
-                    var seekTo = TimeSpan.FromSeconds(duration > 0 ? Math.Min(seconds, Math.Max(0, duration - .05)) : 0);
+                    var seconds = frame.VisualTicks is { } sampleTicks ? TimeSpan.FromTicks(sampleTicks).TotalSeconds : Math.Max(0, (frame.Timestamp - session.StartedAt).TotalSeconds);
+                    var seekTo = TimeSpan.FromSeconds(duration > 0 ? Math.Min(seconds, Math.Max(0, duration - .001)) : 0);
                     if (seekTo > TimeSpan.FromMilliseconds(50))
                     {
                         sender.PlaybackSession.SeekCompleted += (_, _) => DispatcherQueue.TryEnqueue(() =>

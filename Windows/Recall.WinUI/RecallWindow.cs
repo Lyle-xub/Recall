@@ -193,7 +193,7 @@ internal sealed class RecallWindow : Window
         root.Children.Clear();
         shell.Dispose();
     }
-    async Task Quit()
+    internal async Task Quit()
     {
         quitting = true;
         statusTimer.Stop();

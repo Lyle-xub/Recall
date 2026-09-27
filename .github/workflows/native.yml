@@ -30,6 +30,9 @@ jobs:
       - name: Windows navigation, recording recovery and CLI ownership
         shell: pwsh
         run: ./scripts/test-windows-merged-integration.ps1 -Executable "$pwd/release/recall-windows-x64/Recall.exe" -Cli "$pwd/release/Recall-CLI-win-x64/recall.exe"
+      - name: Windows CLI native unified archive lifecycle
+        shell: pwsh
+        run: ./scripts/test-windows-cli-archive.ps1 -Executable "$pwd/release/recall-windows-x64/Recall.exe" -Cli "$pwd/release/Recall-CLI-win-x64/recall.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: Recall-Windows-x64
@@ -44,3 +47,4 @@ jobs:
             release/windows-smoke
             release/windows-integration/**/*.json
             release/windows-integration/startup.log
+            release/windows-cli-archive/acceptance.json

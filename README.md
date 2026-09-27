@@ -5,7 +5,7 @@
 | | macOS | Windows |
 |---|---|---|
 | 界面 | SwiftUI + AppKit | C# + WinUI 3 / Windows App SDK |
-| 屏幕与音频 | ScreenCaptureKit、AVFoundation | Windows 原生录制 / Media Foundation，ScreenRecorderLib 封装 |
+| 屏幕与音频 | ScreenCaptureKit、AVFoundation | 同源画面采集、Media Foundation 视频归档、NAudio 独立音轨 |
 | 离线 OCR | 内置 PP-OCRv6 Small；Apple Vision / Tesseract 中英文备用引擎 | 同一 PP-OCRv6 Small 模型；独立进程，Tesseract LSTM 备用 |
 | 数据 | 系统 SQLite | Microsoft.Data.Sqlite |
 | 密钥 | macOS Keychain | Windows DPAPI |
@@ -20,7 +20,7 @@
 - `release/Recall.app`：Apple Silicon，macOS 15 或更新版本。
 - `release/Recall-macOS.dmg`：珍珠白背景，拖到 Applications 安装。
 - `release/Recall-macOS.zip`：Mac 应用压缩包。
-- Windows 新入口：`Windows/Recall.WinUI`，面向 Windows 11 22H2+、x64。当前完成源码迁移和交叉源码编译，尚未生成经过真机验证的新版安装包；验证状态见 [Windows 迁移记录](docs/windows-0.4.25-validation.md)。
+- Windows 新入口：`Windows/Recall.WinUI`，面向 Windows 11 22H2+、x64。Windows 0.4.26 与 CLI 0.5.2 接入视频帧共用、图块打包和无损 OCR 压缩；实现与验证范围见 [统一归档记录](docs/windows-unified-archive.md)。
 - 现存 `release/RewindReplica-Windows-x64.zip` 是旧 WPF 版本，不包含本轮 WinUI 迁移。
 
 Windows 录制和 OCR 原生库需要 Microsoft Visual C++ x64 运行库。缺少时安装 [Microsoft 官方运行库](https://aka.ms/vs/17/release/vc_redist.x64.exe)。不要单独复制 exe，旁边的原生 DLL、运行时和模型文件都需要保留。
@@ -87,7 +87,7 @@ dotnet run --project Windows/Rewind.Tests/Rewind.Tests.csproj
 ./scripts/build-windows.ps1
 ```
 
-Windows 构建脚本使用与 Mac 相同、经 SHA-256 校验的 PP-OCRv6 与 tessdata_best 模型；OCR 运行时无需联网。新 WinUI 应用不包含 Demo 入口或数据。GitHub Actions 的双端构建流程见 `.github/workflows/native.yml`；当前工程没有推送到远程仓库或触发远程 CI。
+Windows 构建脚本使用与 Mac 相同、经 SHA-256 校验的 PP-OCRv6 与 tessdata_best 模型；OCR 运行时无需联网。新 WinUI 应用不包含 Demo 入口或数据。GitHub Actions 的双端构建流程见 `.github/workflows/native.yml`，共享 CLI 的三平台验证见 `.github/workflows/cli.yml`。
 
 ## 验证状态与边界
 

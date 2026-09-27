@@ -1,13 +1,15 @@
 name: Shared library CLI
 on:
   push:
-    branches: [main, feat/cross-platform-cli, integration/windows-cli]
+    branches: [main, feat/cross-platform-cli, integration/windows-cli, feat/windows-unified-archive]
     paths: ['Core/**', 'CLI/**', 'CLI.Tests/**', 'macOS/**', 'Windows/**', 'scripts/build-cli.py', 'scripts/*cli*capture*', 'scripts/test-cli-terminal.py', 'docs/cli.md', '.github/workflows/cli.yml']
   pull_request:
     paths: ['Core/**', 'CLI/**', 'CLI.Tests/**', 'macOS/**', 'Windows/**', 'scripts/build-cli.py', 'scripts/*cli*capture*', 'scripts/test-cli-terminal.py', '.github/workflows/cli.yml']
   workflow_dispatch:
 jobs:
   cli:
+    env:
+      RECALL_ARCHIVE_TESTS: '1'
     strategy:
       fail-fast: false
       matrix:
@@ -27,9 +29,20 @@ jobs:
       - name: Install Linux OCR and isolated capture dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y tesseract-ocr ffmpeg xvfb python3-tk fonts-dejavu-core
-      - name: Install Mac OCR
+      - name: Install Mac OCR and portable archive decoder
         if: runner.os == 'macOS'
-        run: brew list tesseract || brew install tesseract
+        run: |
+          brew list tesseract || brew install tesseract
+          brew list ffmpeg || brew install ffmpeg
+      - name: Install Windows portable archive decoder
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (!(Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg --no-progress --yes
+            if ($LASTEXITCODE -ne 0) { throw 'FFmpeg installation failed.' }
+          }
+          ffmpeg -version
       - name: Shared core regression
         run: dotnet run --project Windows/Rewind.Tests/Rewind.Tests.csproj
       - name: Mac desktop and native adapter integration

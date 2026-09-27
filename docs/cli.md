@@ -174,9 +174,18 @@ already exist; starting the service never initializes or migrates it implicitly.
 | --- | --- | --- |
 | Running compatible desktop | Existing native recording coordinator | Same library; capture may be automatically paused while its UI is visible |
 | macOS native library, no desktop | Native Mac helper, without UI | macOS screen-recording permission; microphone permission if enabled |
-| Windows-format library on Windows | FFmpeg `gdigrab` screenshot service | Interactive desktop and FFmpeg on `PATH` |
+| Windows-format library on Windows, native desktop installed | Windows native owner, started in the background | Updated Windows desktop; original-resolution unified video/card storage |
+| Windows-format library on Windows, no native desktop installed | FFmpeg `gdigrab` screenshot service | Interactive desktop and FFmpeg on `PATH` |
 | Windows-format library on Linux / X11 | FFmpeg `x11grab` screenshot service | Authorized `DISPLAY` and FFmpeg on `PATH` |
 | Windows-format library on Linux / Wayland | `grim` screenshot service | A compositor supported by `grim` and its required permission |
+
+On Windows, `recording start` discovers the desktop at
+`%LOCALAPPDATA%\Programs\Recall\Recall.exe`; `RECALL_WINDOWS_APP` selects an absolute
+desktop executable path for a portable installation. An invalid explicit path is
+an error. Update both the Windows application and CLI to use unified archives.
+The CLI starts it with the requested library in background service mode and uses
+the same native recorder. `service stop` gracefully exits a CLI-launched native
+instance; an independently opened desktop remains under its tray controls.
 
 The portable service captures still screenshots and runs OCR. It does not provide
 native video/audio recording or the full desktop's application metadata. Audio
@@ -199,8 +208,12 @@ custom directory.
 `--id`, and records a durable task. It processes each record through the current
 owner or offline adapter, using the requested Tesseract `--language`. Install that
 language's data and Tesseract on `PATH`, or set `RECALL_TESSERACT`. Native Mac images
-are decoded through the Swift store; unsupported packed media is reported as an
-error rather than marked recognized. Progress events go to stderr; `--json` keeps
+are decoded through the Swift store. Windows `.recallvideo` references and packed
+`.recallframe` images are decoded by the native owner, or materialized into a
+temporary image by FFmpeg when operating offline. A video reference must resolve
+to its exact recorded timestamp and original dimensions; a nearby frame is not
+accepted. Temporary images are removed on completion, failure or cancellation.
+Progress events go to stderr; `--json` keeps
 one result envelope on stdout.
 
 Use `tasks status` to inspect index jobs and owner request receipts. A failed or
@@ -210,14 +223,24 @@ inspect its durable receipt with `tasks result` before retrying a mutation such 
 `records star`, which toggles state. Cancelling a waiting client does not roll back
 an already running owner operation.
 
-`storage compact` compacts SQLite/FTS. `storage optimize` uses the native optimizer
-when available; the portable path recompresses supported still images with FFmpeg.
+`storage compact` losslessly compresses legacy OCR region payloads and compacts
+SQLite/FTS. `storage optimize` uses the native optimizer when available; both paths
+can pack existing content-addressed image tiles into bounded SQLite segments,
+checking every payload before removing its old loose file. The portable path
+also recompresses supported independent still images with FFmpeg.
 Install both `ffmpeg` and `ffprobe` for portable optimization; their executable
 overrides are `RECALL_FFMPEG` and `RECALL_FFPROBE`.
 Portable optimization preserves dimensions and existing OCR, skips images awaiting
-OCR and leaves video recompression to the native desktop. Completed replacements
+OCR. It never recompresses `.recallvideo` cards or their backing recordings; the
+native optimizer applies the same protection. Completed replacements
 are retained after interruption; rerun the command to continue. Inspect the result
 for completed/skipped work, saved bytes and platform-specific limits.
+
+`storage stats` counts physical recording bytes once, categorizes packed tile
+databases as images, and reports video-reference and packed-payload counts
+separately. Export carries every referenced recording and unpacks required image
+tiles so the exported archive has no dependency on the live library. Broken
+references cause export or cleanup to fail without guessing at dependencies.
 
 Cleanup protects starred memories and active sessions by default.
 `--include-starred --yes` explicitly includes stars. `--dry-run` and `--yes` are

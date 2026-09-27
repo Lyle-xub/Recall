@@ -1,4 +1,4 @@
-#define AppVersion "0.4.25"
+#define AppVersion "0.4.26"
 #ifndef SourceDir
   #define SourceDir "..\..\release\recall-windows-x64"
 #endif

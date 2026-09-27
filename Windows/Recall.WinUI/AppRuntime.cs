@@ -37,6 +37,9 @@ internal sealed class AppRuntime
     private volatile bool sessionLocked, powerSuspended;
     private bool Suspended => sessionLocked || powerSuspended;
     private readonly bool visualParity, validationFakeCapture;
+    private readonly bool cliService;
+    private readonly TaskCompletionSource<Action> serviceExit = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int serviceStopping;
     private int validationCaptureStarts, validationCaptureStops, validationCaptureActive, validationFailNextStart;
     private readonly object settingsGate = new();
     private readonly LibraryControlHost cliControl;
@@ -51,6 +54,7 @@ internal sealed class AppRuntime
         LocalInference.ShareWithCLI = true;
         var ownership = new LibraryLease(AppPaths.DataRoot);
         var arguments = Environment.GetCommandLineArgs();
+        cliService = arguments.Contains("--cli-service");
         visualParity = arguments.Contains("--visual-parity");
         validationFakeCapture = visualParity && arguments.Contains("--validation-fake-capture");
         Directory.CreateDirectory(AppPaths.DataRoot);
@@ -64,6 +68,7 @@ internal sealed class AppRuntime
         // visual-parity launch start the production capture backend from it.
         if (visualParity) Settings.RecordingRequested = false;
         Store = new(AppPaths.DataRoot);
+        Store.RecoverInterruptedVisualSessions();
         HasMemories = Store.Count > 0;
         usage = new(Store);
         Capture = new(Store);
@@ -200,6 +205,17 @@ internal sealed class AppRuntime
     {
         switch (operation)
         {
+            case "service-stop":
+                if (!cliService) throw new RecallException("unsupported", "This Recall desktop was opened independently. Use recording stop to stop capture, or Quit Recall from its tray menu.");
+                if (Interlocked.Exchange(ref serviceStopping, 1) == 0)
+                    _ = Task.Run(async () =>
+                    {
+                        // Return the IPC response before shutdown drains the host.
+                        await Task.Delay(250);
+                        var exit = await serviceExit.Task;
+                        exit();
+                    });
+                return new { stopping = true, owner = "windows" };
             case "recording-start": case "recording-stop": case "recording-status":
                 return await recordingControl.Execute(operation);
             case "tasks-status": return new { optimizing = StorageService.IsOptimizing, indexing = Store.PendingFrames().Count, error = cliTaskError };
@@ -227,6 +243,7 @@ internal sealed class AppRuntime
                 return result;
         }
     }
+    internal void RegisterServiceExit(Action exit) => serviceExit.TrySetResult(exit);
     private void PersistSettings()
     {
         lock (settingsGate)

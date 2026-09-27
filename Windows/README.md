@@ -2,7 +2,7 @@
 
 以 macOS Recall 0.4.25 为基准，采用 WinUI 3、Windows App SDK、Win32 窗口和 Composition。图标、虹彩玻璃纹理、Halo 与开场音效直接使用同一份品牌素材；界面采用 Windows 原生控件。
 
-**当前交付为源码。已通过核心回归检查和 C# 源码编译，尚未在 Windows 真机执行应用、录制与视觉验收，不能当作验收完成的安装包。** 完整范围与未验证项见 [验证记录](../docs/windows-0.4.25-validation.md)。
+Windows 0.4.26 将 Mac 的统一归档思路接入 Windows 原生采集与共享 CLI：卡片引用同源录屏的准确帧，旧图块按内容去重后打包，OCR 坐标无损压缩。旧图库继续兼容；实现和验收范围见 [统一归档记录](../docs/windows-unified-archive.md)。
 
 ## 在 Windows 构建
 
@@ -32,6 +32,10 @@ Windows 安装器尚未配置代码签名证书。`-SkipSmoke` 仅供诊断，�
 旧版默认目录 `%LOCALAPPDATA%\RewindReplica` 会在未被占用、且新目录不存在时整体迁移到 `Recall`。升级前退出旧版应用和 CLI；如果两个目录都存在，会提示冲突并保留两者。通过 `--data-dir` 或 `RECALL_DATA_DIR` 指定的自定义目录不自动迁移。
 
 已使用 `%LOCALAPPDATA%\Recall\Data` 的 Windows 版本会由同一个 Core 解析器识别：仅有该数据库时，桌面和 CLI 原地复用它；如果它与 `Recall\memory.sqlite` 同时存在，则报告冲突，不创建空库或混合数据。
+
+新录制保留屏幕原始尺寸，优先可用的硬件 HEVC，兼容回退到 H.264。卡片和录屏使用同一原始画面及准确视频时间戳；原始 PNG 留存到 OCR、视频落盘和精确解码验证都成功。已有 JPEG/PNG 图块无需重编码即可合并进有界 SQLite 包，优化不会重压作为卡片唯一来源的视频。
+
+CLI 0.5.2 的 `recall recording start` 可自动启动安装在 `%LOCALAPPDATA%\Programs\Recall\Recall.exe` 的新版原生引擎。便携版可设置 `RECALL_WINDOWS_APP` 为桌面 exe 的绝对路径。CLI 启动的后台实例可用 `recall service stop` 完整退出；手动打开的应用仍由托盘退出。
 
 ## 工程
 

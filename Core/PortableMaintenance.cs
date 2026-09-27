@@ -16,18 +16,29 @@ public static class PortableMaintenance
     }
     public static async Task<object> Optimize(MemoryStore store,CancellationToken ct)
     {
-        long saved=0;int completed=0,skipped=0;
+        long saved=0,packSavedBytes=0;int completed=0,skipped=0,packedTiles=0,preservedOriginals=0;
         var frames=store.MetadataFrames();
-        var active=store.Sessions().Where(s=>s.EndedAt==null).Select(s=>s.Id).ToHashSet();
+        var sessions=store.Sessions();
+        var active=sessions.Where(s=>s.EndedAt==null).Select(s=>s.Id).ToHashSet();
+        var unified=sessions.Where(s=>s.UnifiedVisualArchive).Select(s=>s.Id).ToHashSet();
         var files=frames.SelectMany(f=>new[]{f.ImagePath,f.MeetingImagePath}).Where(p=>!string.IsNullOrEmpty(p)).Distinct().Cast<string>().ToArray();
         try
         {
+            TileStorageBatch batch;
+            do
+            {
+                ct.ThrowIfCancellationRequested();
+                batch=store.PackLegacyTiles();
+                packedTiles+=batch.Processed;packSavedBytes+=batch.SavedBytes;
+            } while(batch.More);
             foreach(var relative in files)
             {
                 ct.ThrowIfCancellationRequested();
                 var references=frames.Where(f=>f.ImagePath==relative || f.MeetingImagePath==relative).ToArray();
+                if(relative.EndsWith(".ocr.png",StringComparison.OrdinalIgnoreCase) || !PortableImage.IsArchive(relative) && references.Any(f=>f.VisualTicks!=null || f.VisualSampleVerified || f.SessionId!=null && unified.Contains(f.SessionId)))
+                {preservedOriginals++;skipped++;continue;}
                 if(references.Any(f=>f.TextState is not (RecognitionState.Complete or RecognitionState.Empty) || f.SessionId!=null && active.Contains(f.SessionId)) || references.All(f=>f.ImageQuality<=.5)) {skipped++;continue;}
-                if(Path.GetExtension(relative).ToLowerInvariant() is not (".png" or ".jpg" or ".jpeg" or ".bmp" or ".webp")) {skipped++;continue;}
+                if(TilePackStore.IsTilePath(relative) || Path.GetExtension(relative).ToLowerInvariant() is not (".png" or ".jpg" or ".jpeg" or ".bmp" or ".webp")) {skipped++;continue;}
                 var source=store.SafePath(relative);
                 if(source==null || !File.Exists(source))throw new RecallException("not_found","A referenced screenshot is missing or unsafe; original references were preserved.");
                 var dimensions=await Dimensions(source,ct);
@@ -53,12 +64,12 @@ public static class PortableMaintenance
                 finally {if(File.Exists(target) && !store.ReferencesImage(targetRelative))File.Delete(target);}
             }
             store.CompactIndex();
-            return new {completed,savedBytes=saved,skipped,video="Use the native desktop optimizer for recording/video recompression",integrity=store.CheckIntegrity()};
+            return new {completed,savedBytes=saved,skipped,packedTiles,packSavedBytes,preservedOriginals,videoBackedImages=files.Count(p=>p.EndsWith(".recallvideo",StringComparison.OrdinalIgnoreCase)),imageCodec="jpeg",tileStorage="sqlite-lossless",video="Existing exact-frame video archives are preserved; native recording creates new video archives",integrity=store.CheckIntegrity()};
         }
         catch(Exception e)
         {
             throw new RecallException(ct.IsCancellationRequested ? "cancelled" : e is System.ComponentModel.Win32Exception ? "engine_missing" : (e as RecallException)?.Code??"optimization_failed",
-                "Optimization stopped; completed image replacements are preserved. "+e.Message,new {completed,savedBytes=saved,skipped,resume="recall storage optimize"});
+                "Optimization stopped; completed image replacements and verified tile packs are preserved. "+e.Message,new {completed,savedBytes=saved,skipped,packedTiles,packSavedBytes,preservedOriginals,resume="recall storage optimize"});
         }
     }
 }

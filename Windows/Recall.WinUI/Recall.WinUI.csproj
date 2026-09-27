@@ -22,7 +22,7 @@
     <ApplicationIcon>Assets/Recall.ico</ApplicationIcon>
     <AssemblyName>Recall</AssemblyName>
     <RootNamespace>Recall</RootNamespace>
-    <Version>0.4.25</Version>
+    <Version>0.4.26</Version>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RecallSourceCheck)' == 'true'">
     <!-- Source validation on non-Windows hosts is not a distributable build. -->
@@ -41,12 +41,11 @@
     <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.4.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
-    <PackageReference Include="ScreenRecorderLib" Version="7.0.1" />
     <PackageReference Include="Tesseract" Version="5.2.0" />
     <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="../Rewind/ImageArchive.cs;../Rewind/NeuralOcrClient.cs;../Rewind/SecretStore.cs;../Rewind/CaptureService.cs;../Rewind/AudioTrackPolicy.cs" Link="Core/%(Filename).cs" />
+    <Compile Include="../Rewind/ImageArchive.cs;../Rewind/VisualVideoArchive.cs;../Rewind/NeuralOcrClient.cs;../Rewind/SecretStore.cs;../Rewind/CaptureService.cs;../Rewind/AudioTrackPolicy.cs" Link="Core/%(Filename).cs" />
     <Content Include="Assets/**" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../Rewind/tessdata/**" Link="tessdata/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../shared/models/**" Link="models/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />

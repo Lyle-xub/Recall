@@ -46,7 +46,7 @@ public sealed class HumanOutput(TextWriter writer,TerminalStyle style,Arguments?
             case "library info":case "library init":
                 Header("Library","资料库");Field("Directory","目录",V(e,"root"),true);Field("Format","格式",V(e,"format"));Field("Records","记录数",V(Get(e,"details"),"count") is {Length:>0} n?n:V(e,"count"));Owner(Get(e,"owner"));break;
             case "doctor":
-                Header("Diagnostics","诊断");foreach(var key in new[]{"platform","architecture","root","format","macCore","ocrEngine","nativeRuntimeRoot","recording"})Labeled(key,Get(e,key));Owner(Get(e,"owner"));break;
+                Header("Diagnostics","诊断");foreach(var key in new[]{"platform","architecture","root","format","macCore","windowsApp","archiveDecoder","ocrEngine","nativeRuntimeRoot","recording"})Labeled(key,Get(e,key));Owner(Get(e,"owner"));break;
             case "recording status":case "recording start":case "recording stop":Recording(e);break;
             case "service start":Header("Background service","后台服务");Owner(e);Text(T("Service is ready; recording has not been requested by this command.","服务已就绪；此命令未请求开始录制。"));break;
             case "service stop":Line(style.Success(T("Shutdown requested","已请求关闭服务")));Text(T("Use recall recording status to check ownership release.","使用 recall recording status 确认服务已退出。"));break;
@@ -55,7 +55,16 @@ public sealed class HumanOutput(TextWriter writer,TerminalStyle style,Arguments?
                 if(Get(e,"desktop").ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)){Line(T("Current owner:","当前所有者："));Overview(Get(e,"desktop"));}else Text(T("No active owner.","没有活动所有者。"));break;
             case "tasks result":case "tasks resume":case "index run":Header("Task result","任务结果");TaskResult(e);break;
             case "storage stats":
-                Header("Storage","存储");Field("Total","总计",Bytes(Get(e,"totalBytes")));Field("Files","文件数",V(e,"files"));Field("Skipped","跳过",V(e,"skipped"));Overview(Get(e,"buckets"),bytes:true);break;
+                Header("Storage","存储");Field("Total physical size","实际占用总计",Bytes(Get(e,"totalBytes")));Field("Files","文件数",V(e,"files"));Field("Skipped","跳过",V(e,"skipped"));Overview(Get(e,"buckets"),bytes:true);
+                if(Get(e,"archives").ValueKind==JsonValueKind.Object)
+                {
+                    var archives=Get(e,"archives");
+                    Field("Video-backed image references","视频帧图片引用数",V(archives,"videoReferences"));Field("Tiled image references","分块图片引用数",V(archives,"tileReferences"));
+                    Field("Packed blocks / loose blocks","已打包图块 / 独立图块",V(archives,"packedTiles")+" / "+V(archives,"looseTiles"));
+                    Field("Packed payload / physical size","图块内容 / 实际占用",Bytes(Get(archives,"packedPayloadBytes"))+" / "+Bytes(Get(archives,"packBytes")));
+                    Text(T("Reference counts are logical images; videos and SQLite pack files are counted once in physical totals.","引用数表示逻辑图片；视频与 SQLite 图块文件在实际占用中只计一次。"));
+                }
+                break;
             case "storage check":Line(V(e,"integrity")=="ok"?style.Success(T("Database integrity: ok","数据库完整性：正常")):style.Warning(T("Database integrity needs attention","数据库完整性需要检查")));Field("Result","结果",V(e,"integrity"));break;
             case "storage compact":Line(style.Success(T("Search index compacted","搜索索引已整理")));Overview(e);break;
             case "storage optimize":Header("Media optimization","媒体优化");Overview(e);break;
@@ -183,7 +192,7 @@ public sealed class HumanOutput(TextWriter writer,TerminalStyle style,Arguments?
     {if(!e.TryGetInt64Safe(out var n))return Value(e);string[] unit=["B","KiB","MiB","GiB","TiB"];double number=n;int i=0;while(Math.Abs(number)>=1024&&i<unit.Length-1){number/=1024;i++;}return number.ToString(i==0?"0":"0.##",CultureInfo.InvariantCulture)+" "+unit[i];}
     void Labeled(string key,JsonElement value,bool bytes=false)
     {if(value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)return;var content=value.ValueKind is JsonValueKind.True or JsonValueKind.False?Bool(value):bytes||key.EndsWith("Bytes",StringComparison.OrdinalIgnoreCase)||key=="bytes"?Bytes(value):Value(value);Field(key,Label(key),content);}
-    string Label(string key)=>!style.Chinese?key:key.ToLowerInvariant() switch {"platform"=>"平台","architecture"=>"架构","root" or "datadir"=>"资料库目录","format"=>"格式","maccore"=>"macOS 引擎","ocrengine"=>"OCR 引擎","nativeruntimeroot"=>"运行库目录","recording"=>"录制","automaticallypaused"=>"自动暂停","reason" or "pausereason"=>"原因","owner"=>"所有者","mode"=>"模式","captured"=>"已采集","sessionid"=>"会话 ID","error"=>"错误","completed"=>"已完成","skipped"=>"跳过","savedbytes"=>"节省空间","integrity"=>"完整性","images"=>"图片","video"=>"视频","audio"=>"音频","models"=>"模型","index"=>"索引","other"=>"其他","count"=>"数量","removed" or "removedframes"=>"已删除","bytes"=>"大小","keepstarred"=>"保留收藏","settingspath"=>"设置文件","chat"=>"对话模型","speech"=>"语音模型","provider"=>"提供方","baseurl"=>"服务地址","model"=>"模型","islocal"=>"本地","isbuiltin"=>"内置","apikeyenvironment"=>"密钥环境变量","imagepath"=>"图片路径","meetingimagepath"=>"会议图片","textstate"=>"文字识别状态","texterror"=>"文字识别错误","indexingcomplete"=>"索引完成","endtimestamp"=>"结束时间",_=>key};
+    string Label(string key)=>!style.Chinese?key:key.ToLowerInvariant() switch {"platform"=>"平台","architecture"=>"架构","root" or "datadir"=>"资料库目录","format"=>"格式","maccore"=>"macOS 引擎","windowsapp"=>"Windows 桌面引擎","archivedecoder"=>"归档图片解码器","ocrengine"=>"OCR 引擎","nativeruntimeroot"=>"运行库目录","recording"=>"录制","automaticallypaused"=>"自动暂停","reason" or "pausereason"=>"原因","owner"=>"所有者","mode"=>"模式","captured"=>"已采集","sessionid"=>"会话 ID","error"=>"错误","completed"=>"已完成","skipped"=>"跳过","savedbytes"=>"图片节省空间","packedtiles"=>"已打包图块","preservedoriginals"=>"保留的原始图片","packsavedbytes"=>"图块占用减少（负值表示分配开销）","videobackedimages"=>"保留的视频帧图片","imagecodec"=>"图片编码","tilestorage"=>"图块存储","integrity"=>"完整性","images"=>"图片","video"=>"视频","audio"=>"音频","models"=>"模型","index"=>"索引","other"=>"其他","count"=>"数量","removed" or "removedframes"=>"已删除","bytes"=>"大小","keepstarred"=>"保留收藏","settingspath"=>"设置文件","chat"=>"对话模型","speech"=>"语音模型","provider"=>"提供方","baseurl"=>"服务地址","model"=>"模型","islocal"=>"本地","isbuiltin"=>"内置","apikeyenvironment"=>"密钥环境变量","imagepath"=>"图片路径","meetingimagepath"=>"会议图片","textstate"=>"文字识别状态","texterror"=>"文字识别错误","indexingcomplete"=>"索引完成","endtimestamp"=>"结束时间",_=>key};
     public void Error(string code,string message,object? details,int exit)
     {
         Line(style.Failure(T("recall failed","recall 执行失败")+$" ({TerminalText.Clean(code)}, {exit})"));Text(message);

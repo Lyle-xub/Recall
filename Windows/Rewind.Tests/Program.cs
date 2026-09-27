@@ -16,6 +16,8 @@ try
     if (args.Contains("--archive-only"))
     {
         ArchiveFramesTests.Run(Assert, root);
+        CompactOcrRegionsTests.Run(Assert);
+        VisualArchiveStorageTests.Run(Assert, root);
         Console.WriteLine($"PASS: {tests} targeted archive metadata checks.");
         return;
     }
@@ -28,6 +30,8 @@ try
     }
     RhineMotionTests.Run(Assert);
     ArchiveFramesTests.Run(Assert, root);
+    CompactOcrRegionsTests.Run(Assert);
+    VisualArchiveStorageTests.Run(Assert, root);
     DataDirectoryMigrationTests.Run(Assert, root);
     await RecordingControlTests.Run(Assert);
     await PreviewLoadTests.Run(Assert);

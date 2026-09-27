@@ -21,18 +21,27 @@ public static class ImageArchive
             image.Save(stream, format);
         return stream.ToArray();
     }
+    static void VerifyManifest(string path, byte[] expected)
+    {
+        if (new FileInfo(path).Length != expected.Length || !File.ReadAllBytes(path).AsSpan().SequenceEqual(expected))
+            throw new InvalidDataException("The screenshot manifest failed verification. Original captures were retained.");
+    }
     static void Atomic(string path, byte[] bytes)
     {
-        if (File.Exists(path))
-            return;
+        if (File.Exists(path)) { VerifyManifest(path, bytes); return; }
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var temporary = path + "." + Guid.NewGuid() + ".tmp";
-        File.WriteAllBytes(temporary, bytes);
         try
         {
-            File.Move(temporary, path, false);
+            using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                file.Write(bytes);
+                file.Flush(true);
+            }
+            try { File.Move(temporary, path, false); }
+            catch (IOException) when (File.Exists(path)) { }
+            VerifyManifest(path, bytes);
         }
-        catch (IOException) when (File.Exists(path)) { }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
     public static string Pack(string root, Bitmap image)
@@ -41,6 +50,8 @@ public static class ImageArchive
         {
             if ((long)image.Width * image.Height > 40_000_000 || image.Width > 16000 || image.Height > 16000)
                 throw new InvalidDataException("The screenshot is too large to archive.");
+            using var packs = new TilePackStore(root, writable: true);
+            var payloads = new List<TilePayload>();
             var tiles = new List<ScreenTile>();
             for (var y = 0; y < image.Height; y += 384)
                 for (var x = 0; x < image.Width; x += 384)
@@ -55,7 +66,7 @@ public static class ImageArchive
                     }
                     finally { tile.UnlockBits(data); }
                     var key = $"{root}/{width}x{height}/" + Convert.ToHexString(SHA256.HashData(pixels));
-                    if (!encoded.TryGetValue(key, out var relative) || !File.Exists(Path.Combine(root, relative)))
+                    if (!encoded.TryGetValue(key, out var relative) || packs.ReadTile(relative) == null)
                     {
                         var png = Encode(tile, ImageFormat.Png);
                         var jpg = Encode(tile, ImageFormat.Jpeg);
@@ -63,7 +74,7 @@ public static class ImageArchive
                         var lossy = opaque && jpg.Length * 1.12 < png.Length;
                         var bytes = lossy ? jpg : png;
                         relative = "frames/tiles/t1-" + Convert.ToHexString(SHA256.HashData(bytes)) + (lossy ? ".jpg" : ".png");
-                        Atomic(Path.Combine(root, relative), bytes);
+                        payloads.Add(new TilePayload(relative, bytes));
                         encoded[key] = relative;
                         order.Enqueue(key);
                         while (order.Count > 384)
@@ -71,6 +82,7 @@ public static class ImageArchive
                     }
                     tiles.Add(new(relative, x, y, width, height));
                 }
+            packs.Install(payloads);
             var manifest = JsonSerializer.SerializeToUtf8Bytes(new ScreenManifest(1, image.Width, image.Height, tiles));
             var path = "frames/pack1-" + Convert.ToHexString(SHA256.HashData(manifest)) + ".recallframe";
             Atomic(Path.Combine(root, path), manifest);
@@ -82,9 +94,12 @@ public static class ImageArchive
         var path = Path.GetFullPath(Path.Combine(root, relative));
         if (!path.StartsWith(Path.GetFullPath(root) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Invalid image path.");
+        if (Path.GetExtension(path).Equals(".recallvideo", StringComparison.OrdinalIgnoreCase))
+            return VisualVideoReader.Load(root, VisualArchive.Read(path), maxEdge);
         if (Path.GetExtension(path) != ".recallframe")
             return new Bitmap(path);
         var manifest = ScreenManifest.Read(path);
+        using var packs = File.Exists(Path.Combine(root, "frames", "packs", "catalog.sqlite")) ? new TilePackStore(root) : null;
         // Assemble at native resolution. Scaling each 384px tile independently
         // makes bicubic interpolation sample its own edge instead of the next
         // tile, which draws a visible grid across otherwise continuous images.
@@ -95,12 +110,19 @@ public static class ImageArchive
             {
                 g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
                 g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
-                foreach (var tile in manifest.Tiles)
+                var tilesByPath = manifest.Tiles.GroupBy(t => t.Path).ToDictionary(group => group.Key, group => group.ToArray());
+                var payloads = packs != null ? packs.ReadTiles(tilesByPath.Keys) : tilesByPath.Keys.Select(tile => new TilePayload(tile,
+                    TilePackStore.ReadTile(root, tile) ?? throw new InvalidDataException("Screenshot block is missing.")));
+                foreach (var payload in payloads)
                 {
-                    using var part = new Bitmap(Path.Combine(root, tile.Path));
-                    if (part.Width != tile.Width || part.Height != tile.Height)
-                        throw new InvalidDataException("Screenshot tile dimensions differ.");
-                    g.DrawImageUnscaled(part, tile.X, tile.Y);
+                    using var stream = new MemoryStream(payload.Data, writable: false);
+                    using var part = new Bitmap(stream);
+                    foreach (var tile in tilesByPath[payload.Path])
+                    {
+                        if (part.Width != tile.Width || part.Height != tile.Height)
+                            throw new InvalidDataException("Screenshot tile dimensions differ.");
+                        g.DrawImageUnscaled(part, tile.X, tile.Y);
+                    }
                 }
             }
             if (maxEdge <= 0 || Math.Max(manifest.Width, manifest.Height) <= maxEdge)

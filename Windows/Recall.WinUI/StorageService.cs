@@ -43,7 +43,10 @@ internal static class StorageService
         {
         long saved = 0;
         var frames = await Task.Run(store.MetadataFrames, ct);
-        var images = frames.Where(f => f.ImageQuality == null || f.ImageQuality > .5).SelectMany(f => new[] { f.ImagePath, f.MeetingImagePath }).Where(x => x != null).Cast<string>().Distinct().ToArray();
+        var referencedVideos = VisualDependencies(store, frames);
+        var unifiedSessions = (await Task.Run(store.Sessions, ct)).Where(s => s.UnifiedVisualArchive).Select(s => s.Id).ToHashSet();
+        var images = frames.Where(f => f.VisualTicks == null && !unifiedSessions.Contains(f.SessionId ?? "") &&
+            f.TextState is RecognitionState.Complete or RecognitionState.Empty && (f.ImageQuality == null || f.ImageQuality > .5)).SelectMany(f => new[] { f.ImagePath, f.MeetingImagePath }).Where(x => x != null).Cast<string>().Where(x => !x.EndsWith(".ocr.png", StringComparison.OrdinalIgnoreCase) && !x.EndsWith(".recallvideo", StringComparison.OrdinalIgnoreCase) && !x.EndsWith(".recallframe", StringComparison.OrdinalIgnoreCase)).Distinct().ToArray();
         int count = 0;
         foreach (var image in images)
         {
@@ -54,14 +57,36 @@ internal static class StorageService
             var temporary = path + ".opt.jpg";
             try
             {
-                saved += await Task.Run(() => { using (var bitmap = new System.Drawing.Bitmap(path)) CaptureService.SaveJpeg(bitmap, temporary, .5); var before = new FileInfo(path).Length; var after = new FileInfo(temporary).Length; if (after >= before) { store.MarkOptimized(image); return 0L; } File.Move(temporary, path, true); store.MarkOptimized(image); return before - after; }, ct);
+                saved += await Task.Run(() =>
+                {
+                    using (var bitmap = ImageArchive.Load(store.Root, image))
+                    {
+                        CaptureService.SaveJpeg(bitmap, temporary, .5);
+                        using var verified = new System.Drawing.Bitmap(temporary);
+                        if (verified.Size != bitmap.Size) throw new InvalidDataException("Optimized image dimensions changed; the source was retained.");
+                    }
+                    var before = new FileInfo(path).Length;
+                    var after = new FileInfo(temporary).Length;
+                    if (after >= before) { store.MarkOptimized(image); return 0L; }
+                    var replacement = "frames/optimized-" + Guid.NewGuid().ToString("N") + ".jpg";
+                    var destination = store.SafePath(replacement)!;
+                    store.WithMediaLock(() =>
+                    {
+                        File.Move(temporary, destination);
+                        using (var durable = new FileStream(destination, FileMode.Open, FileAccess.ReadWrite, FileShare.Read)) durable.Flush(true);
+                        store.ReplaceImage(image, replacement, .5);
+                        if (!store.ReferencesImage(image)) File.Delete(path);
+                    });
+                    return before - after;
+                }, ct);
             }
             finally { if (File.Exists(temporary)) File.Delete(temporary); }
         }
         foreach (var session in await Task.Run(store.Sessions, ct))
         {
             ct.ThrowIfCancellationRequested();
-            if (session.EndedAt == null || store.SafePath(session.VideoPath) is not { } path || !File.Exists(path))
+            if (session.UnifiedVisualArchive || referencedVideos.Contains(session.VideoPath) ||
+                session.EndedAt == null || store.SafePath(session.VideoPath) is not { } path || !File.Exists(path))
                 continue;
             progress.Report("Optimizing video · " + session.StartedAt.ToLocalTime().ToString("MMM d HH:mm"));
             var source = await StorageFile.GetFileFromPathAsync(path);
@@ -87,16 +112,58 @@ internal static class StorageService
                 await prepared.TranscodeAsync().AsTask(ct);
                 var before = new FileInfo(path).Length;
                 var after = new FileInfo(target.Path).Length;
+                var encoded = await target.Properties.GetVideoPropertiesAsync();
+                var encodedProfile = await MediaEncodingProfile.CreateFromFileAsync(target);
+                if (!session.SeparateAudio && session.HasAudio && encodedProfile.Audio == null)
+                    throw new InvalidDataException("Optimized video lost its audio track; the original was retained.");
+                var durationTolerance = TimeSpan.FromSeconds(2);
+                if (encoded.Width != profile.Video.Width || encoded.Height != profile.Video.Height ||
+                    encoded.Duration <= TimeSpan.Zero || (encoded.Duration - props.Duration).Duration() > durationTolerance)
+                    throw new InvalidDataException("Optimized video validation failed; the original recording was retained.");
+                // Decode the first actual sample as well as inspecting metadata.
+                using (var check = VisualVideoReader.Load(Path.GetDirectoryName(output.Path)!,
+                    new VisualArchive(1, "recordings/" + target.Name, 0, checked((int)encoded.Width), checked((int)encoded.Height)), 64)) { }
                 if (after < before)
                 {
-                    File.Move(target.Path, path, true);
+                    store.WithMediaLock(() =>
+                    {
+                        if (VisualDependencies(store, store.MetadataFrames()).Contains(session.VideoPath))
+                            throw new InvalidOperationException("A card now depends on this video; its original was retained.");
+                        File.Move(target.Path, path, true);
+                    });
                     saved += before - after;
                 }
             }
             finally { if (File.Exists(target.Path)) File.Delete(target.Path); }
         }
-        return saved;
+        TileStorageBatch packed;
+        do
+        {
+            ct.ThrowIfCancellationRequested();
+            progress.Report("Packing existing screenshot blocks");
+            packed = await Task.Run(() => store.PackLegacyTiles(128), ct);
+            saved += packed.SavedBytes;
+        } while (packed.More);
+        ct.ThrowIfCancellationRequested();
+        progress.Report("Compacting text recognition and search index");
+        var indexPath = Path.Combine(store.Root, "memory.sqlite");
+        var indexBefore = new FileInfo(indexPath).Length;
+        await Task.Run(store.CompactIndex, ct);
+        saved += indexBefore - new FileInfo(indexPath).Length;
+        return Math.Max(0, saved);
         }
         finally { optimizationGate.Release(); }
     }
+    private static HashSet<string> VisualDependencies(MemoryStore store, IEnumerable<MemoryFrame> frames)
+    {
+        var videos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in frames.SelectMany(f => new[] { f.ImagePath, f.MeetingImagePath }).Where(p => p?.EndsWith(".recallvideo", StringComparison.OrdinalIgnoreCase) == true).Distinct())
+        {
+            var reference = VisualArchive.Read(store.SafePath(path!) ?? throw new InvalidDataException("Invalid visual archive path."));
+            reference.Validate(store.Root);
+            videos.Add(reference.Video);
+        }
+        return videos;
+    }
+
 }

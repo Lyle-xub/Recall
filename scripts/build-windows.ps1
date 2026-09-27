@@ -18,7 +18,7 @@ foreach ($required in @('Recall.exe','resources.pri','Assets/Recall.ico','Assets
 $licenseDestination = Join-Path $output 'licenses/NuGet'
 New-Item -ItemType Directory -Force -Path $licenseDestination | Out-Null
 $packageCache = if ($env:NUGET_PACKAGES) { $env:NUGET_PACKAGES } else { Join-Path $env:USERPROFILE '.nuget/packages' }
-foreach ($package in @('microsoft.ml.onnxruntime','opencvsharp4','opencvsharp4.runtime.win','microsoft.windowsappsdk','microsoft.windowsappsdk.winui','microsoft.windowsappsdk.runtime','microsoft.graphics.win2d','tesseract','naudio','screenrecorderlib')) {
+foreach ($package in @('microsoft.ml.onnxruntime','opencvsharp4','opencvsharp4.runtime.win','microsoft.windowsappsdk','microsoft.windowsappsdk.winui','microsoft.windowsappsdk.runtime','microsoft.graphics.win2d','tesseract','naudio')) {
     Get-ChildItem (Join-Path $packageCache $package) -Recurse -File | Where-Object { $_.Name -match 'license|notice|copying' } | ForEach-Object { Copy-Item $_.FullName (Join-Path $licenseDestination "$package-$($_.Directory.Name)-$($_.Name)") -Force }
 }
 if (-not $SkipSmoke) { & "$PSScriptRoot/test-windows-smoke.ps1" -Executable "$output/Recall.exe" }

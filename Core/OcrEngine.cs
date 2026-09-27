@@ -8,7 +8,7 @@ public static class OcrEngine
     {
         image = Path.GetFullPath(image);
         if (!File.Exists(image)) throw new FileNotFoundException("Image not found.", image);
-        if (Path.GetExtension(image).ToLowerInvariant() is ".recallframe" or ".recallvisual") throw new RecallException("unsupported_media", "Use the desktop indexing service for packed media, or export it as PNG first.");
+        if (Path.GetExtension(image).ToLowerInvariant() is ".recallframe" or ".recallvisual" or ".recallvideo") throw new RecallException("unsupported_media", "Materialize the archive as an image before recognition, or use the Recall desktop/CLI indexing service.");
         var engine = Environment.GetEnvironmentVariable("RECALL_TESSERACT") ?? "tesseract";
         var result = await ChildProcess.Run(engine, [image, "stdout", "-l", language, "--psm", "11", "tsv"], null, ct, 60);
         if (result.ExitCode != 0) throw new RecallException("ocr_failed", "Tesseract failed. Check the image and installed language data.");

@@ -108,18 +108,26 @@ public static class CliApplication
                 a.Allow("", 3); return await client.Call(a.Words[1], new { id = a.Words[2] }, ct);
             case "records import":
                 a.Allow("image text-file title app timestamp", 2);
-                return await client.Call("import", new { image = Path.GetFullPath(a.Require("image")), text = a.Get("text-file") is { } textFile ? await File.ReadAllTextAsync(textFile, ct) : "", title = a.Get("title"), app = a.Get("app"), timestamp = a.Date("timestamp") }, ct);
+                var original = Path.GetFullPath(a.Require("image"));
+                using (var imported = await PortableImage.OpenFile(original, ct:ct))
+                    return await client.Call("import", new { image = imported.Path, text = a.Get("text-file") is { } textFile ? await File.ReadAllTextAsync(textFile, ct) : "", title = a.Get("title") ?? Path.GetFileNameWithoutExtension(original), app = a.Get("app"), timestamp = a.Date("timestamp") }, ct);
             case "records export": a.Allow(Arguments.Filters + " output", 2); var filter = a.Filter(); filter["output"] = Path.GetFullPath(a.Require("output")); return await client.Call("export", filter, ct);
             case "sessions list": a.Allow("", 2); return await client.Call("sessions", new { }, ct);
             case "sessions transcript": a.Allow("", 3); return await client.Call("transcript", new { id = a.Words[2] }, ct);
-            case "ocr image": a.Allow("language", 3); var recognized = await OcrEngine.Recognize(a.Words[2], a.Get("language") ?? "eng", ct); return new { recognized.Text, recognized.Regions };
+            case "ocr image":
+                a.Allow("language", 3);
+                using (var image = await PortableImage.OpenFile(a.Words[2], a.Get("data-dir") ?? Environment.GetEnvironmentVariable("RECALL_DATA_DIR"), ct))
+                {
+                    var recognized = await OcrEngine.Recognize(image.Path, a.Get("language") ?? "eng", ct);
+                    return new { recognized.Text, recognized.Regions };
+                }
             case "index run":
                 a.Allow("id language limit", 2);
                 return await IndexJob.Start(client,a,progress,ct);
             case "recording status":
                 a.Allow("", 2); return await OwnerStatus(client.Root,"recording-status",ct) ?? Wire.Element(new { available=false,requested=false,active=false,reason="owner_not_running" });
             case "recording start":
-                a.Allow("",2); await HeadlessService.Ensure(client,ct);return await LibraryControlClient.Send(client.Root,"recording-start",new {},ct);
+                a.Allow("",2); await HeadlessService.Ensure(client,ct,preferWindowsNative:true);return await LibraryControlClient.Send(client.Root,"recording-start",new {},ct);
             case "recording stop":
                 a.Allow("",2);return await LibraryControlClient.Send(client.Root,"recording-stop",new {},ct);
             case "service start": a.Allow("",2);await HeadlessService.Ensure(client,ct);return LibraryControlClient.Owner(client.Root)!.Value;
@@ -162,7 +170,7 @@ public static class CliApplication
             case "models list": a.Allow(ModelOptions, 2); return await ModelClient.Models(Profile(client.Root, a, false), await Key(a, false, ct), ct);
             case "apps": a.Allow("", 1); return await client.Call("apps", new { }, ct);
             case "doctor":
-                a.Allow("", 1); return new { platform = System.Runtime.InteropServices.RuntimeInformation.OSDescription, architecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString(), root = client.Root, format = LibraryFormats.Detect(client.Root).ToString(), macCore = LibraryClient.MacHelper, owner = LibraryControlClient.Owner(client.Root), recording = "Native macOS headless recorder; portable whole-display screenshots require available display/backend, excluded-apps=[] and audio disabled", ocrEngine = Environment.GetEnvironmentVariable("RECALL_TESSERACT") ?? "tesseract (PATH)", nativeRuntimeRoot = Environment.GetEnvironmentVariable("REWIND_RUNTIME_ROOT") ?? Path.Combine(AppContext.BaseDirectory, "runtimes") };
+                a.Allow("", 1); return new { platform = System.Runtime.InteropServices.RuntimeInformation.OSDescription, architecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString(), root = client.Root, format = LibraryFormats.Detect(client.Root).ToString(), macCore = LibraryClient.MacHelper, windowsApp = WindowsDesktop.Discover(), archiveDecoder = Environment.GetEnvironmentVariable("RECALL_FFMPEG") ?? "ffmpeg (PATH; exact video frames and packed tiles)", owner = LibraryControlClient.Owner(client.Root), recording = "Native macOS helper or installed Windows desktop preferred for recording start; otherwise portable whole-display screenshots require available display/backend, excluded-apps=[] and audio disabled", ocrEngine = Environment.GetEnvironmentVariable("RECALL_TESSERACT") ?? "tesseract (PATH)", nativeRuntimeRoot = Environment.GetEnvironmentVariable("REWIND_RUNTIME_ROOT") ?? Path.Combine(AppContext.BaseDirectory, "runtimes") };
             default: throw new RecallException("usage", "Unknown command. Use recall --help.");
         }
     }

@@ -74,7 +74,19 @@ public partial class MainWindow : Window {
     }
     private static Brush BrushOf(string hex)=>new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex));
     internal static Brush AppColor(string app)=>BrushOf(app switch{"Chrome"=>"#EC9B34","Messages"=>"#52CE62","Word"=>"#366CBC","Slack"=>"#632276","Keynote"=>"#399FED",_=>"#2385EF"});
-    internal static BitmapImage LoadImage(string path,int decodeWidth=0){var image=new BitmapImage();image.BeginInit();image.CacheOption=BitmapCacheOption.OnLoad;if(decodeWidth>0)image.DecodePixelWidth=decodeWidth;image.UriSource=new Uri(Path.GetFullPath(path));image.EndInit();image.Freeze();return image;}
+    internal static BitmapImage LoadImage(string path,int decodeWidth=0)
+    {
+        var image=new BitmapImage();image.BeginInit();image.CacheOption=BitmapCacheOption.OnLoad;
+        if(decodeWidth>0)image.DecodePixelWidth=decodeWidth;
+        if(Path.GetExtension(path) is ".recallframe" or ".recallvideo")
+        {
+            var root=Directory.GetParent(Path.GetDirectoryName(path)!)!.FullName;
+            using var stream=new MemoryStream(ImageArchive.Display(root,Path.GetRelativePath(root,path).Replace('\\','/'),decodeWidth));
+            image.StreamSource=stream;image.EndInit();
+        }
+        else {image.UriSource=new Uri(Path.GetFullPath(path));image.EndInit();}
+        image.Freeze();return image;
+    }
     private void Reload(){if(!ready)return;try{
         frames=Store.Frames(SearchBox.Text,appFilter,starred,trash,demo,since);timeline=Store.Frames(trash:trash,demo:demo,since:since,limit:2000).OrderBy(x=>x.Timestamp).ToList();
         if(selected!=null&&!timeline.Any(f=>f.Id==selected.Id))LoadTimeline(selected.Timestamp);

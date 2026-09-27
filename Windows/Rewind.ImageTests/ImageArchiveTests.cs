@@ -14,7 +14,8 @@ internal static class ImageArchiveTests
         g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
         foreach (var tile in manifest.Tiles)
         {
-            using var part = new Bitmap(Path.Combine(root, tile.Path));
+            using var stream = new MemoryStream(TilePackStore.ReadTile(root, tile.Path)!);
+            using var part = new Bitmap(stream);
             var left = (int)(tile.X * scale);
             var top = (int)(tile.Y * scale);
             var right = (int)((tile.X + tile.Width) * scale);
