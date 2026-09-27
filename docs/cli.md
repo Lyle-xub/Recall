@@ -27,6 +27,63 @@ For source development, use `dotnet run --project CLI -- ...`. Native Mac librar
 also require `swift build --package-path macOS --product Recall` and
 `RECALL_MAC_CORE` pointing to the resulting `macOS/.build/debug/Recall` executable.
 
+## Human output and scripting (0.5.1)
+
+The default output is designed for reading in a terminal. Search and list show
+numbered records with complete IDs, time/application, a shortened title and a short
+OCR excerpt around the match. A match in a title, metadata or transcript does not
+pretend that the OCR excerpt matched. `records get ID` shows the full OCR body and
+record metadata; OCR region coordinates and full machine data remain available
+through `--json`.
+
+```sh
+recall search "Aurora"                     # 10 records, with a next-page command
+recall search "Aurora" --limit 20 --offset 20
+recall records get MEMORY_ID
+recall help                              # grouped overview
+recall help search                       # topic details
+recall search --help                     # equivalent topic help
+recall records --help                    # browse a command group
+recall --lang zh search "会议"
+recall --lang en --ascii --color never doctor
+recall search "Aurora" --json             # unchanged JSON envelope; default 100
+```
+
+Human pagination may read one extra record to check whether another page exists;
+the probe is never displayed or described as a total match count. The printed
+next-page command preserves the query, all filters, sort order, explicit page size
+and effective absolute data directory. Commands are quoted for POSIX shells on
+macOS/Linux and PowerShell on Windows; the output identifies the shell. No pager,
+interactive state or persistent result cache is introduced. Concurrent library
+changes can affect offset-based pages; the CLI does not claim a frozen snapshot
+across separate commands.
+
+Global presentation options are `--color auto|always|never`, `--ascii` and
+`--lang zh|en`. Automatic color checks stdout and stderr separately. Redirection,
+`NO_COLOR` and `TERM=dumb` disable automatic ANSI; explicit `--color always` can
+override that policy. Non-terminal output has no heading icons by default.
+`--ascii` replaces generated icons, separators and ellipses, while preserving
+Unicode in the user's records. Titles and excerpts respect terminal display width,
+including CJK, combining marks and emoji. Full IDs and copyable commands are never
+truncated; they can naturally wrap in a narrow terminal. `COLUMNS` overrides detected
+width, otherwise the CLI reads the active output/error terminal width without
+changing its mode. The fallback is 80 columns.
+
+Human labels and help follow `--lang`, then `LC_ALL`, `LC_MESSAGES`, `LANG`, and the
+system UI culture; Chinese locales select Chinese, other locales select English.
+Command names and JSON keys remain English. `--language` belongs to OCR and is
+independent of the interface language. Engine-originated diagnostics retain their
+original wording, surrounded by localized guidance.
+
+Human output removes terminal control sequences (including ANSI/OSC clipboard
+controls and bidirectional overrides) from library text before displaying it.
+JSON preserves original data and contains one success/error envelope on stdout,
+without ANSI or decorative output even when attached to a terminal. Existing JSON
+progress events remain on stderr. Human OCR progress is summarized on stderr;
+long task histories and catalog/list overviews explicitly report omitted entries.
+Add `--json` when invoking a command for full structured results; avoid repeating
+a mutation merely to change its display format.
+
 ## Library selection and compatibility
 
 | Platform | Default library |
@@ -63,8 +120,8 @@ recall records export --output /path/to/new-export --app Research --limit 1000
 
 `records star` toggles the existing star state. Export requires a new or empty
 directory outside the live library and uses the existing desktop export format.
-Default list/export limit is 100; use `--limit` (maximum 10,000) and `--offset` for
-pages. Filters include `--app`, `--since`, `--until`, `--starred`, `--trash`, `--demo`,
+Human search/list output defaults to 10 records; JSON search/list and all exports
+still default to 100. Use `--limit` (maximum 10,000) and `--offset` for pages. Filters include `--app`, `--since`, `--until`, `--starred`, `--trash`, `--demo`,
 `--query` and `--ascending`. Prefer ISO-8601 timestamps with a timezone.
 
 ## Recording, indexing and storage

@@ -5,103 +5,62 @@ namespace Recall.Cli;
 
 public static class CliApplication
 {
-    public const string Help = """
-Recall CLI — shared desktop library access (0.5.0)
+    public static string Help=>string.Join(Environment.NewLine,CommandHelp.Lines("",new TerminalStyle(new Arguments(["--lang","en"]),new(false,false,80,_=>null))));
 
-Usage: recall <command> [arguments] [options]
-Global: --data-dir PATH, --json, --help, --version
-Default data directory is the desktop application's RewindReplica directory.
-RECALL_DATA_DIR overrides that default. Existing libraries are never initialized
-or migrated implicitly. Read commands work without the desktop running.
-
-  library info                         Show detected library and owner
-  library init [--format macos|windows] Explicitly create a new library
-  records list [filters]               List memories (default 100, max 10000)
-  search QUERY [filters]               Search shared OCR, metadata and transcripts
-  records get ID                       Read a complete memory
-  records import --image PATH [--text-file PATH] [--app NAME] [--title TEXT]
-                 [--timestamp ISO]     Add a screenshot to the application's library
-  records star|trash|restore ID         Toggle a star, trash or restore one memory
-  records export --output DIR [filters] Export selected metadata and owned media
-  apps                                 List recorded applications
-  sessions list                        Read recording sessions
-  sessions transcript ID               Read a session's transcript
-  ocr image PATH [--language eng]       Recognize a local image using Tesseract
-  index run [--id ID] [--limit N] [--language eng]
-                                       Run a durable, resumable per-record OCR job
-  recording status|start|stop           Control desktop or start a headless recorder
-  service start|stop                    Start idle headless owner / stop headless owner
-  tasks status                         Inspect durable OCR jobs and owner request receipts
-  tasks resume ID                      Resume an interrupted or failed OCR job
-  tasks result ID                      Read an OCR job or a timed-out request result
-  storage stats|check                  Measure storage / check SQLite integrity
-  storage compact --yes                Compact the shared search index
-  storage optimize                     Optimize media using the current owner or offline
-  storage cleanup --scope trash|older7|older30|all [--include-starred]
-                  [--dry-run | --yes]  Preview by default; --yes permanently deletes
-  config show                          Read desktop model configuration (no secrets)
-  config set KEY VALUE                  Set capture-interval, retention-days, system-audio,
-                                       microphone, transcription-enabled, excluded-apps
-  models catalog                       List built-in model downloads and readiness
-  models download ID                   Resume and verify a catalog model download
-  models remove ID --yes               Remove a built-in model while desktop is closed
-  models list [model options]          Query the configured model service
-  ask QUESTION [--app NAME] [--since ISO] [model options]
-  transcribe PATH [--session ID] [--save --yes] [model options]
-  doctor                               Show platform, library, owner and engine status
-
-Filters: --app NAME --since ISO --until ISO --starred --trash --demo
-         --limit N --offset N --ascending (--query TEXT on records commands)
-Model options: --endpoint URL --model NAME --online --builtin --key-env NAME
-Online endpoints require HTTPS and explicit --online when overridden.
-API keys use RECALL_API_KEY / --key-env, then the desktop credential store.
-Endpoint overrides never receive saved desktop keys. Keys are not printed.
-Engines: RECALL_TESSERACT, RECALL_MAC_CORE, REWIND_RUNTIME_ROOT, REWIND_MODEL_ROOT.
-Recording starts a background owner when needed and never opens a Recall window.
-Native macOS retains desktop recording and exclusions. Portable capture uses FFmpeg
-(X11/Windows), grim (Wayland), or screencapture (macOS); audio and selected displays
-are unsupported. It refuses nonempty excluded-apps; explicitly setting [] permits
-whole-display capture. RPC waits are bounded; inspect tasks result after a timeout.
-Exit codes: 0 success, 2 usage, 3 not found, 4 unavailable/unsupported,
-            5 busy/conflict/confirmation, 6 operation failed, 130 cancelled.
-""";
-
-    public static async Task<int> Run(string[] arguments, TextWriter output, TextWriter error, CancellationToken ct = default)
+    public static async Task<int> Run(string[] arguments, TextWriter output, TextWriter error, CancellationToken ct = default, TerminalEnvironment? terminal = null)
     {
-        var json = arguments.Contains("--json");
+        var json = arguments.Contains("--json");Arguments? a=null;
+        terminal??=TerminalEnvironment.Detect(output,error,measureWidth:!json);
+        TerminalStyle? humanStyle=null,errorStyle=null;
         try
         {
-            var a = new Arguments(arguments);
-            json = a.Has("json");
-            if (a.Has("help") || a.Words.Count == 0 && !a.Has("version"))
-            { if (json) await output.WriteLineAsync(JsonSerializer.Serialize(new { ok = true, result = new { help = Help } }, Wire.Json)); else await output.WriteLineAsync(Help); return 0; }
-            if (a.Has("version")) { a.Allow("version", 0); await Print(output, json, new { version = "0.5.0" }); return 0; }
-            var root = Path.GetFullPath(a.Get("data-dir") ?? LibraryClient.DefaultRoot);
-            AppPaths.DataRoot = root;
-            var client = new LibraryClient(root);
-            var result = await Execute(a, client, error, ct);
-            await Print(output, json, result);
+            a = new Arguments(arguments);json=a.Has("json");
+            humanStyle=new(a,terminal);errorStyle=new(a,terminal,true);
+            if(CommandHelp.Requested(a))
+            {
+                var topic=CommandHelp.Resolve(a);
+                var lines=CommandHelp.Lines(topic,humanStyle);
+                if(json)await PrintJson(output,new {help=string.Join(Environment.NewLine,lines)});
+                else new HumanOutput(output,humanStyle,a).Help(lines);
+                return 0;
+            }
+            if(a.Has("version"))
+            {a.Allow("version",0);if(json)await PrintJson(output,new {version=CommandHelp.Version});else new HumanOutput(output,humanStyle,a).Render(new {version=CommandHelp.Version});return 0;}
+            var root=Path.GetFullPath(a.Get("data-dir")??LibraryClient.DefaultRoot);
+            AppPaths.DataRoot=root;
+            var client=new LibraryClient(root);
+            var progress=json?error:new HumanOutput(error,errorStyle,a).Progress();
+            var result=await Execute(a,client,progress,ct);
+            if(json)await PrintJson(output,result);else new HumanOutput(output,humanStyle,a).Render(result);
             return 0;
         }
-        catch (Exception failure)
+        catch(Exception failure)
         {
             var code = failure switch { RecallException e => e.Code, OperationCanceledException => "cancelled", FileNotFoundException or DirectoryNotFoundException => "not_found", Win32Exception => "engine_missing", JsonException or FormatException => "invalid_data", UnauthorizedAccessException => "permission_denied", _ => "operation_failed" };
             var exit = code switch { "usage" => 2, "not_found" => 3, "unsupported" or "unsupported_schema" or "unsupported_media" or "platform_unavailable" or "capture_unavailable" or "engine_missing" or "service_unavailable" => 4, "busy" or "legacy_owner" or "conflict" or "confirmation_required" => 5, "cancelled" => 130, _ => 6 };
-            var message = failure is OperationCanceledException ? "Operation cancelled." : failure.Message;
-            if (json) await output.WriteLineAsync(JsonSerializer.Serialize(new { ok = false, error = new { code, message, exitCode = exit, details = (failure as RecallException)?.Details } }, Wire.Json));
-            else
-            {
-                await error.WriteLineAsync($"recall: {code}: {message}");
-                if(failure is RecallException {Details:not null} recall)await error.WriteLineAsync(JsonSerializer.Serialize(recall.Details,new JsonSerializerOptions(Wire.Json){WriteIndented=true}));
-            }
+            var message=failure is OperationCanceledException?"Operation cancelled.":failure.Message;
+            if(json)await output.WriteLineAsync(JsonSerializer.Serialize(new {ok=false,error=new {code,message,exitCode=exit,details=(failure as RecallException)?.Details}},Wire.Json));
+            else new HumanOutput(error,errorStyle??new TerminalStyle(null,terminal,true),a).Error(code,message,(failure as RecallException)?.Details,exit);
             return exit;
         }
-        finally { LocalInference.Stop(); }
+        finally {LocalInference.Stop();}
     }
-    static Task Print(TextWriter writer, bool json, object result)
+    static Task PrintJson(TextWriter writer,object result)
     {
-        var element = result is JsonElement e ? e : Wire.Element(result);
-        return writer.WriteLineAsync(json ? JsonSerializer.Serialize(new { ok = true, result = element }, Wire.Json) : JsonSerializer.Serialize(element, new JsonSerializerOptions(Wire.Json) { WriteIndented = true }));
+        var element=result is JsonElement e?e:Wire.Element(result);
+        return writer.WriteLineAsync(JsonSerializer.Serialize(new {ok=true,result=element},Wire.Json));
+    }
+    static async Task<object> List(Arguments a,LibraryClient client,string? query,CancellationToken ct)
+    {
+        var filter=a.Filter(a.Has("json")?100:10);if(query!=null)filter["query"]=query;
+        if(a.Has("json"))return await client.Call("list",filter,ct);
+        int limit=(int)filter["limit"]!,offset=(int)filter["offset"]!;
+        filter["limit"]=Math.Min(10000,limit+1);
+        var rows=(await client.Call("list",filter,ct)).EnumerateArray().Select(e=>e.Clone()).ToArray();
+        bool more=rows.Length>limit;
+        if(limit==10000 && rows.Length==limit && (long)offset+limit<=int.MaxValue)
+        {filter["limit"]=1;filter["offset"]=offset+limit;more=(await client.Call("list",filter,ct)).GetArrayLength()>0;}
+        return new HumanPage(rows.Take(limit).ToArray(),offset,limit,more,query??a.Get("query")??"");
     }
     static void Confirm(Arguments a) { if (!a.Has("yes")) throw new RecallException("confirmation_required", "This mutation requires --yes."); }
     static async Task<object> Execute(Arguments a, LibraryClient client, TextWriter progress, CancellationToken ct)
@@ -109,7 +68,7 @@ Exit codes: 0 success, 2 usage, 3 not found, 4 unavailable/unsupported,
         var command = string.Join(' ', a.Words.Take(2));
         if (a.Words[0] == "search")
         {
-            a.Allow(Arguments.Filters.Replace("query ",""), 2); var filter = a.Filter(); filter["query"] = a.Words[1]; return await client.Call("list", filter, ct);
+            a.Allow(Arguments.Filters.Replace("query ",""), 2);return await List(a,client,a.Words[1],ct);
         }
         if (a.Words[0] == "ask")
         {
@@ -141,7 +100,7 @@ Exit codes: 0 success, 2 usage, 3 not found, 4 unavailable/unsupported,
         {
             case "library info": a.Allow("", 2); return new { root = client.Root, format = LibraryFormats.Detect(client.Root).ToString().ToLowerInvariant(), owner = LibraryControlClient.Owner(client.Root), details = await client.Call("info", new { }, ct) };
             case "library init": a.Allow("format", 2); return await client.Initialize(a.Get("format"), ct);
-            case "records list": a.Allow(Arguments.Filters, 2); return await client.Call("list", a.Filter(), ct);
+            case "records list": a.Allow(Arguments.Filters, 2); return await List(a,client,null,ct);
             case "records get": case "records star": case "records trash": case "records restore":
                 a.Allow("", 3); return await client.Call(a.Words[1], new { id = a.Words[2] }, ct);
             case "records import":

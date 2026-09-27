@@ -2,9 +2,9 @@ name: Shared library CLI
 on:
   push:
     branches: [feat/cross-platform-cli]
-    paths: ['Core/**', 'CLI/**', 'CLI.Tests/**', 'macOS/**', 'Windows/**', 'scripts/build-cli.py', 'scripts/*cli*capture*', 'docs/cli.md', '.github/workflows/cli.yml']
+    paths: ['Core/**', 'CLI/**', 'CLI.Tests/**', 'macOS/**', 'Windows/**', 'scripts/build-cli.py', 'scripts/*cli*capture*', 'scripts/test-cli-terminal.py', 'docs/cli.md', '.github/workflows/cli.yml']
   pull_request:
-    paths: ['Core/**', 'CLI/**', 'CLI.Tests/**', 'macOS/**', 'Windows/**', 'scripts/build-cli.py', 'scripts/*cli*capture*', '.github/workflows/cli.yml']
+    paths: ['Core/**', 'CLI/**', 'CLI.Tests/**', 'macOS/**', 'Windows/**', 'scripts/build-cli.py', 'scripts/*cli*capture*', 'scripts/test-cli-terminal.py', '.github/workflows/cli.yml']
   workflow_dispatch:
 jobs:
   cli:
@@ -49,6 +49,10 @@ jobs:
       - name: Real capture, OCR, maintenance and export in a private desktop
         if: runner.os == 'Linux'
         run: python scripts/test-cli-capture.py --cli release/Recall-CLI-linux-x64/recall --output .test-data/cli-capture-evidence.json
+      - name: Real terminal formatting and JSON compatibility
+        if: runner.os != 'Windows'
+        shell: bash
+        run: python scripts/test-cli-terminal.py --cli release/Recall-CLI-*/recall
       - uses: actions/upload-artifact@v4
         with:
           name: Recall-CLI-${{ runner.os }}-${{ runner.arch }}

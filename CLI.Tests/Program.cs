@@ -83,6 +83,7 @@ try
     await Run(windows, 3, "records", "get", "missing");
     Assert((await Run(windows, 0, "search", "%")).GetArrayLength() == 1, "Literal wildcard search");
     Assert((await Run(windows, 0, "search", "会议记录")).GetArrayLength() == 1, "Unicode search");
+    await HumanOutputChecks.Run(root,Assert);
     await DurableChecks.Run(root,Assert,(library,expected,words)=>Run(library,expected,words));
     using (var fakeModel = new FakeModel())
     {

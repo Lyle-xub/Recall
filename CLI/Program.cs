@@ -10,5 +10,11 @@ if(args.Length==2 && args[0]=="--internal-service")
     await HeadlessService.Serve(Path.GetFullPath(args[1]),stop.Token);return;
 }
 using var cancellation = new CancellationTokenSource();
-Console.CancelKeyPress += (_, e) => { e.Cancel = true; cancellation.Cancel(); };
-Environment.ExitCode = await CliApplication.Run(args, Console.Out, Console.Error, cancellation.Token);
+// Console.CancelKeyPress initializes the POSIX terminal (and writes mode
+// escapes) even when stdout must be pure JSON. Native signal registration
+// preserves cancellation without configuring terminal input/output modes.
+using var interrupt = OperatingSystem.IsWindows() ? null : System.Runtime.InteropServices.PosixSignalRegistration.Create(System.Runtime.InteropServices.PosixSignal.SIGINT, context => { context.Cancel = true; cancellation.Cancel(); });
+if (OperatingSystem.IsWindows()) Console.CancelKeyPress += (_, e) => { e.Cancel = true; cancellation.Cancel(); };
+var terminal = TerminalEnvironment.Detect(Console.Out, Console.Error, measureWidth: !args.Contains("--json"));
+using var streams = new TerminalStreams();
+Environment.ExitCode = await CliApplication.Run(args, streams.Output, streams.Error, cancellation.Token, terminal);

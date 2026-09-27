@@ -6,7 +6,7 @@ public sealed class Arguments
 {
     public readonly List<string> Words = [];
     public readonly Dictionary<string, string?> Options = [];
-    static readonly HashSet<string> Flags = new("json help version yes dry-run starred trash demo ascending include-starred online builtin force save".Split(' '));
+    static readonly HashSet<string> Flags = new("json help version yes dry-run starred trash demo ascending include-starred online builtin force save ascii".Split(' '));
     public Arguments(string[] arguments)
     {
         bool literal = false;
@@ -14,7 +14,7 @@ public sealed class Arguments
         {
             var value = arguments[i];
             if (value == "--" && !literal) { literal = true; continue; }
-            if (value == "-h") value = "--help";
+            if (!literal && value == "-h") value = "--help";
             if (literal || !value.StartsWith('-')) { Words.Add(value); continue; }
             if (!value.StartsWith("--")) throw new RecallException("usage", "Unknown option: " + value);
             var pair = value[2..].Split('=', 2); var key = pair[0];
@@ -31,7 +31,7 @@ public sealed class Arguments
     public string Require(string key) => Get(key) is { Length: > 0 } value ? value : throw new RecallException("usage", "--" + key + " is required.");
     public void Allow(string options, int words)
     {
-        var allowed = new HashSet<string>((options + " data-dir json help").Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        var allowed = new HashSet<string>((options + " data-dir json help color ascii lang").Split(' ', StringSplitOptions.RemoveEmptyEntries));
         foreach (var key in Options.Keys) if (!allowed.Contains(key)) throw new RecallException("usage", "Unknown option for this command: --" + key);
         if (Words.Count != words) throw new RecallException("usage", "Unexpected or missing arguments. Use --help for command syntax.");
     }
@@ -47,11 +47,11 @@ public sealed class Arguments
         if (!DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date)) throw new RecallException("usage", "Invalid ISO date for --" + key);
         return date.ToString("O");
     }
-    public Dictionary<string, object?> Filter() => new()
+    public Dictionary<string, object?> Filter(int defaultLimit=100) => new()
     {
         ["query"] = Get("query") ?? "", ["app"] = Get("app"), ["since"] = Date("since"), ["until"] = Date("until"),
         ["starred"] = Has("starred"), ["trash"] = Has("trash"), ["demo"] = Has("demo"), ["ascending"] = Has("ascending"),
-        ["limit"] = Int("limit", 100, 1), ["offset"] = Int("offset", 0, 0, int.MaxValue)
+        ["limit"] = Int("limit", defaultLimit, 1), ["offset"] = Int("offset", 0, 0, int.MaxValue)
     };
     public const string Filters = "query app since until starred trash demo ascending limit offset";
 }
