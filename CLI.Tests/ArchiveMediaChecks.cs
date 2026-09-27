@@ -243,5 +243,6 @@ static class ArchiveMediaChecks
         await command(root, 0, ["storage", "cleanup", "--scope", "all", "--include-starred", "--yes"]);
         using (var packs = new TilePackStore(root)) assert(!File.Exists(videoPath) && packs.Statistics().Tiles == 0 && store.CheckIntegrity() == "ok", "Removing the last references reclaims video and packed tiles through CLI cleanup");
         assert(!Directory.EnumerateDirectories(Path.GetTempPath(), "recall-image-*").Except(beforeDirectories).Any(), "Successful imports, failures, and OCR leave no materialized files behind");
+        await PortableMaintenanceChecks.Run(directory,assert);
     }
 }

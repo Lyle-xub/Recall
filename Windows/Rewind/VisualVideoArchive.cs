@@ -196,9 +196,9 @@ public static class VisualVideoReader
         finally { slots.Release(); }
     }
 
-    public static bool Verify(string root, VisualArchive reference)
+    public static bool Verify(string root, VisualArchive reference, CancellationToken cancellation = default)
     {
-        try { using var image = Load(root, reference); return image.Width == reference.Width && image.Height == reference.Height; }
+        try { using var image = Load(root, reference, cancellation: cancellation); return image.Width == reference.Width && image.Height == reference.Height; }
         catch (Exception ex) when (ex is COMException or IOException or InvalidOperationException or ArgumentException) { return false; }
     }
 
@@ -216,6 +216,12 @@ public static class VisualVideoReader
             var index = MediaFoundationInterop.MF_SOURCE_READER_FIRST_VIDEO_STREAM;
             reader.SetStreamSelection(MediaFoundationInterop.MF_SOURCE_READER_ALL_STREAMS, false);
             reader.SetStreamSelection(index, true);
+            reader.GetNativeMediaType(index, 0, out var nativeType);
+            (int Width, int Height) nativeSize;
+            try { nativeSize = NativeVideo.PresentationExtent(nativeType); }
+            finally { NativeVideo.Release(nativeType); }
+            if (!NativeVideo.MatchesArchiveExtent(nativeSize.Width, nativeSize.Height, reference))
+                throw new InvalidDataException($"Video presentation dimensions differ from the archive (native {nativeSize.Width}x{nativeSize.Height}; archive {reference.Width}x{reference.Height}).");
             requested = MediaFoundationApi.CreateMediaType();
             requested.SetGUID(MediaFoundationAttributes.MF_MT_MAJOR_TYPE, MediaTypes.MFMediaType_Video);
             requested.SetGUID(MediaFoundationAttributes.MF_MT_SUBTYPE, NativeVideo.Rgb32);
@@ -247,7 +253,7 @@ public static class VisualVideoReader
                         if (sampleTime == time)
                         {
                             reader.GetCurrentMediaType(index, out var actual);
-                            try { return Pixels(sample, actual, reference, maxEdge); }
+                            try { return Pixels(sample, actual, reference, nativeSize.Width, nativeSize.Height, maxEdge); }
                             finally { NativeVideo.Release(actual); }
                         }
                         if (sampleTime > time) break;
@@ -271,6 +277,7 @@ public static class VisualVideoReader
         IMFMediaType? requested = null;
         var attributes = MediaFoundationApi.CreateAttributes(2);
         var observations = new List<object>();
+        object? nativeFormat = null, actualFormat = null;
         try
         {
             attributes.SetUINT32(NativeVideo.VideoProcessing, 1);
@@ -279,6 +286,9 @@ public static class VisualVideoReader
             var index = MediaFoundationInterop.MF_SOURCE_READER_FIRST_VIDEO_STREAM;
             reader.SetStreamSelection(MediaFoundationInterop.MF_SOURCE_READER_ALL_STREAMS, false);
             reader.SetStreamSelection(index, true);
+            reader.GetNativeMediaType(index, 0, out var native);
+            try { nativeFormat = NativeVideo.DescribeType(native); }
+            finally { NativeVideo.Release(native); }
             if (decode)
             {
                 requested = MediaFoundationApi.CreateMediaType();
@@ -308,26 +318,32 @@ public static class VisualVideoReader
                         sample.GetSampleTime(out var pts); sampleTime = pts;
                         try { sample.GetSampleDuration(out var span); duration = span; } catch (COMException) { }
                     }
+                    reader.GetCurrentMediaType(index, out var actual);
+                    try { actualFormat = NativeVideo.DescribeType(actual); }
+                    finally { NativeVideo.Release(actual); }
                     observations.Add(new { ReaderTicks = timestamp, SampleTicks = sampleTime, DurationTicks = duration, Flags = flags.ToString() });
                     if ((flags & MF_SOURCE_READER_FLAG.MF_SOURCE_READERF_ENDOFSTREAM) != 0) break;
                 }
                 finally { NativeVideo.Release(sample); }
             }
-            return System.Text.Json.JsonSerializer.Serialize(new { Decode = decode, SeekTicks = seekTicks, Samples = observations });
+            return System.Text.Json.JsonSerializer.Serialize(new { Decode = decode, SeekTicks = seekTicks, NativeFormat = nativeFormat, ActualFormat = actualFormat, Samples = observations });
         }
-        catch (Exception error) { return System.Text.Json.JsonSerializer.Serialize(new { Decode = decode, SeekTicks = seekTicks, Samples = observations, Error = error.ToString() }); }
+        catch (Exception error) { return System.Text.Json.JsonSerializer.Serialize(new { Decode = decode, SeekTicks = seekTicks, NativeFormat = nativeFormat, ActualFormat = actualFormat, Samples = observations, Error = error.ToString() }); }
         finally { NativeVideo.Release(requested); NativeVideo.Release(reader); NativeVideo.Release(attributes); }
     }
 
-    private static Bitmap Pixels(IMFSample sample, IMFMediaType type, VisualArchive reference, int maxEdge)
+    private static Bitmap Pixels(IMFSample sample, IMFMediaType type, VisualArchive reference, int presentationWidth, int presentationHeight, int maxEdge)
     {
-        type.GetUINT64(NativeVideo.FrameSize, out var size);
-        int width = checked((int)(size >> 32)), height = checked((int)(size & uint.MaxValue));
-        // Only the explicit one-pixel encoder padding is accepted; this never
-        // stretches the native capture or changes OCR coordinate geometry.
-        if ((width != reference.Width && width != ((reference.Width + 1) & ~1)) ||
-            (height != reference.Height && height != ((reference.Height + 1) & ~1)))
-            throw new InvalidDataException("Video sample dimensions differ from the archive reference.");
+        var (width, height) = NativeVideo.FrameExtent(type);
+        var minimum = NativeVideo.Aperture(type, NativeVideo.MinimumAperture);
+        var geometric = NativeVideo.Aperture(type, NativeVideo.GeometricAperture);
+        var visible = minimum ?? geometric ?? new Rectangle(0, 0, width, height);
+        // Decoder buffers may include macroblock-alignment pixels. Crop them
+        // only when the type explicitly describes a valid display aperture
+        // equal to the already validated native MP4 presentation dimensions.
+        if (visible.Width != presentationWidth || visible.Height != presentationHeight ||
+            visible.X < 0 || visible.Y < 0 || visible.Right > width || visible.Bottom > height)
+            throw new InvalidDataException($"Video sample display aperture differs (archive {reference.Width}x{reference.Height}; presentation {presentationWidth}x{presentationHeight}; decoded {width}x{height}; minimum {minimum}; geometric {geometric}).");
         int stride;
         try { type.GetUINT32(NativeVideo.Stride, out stride); }
         catch (COMException) { stride = checked(-width * 4); }
@@ -347,7 +363,8 @@ public static class VisualVideoReader
                     var row = new byte[result.Width * 4];
                     for (int y = 0; y < result.Height; y++)
                     {
-                        var offset = stride < 0 ? (height - 1 - y) * -stride : y * stride;
+                        var sourceY = visible.Y + y;
+                        var offset = (stride < 0 ? (height - 1 - sourceY) * -stride : sourceY * stride) + visible.X * 4;
                         Marshal.Copy(IntPtr.Add(pointer, offset), row, 0, row.Length);
                         for (int x = 3; x < row.Length; x += 4) row[x] = 255;
                         Marshal.Copy(row, 0, IntPtr.Add(target.Scan0, y * target.Stride), row.Length);
@@ -397,6 +414,45 @@ internal static class NativeVideo
     internal static readonly Guid Rgb32 = new("00000016-0000-0010-8000-00aa00389b71"), H264 = new("34363248-0000-0010-8000-00aa00389b71"), Hevc = new("43564548-0000-0010-8000-00aa00389b71");
     internal static readonly Guid FrameSize = new("1652c33d-d6b2-4012-b834-72030849a37d"), FrameRate = new("c459a2e8-3d2c-4e44-b132-fee5156c7bb0"), Aspect = new("c6376a1e-8d0a-4027-be45-6d9a0ad39bb6"), Interlace = new("e2724bb8-e676-4806-b4b2-a8d6efb44ccd"), Stride = new("644b4e48-1e02-4516-b0eb-c01ca9d49ac6");
     internal static readonly Guid VideoProcessing = new("fb394f3d-ccf1-42ee-bbb3-f9b845d5681d"), RateControl = new("1c0608e9-370c-4710-8a58-cb6181c42423"), Quality = new("fcbf57a3-7ea5-4b0c-9644-69b40c39c391"), Gop = new("95f31b26-95a4-41aa-9303-246a7fc6eef1"), BFrames = new("8d390aac-dc5c-4200-b57f-814d04babab2");
+    internal static readonly Guid MinimumAperture = new("d7388766-18fe-48c6-a177-ee894867c8c4"), GeometricAperture = new("66758743-7e5f-400d-980a-aa8596c85696");
+    internal static (int Width, int Height) FrameExtent(IMFMediaType type)
+    {
+        type.GetUINT64(FrameSize, out var size);
+        int width = checked((int)(size >> 32)), height = checked((int)(size & uint.MaxValue));
+        if (width <= 0 || height <= 0 || width > 16016 || height > 16016 || (long)width * height > 40_600_000)
+            throw new InvalidDataException($"Invalid video frame dimensions {width}x{height}.");
+        return (width, height);
+    }
+    internal static (int Width, int Height) PresentationExtent(IMFMediaType type)
+    {
+        var frame = FrameExtent(type);
+        var visible = Aperture(type, MinimumAperture) ?? Aperture(type, GeometricAperture) ?? new Rectangle(0, 0, frame.Width, frame.Height);
+        if (visible.X < 0 || visible.Y < 0 || visible.Width <= 0 || visible.Height <= 0 || visible.Right > frame.Width || visible.Bottom > frame.Height)
+            throw new InvalidDataException("Video presentation aperture lies outside its frame.");
+        return (visible.Width, visible.Height);
+    }
+    internal static bool MatchesArchiveExtent(int width, int height, VisualArchive reference) =>
+        (width == reference.Width || width == ((reference.Width + 1) & ~1)) &&
+        (height == reference.Height || height == ((reference.Height + 1) & ~1));
+    internal static Rectangle? Aperture(IMFMediaType type, Guid key)
+    {
+        int size;
+        try { type.GetBlobSize(key, out size); }
+        catch (COMException error) when ((uint)error.HResult == 0xC00D36E6) { return null; } // MF_E_ATTRIBUTENOTFOUND
+        if (size != 16) throw new InvalidDataException("Invalid video display aperture size.");
+        var bytes = new byte[size];
+        type.GetBlob(key, bytes, size, out var written);
+        if (written != 16 || BitConverter.ToUInt16(bytes, 0) != 0 || BitConverter.ToUInt16(bytes, 4) != 0)
+            throw new InvalidDataException("Video display aperture has unsupported fractional offsets.");
+        return new Rectangle(BitConverter.ToInt16(bytes, 2), BitConverter.ToInt16(bytes, 6), BitConverter.ToInt32(bytes, 8), BitConverter.ToInt32(bytes, 12));
+    }
+    internal static object DescribeType(IMFMediaType type)
+    {
+        var extent = FrameExtent(type);
+        int? stride = null;
+        try { type.GetUINT32(Stride, out var value); stride = value; } catch (COMException) { }
+        return new { extent.Width, extent.Height, Stride = stride, Minimum = Aperture(type, MinimumAperture)?.ToString(), Geometric = Aperture(type, GeometricAperture)?.ToString() };
+    }
     private static readonly Guid DisableFrc = new("2c0afa19-7a97-4d5a-9ee8-16d4fc518d8c");
     internal static string DisableFrameRateConversion(IMFSinkWriter writer, int stream)
     {

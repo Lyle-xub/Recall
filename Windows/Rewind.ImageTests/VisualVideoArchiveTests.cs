@@ -121,6 +121,41 @@ internal static class VisualVideoArchiveTests
         store.RecoverInterruptedVisualSessions();
         Check(File.Exists(Path.Combine(root, abandonedSpool)) && store.Frame("abandoned")!.VisualSampleVerified == false && store.Session("abandoned")!.EndedAt != null,
             "Interrupted encoder recovery must retain the only source and clear unproven sample metadata.");
-        return 20;
+        return 20 + RapidSamples(root, width, height);
+    }
+
+    static int RapidSamples(string root, int width, int height)
+    {
+        var relative = "recordings/rapid-synthetic.mp4";
+        var path = Path.Combine(root, relative);
+        long[] ticks = [0, 1_250_000, 3_750_000, 10_000_000, 13_750_000];
+        Color[] colors = [Color.Red, Color.Blue, Color.Lime, Color.Yellow, Color.Magenta];
+        using (var writer = new VisualVideoWriter(path, width, height, false))
+        {
+            for (int i = 0; i < ticks.Length; i++)
+            {
+                using var bitmap = Pattern(width, height, colors[i], Color.White);
+                Check(writer.Append(bitmap, ticks[i]) == ticks[i], "Rapid sample PTS was not accepted exactly.");
+            }
+            writer.Finish(15_000_000);
+            Check(writer.SampleCount == ticks.Length, "Rapid source samples were dropped before encoding.");
+        }
+        var timing = new[]
+        {
+            JsonSerializer.Serialize(new { SubmittedTicks = ticks, DurationTicks = 15_000_000 }),
+            VisualVideoReader.InspectSamples(path, decode: false),
+            VisualVideoReader.InspectSamples(path, decode: true)
+        };
+        File.WriteAllLines(Path.Combine(root, "rapid-timing.jsonl"), timing);
+        foreach (var line in timing) Console.WriteLine("NATIVE RAPID VIDEO TIMING " + line);
+        for (int i = 0; i < ticks.Length; i++)
+        {
+            using var decoded = VisualVideoReader.Load(root, new VisualArchive(1, relative, ticks[i], width, height));
+            ColorNear(decoded.GetPixel(50, 50), colors[i], $"Rapid exact sample {ticks[i]}");
+            ColorNear(decoded.GetPixel(50, height - 50), Color.White, $"Rapid sample orientation {ticks[i]}");
+        }
+        Check(!VisualVideoReader.Verify(root, new VisualArchive(1, relative, 2_500_000, width, height)),
+            "Rapid capture must not substitute a nearby frame for an absent sample.");
+        return 7;
     }
 }

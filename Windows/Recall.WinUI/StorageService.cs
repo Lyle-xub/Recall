@@ -44,9 +44,8 @@ internal static class StorageService
         long saved = 0;
         var frames = await Task.Run(store.MetadataFrames, ct);
         var referencedVideos = VisualDependencies(store, frames);
-        var unifiedSessions = (await Task.Run(store.Sessions, ct)).Where(s => s.UnifiedVisualArchive).Select(s => s.Id).ToHashSet();
-        var images = frames.Where(f => f.VisualTicks == null && !unifiedSessions.Contains(f.SessionId ?? "") &&
-            f.TextState is RecognitionState.Complete or RecognitionState.Empty && (f.ImageQuality == null || f.ImageQuality > .5)).SelectMany(f => new[] { f.ImagePath, f.MeetingImagePath }).Where(x => x != null).Cast<string>().Where(x => !x.EndsWith(".ocr.png", StringComparison.OrdinalIgnoreCase) && !x.EndsWith(".recallvideo", StringComparison.OrdinalIgnoreCase) && !x.EndsWith(".recallframe", StringComparison.OrdinalIgnoreCase)).Distinct().ToArray();
+        var images = frames.SelectMany(f => new[] { f.ImagePath, f.MeetingImagePath }).Where(x => !string.IsNullOrEmpty(x)).Cast<string>()
+            .Distinct(StringComparer.OrdinalIgnoreCase).Where(store.CanOptimizeImage).ToArray();
         int count = 0;
         foreach (var image in images)
         {
@@ -67,17 +66,21 @@ internal static class StorageService
                     }
                     var before = new FileInfo(path).Length;
                     var after = new FileInfo(temporary).Length;
-                    if (after >= before) { store.MarkOptimized(image); return 0L; }
+                    if (after >= before) { store.TryCommitImageOptimization(image, target: null); return 0L; }
                     var replacement = "frames/optimized-" + Guid.NewGuid().ToString("N") + ".jpg";
                     var destination = store.SafePath(replacement)!;
-                    store.WithMediaLock(() =>
+                    try
                     {
                         File.Move(temporary, destination);
                         using (var durable = new FileStream(destination, FileMode.Open, FileAccess.ReadWrite, FileShare.Read)) durable.Flush(true);
-                        store.ReplaceImage(image, replacement, .5);
-                        if (!store.ReferencesImage(image)) File.Delete(path);
-                    });
-                    return before - after;
+                        return store.TryCommitImageOptimization(image, replacement) ? before - after : 0L;
+                    }
+                    finally
+                    {
+                        // A retry, new dependent or session change during the
+                        // encode leaves the original authoritative.
+                        if (File.Exists(destination) && !store.ReferencesImage(replacement)) File.Delete(destination);
+                    }
                 }, ct);
             }
             finally { if (File.Exists(temporary)) File.Delete(temporary); }

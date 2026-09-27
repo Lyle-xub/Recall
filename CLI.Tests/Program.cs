@@ -10,6 +10,18 @@ if(args.Length>=2 && args[0]=="--detached-argument-probe") {await File.WriteAllT
 
 if(args is ["--inference-test-child"]) {await Task.Delay(TimeSpan.FromSeconds(60));return;}
 
+if(Environment.GetEnvironmentVariable("RECALL_TEST_TRANSCODE_GATE") is {Length:>0} transcodeGate && args.Contains("-i"))
+{
+    var result=await ChildProcess.Run(Environment.GetEnvironmentVariable("RECALL_TEST_REAL_FFMPEG")??"ffmpeg",args,null,default,60);
+    if(result.ExitCode==0 && args.Contains("-q:v"))
+    {
+        File.WriteAllText(Path.Combine(transcodeGate,"ready"),"");
+        using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        while(!File.Exists(Path.Combine(transcodeGate,"release")))await Task.Delay(10,deadline.Token);
+    }
+    Console.Write(result.Output);Console.Error.Write(result.Error);Environment.ExitCode=result.ExitCode;return;
+}
+
 if(Environment.GetEnvironmentVariable("RECALL_TEST_ARCHIVE_OCR")=="1" && args.Length>1 && args[1]=="stdout")
 {
     using var input=File.OpenRead(args[0]);var header=new byte[24];input.ReadExactly(header);

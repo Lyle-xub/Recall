@@ -18,6 +18,7 @@ try
         ArchiveFramesTests.Run(Assert, root);
         CompactOcrRegionsTests.Run(Assert);
         VisualArchiveStorageTests.Run(Assert, root);
+        ImageOptimizationSafetyTests.Run(Assert, root);
         Console.WriteLine($"PASS: {tests} targeted archive metadata checks.");
         return;
     }
@@ -32,6 +33,7 @@ try
     ArchiveFramesTests.Run(Assert, root);
     CompactOcrRegionsTests.Run(Assert);
     VisualArchiveStorageTests.Run(Assert, root);
+    ImageOptimizationSafetyTests.Run(Assert, root);
     DataDirectoryMigrationTests.Run(Assert, root);
     await RecordingControlTests.Run(Assert);
     await PreviewLoadTests.Run(Assert);

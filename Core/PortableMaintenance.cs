@@ -39,6 +39,7 @@ public static class PortableMaintenance
                 {preservedOriginals++;skipped++;continue;}
                 if(references.Any(f=>f.TextState is not (RecognitionState.Complete or RecognitionState.Empty) || f.SessionId!=null && active.Contains(f.SessionId)) || references.All(f=>f.ImageQuality<=.5)) {skipped++;continue;}
                 if(TilePackStore.IsTilePath(relative) || Path.GetExtension(relative).ToLowerInvariant() is not (".png" or ".jpg" or ".jpeg" or ".bmp" or ".webp")) {skipped++;continue;}
+                if(!store.CanOptimizeImage(relative)) {skipped++;continue;}
                 var source=store.SafePath(relative);
                 if(source==null || !File.Exists(source))throw new RecallException("not_found","A referenced screenshot is missing or unsafe; original references were preserved.");
                 var dimensions=await Dimensions(source,ct);
@@ -51,14 +52,22 @@ public static class PortableMaintenance
                     if(result.ExitCode!=0 || !File.Exists(target)) throw new RecallException("optimization_failed","FFmpeg could not recompress a screenshot.");
                     var decoded=await ChildProcess.Run(engine,["-v","error","-xerror","-i",target,"-frames:v","1","-f","null","-"],null,ct,30);
                     if(decoded.ExitCode!=0 || await Dimensions(target,ct)!=dimensions)throw new RecallException("optimization_failed","Recompressed screenshot failed decoding or changed dimensions; original retained.");
+                    ct.ThrowIfCancellationRequested();
                     var before=new FileInfo(source).Length;var after=new FileInfo(target).Length;
                     if(after>0 && after<before)
                     {
-                        store.ReplaceImage(relative,targetRelative,.5);
-                        if(!store.ReferencesImage(relative))File.Delete(source);
+                        using(var durable=new FileStream(target,FileMode.Open,FileAccess.ReadWrite,FileShare.Read)) durable.Flush(true);
+                        // Eligibility is deliberately rechecked inside the
+                        // store transaction after every asynchronous decoder.
+                        // Retry/new shared references may have arrived meanwhile.
+                        if(!store.TryCommitImageOptimization(relative,targetRelative)) {skipped++;continue;}
                         saved+=before-after;
                     }
-                    else {File.Delete(target);store.MarkOptimized(relative);}
+                    else
+                    {
+                        File.Delete(target);
+                        if(!store.TryCommitImageOptimization(relative,null)) {skipped++;continue;}
+                    }
                     completed++;
                 }
                 finally {if(File.Exists(target) && !store.ReferencesImage(targetRelative))File.Delete(target);}
