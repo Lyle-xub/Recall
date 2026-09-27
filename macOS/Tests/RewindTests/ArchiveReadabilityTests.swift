@@ -92,39 +92,91 @@ final class ArchiveReadabilityTests:XCTestCase {
         XCTAssertNil(archive.hoveredID,"Camera scrolling invalidates the old summit target")
     }
 
-    @MainActor func testFinalPointerSampleIsDeliveredAndExitCancelsPendingSample() async throws {
-        let view = ArchiveSceneView(frame:NSRect(x:0,y:0,width:900,height:600))
-        var delivered = 0
-        view.onPointer = { _,_,_ in delivered += 1 }
-        func move(_ x:CGFloat)->NSEvent {
-            NSEvent.mouseEvent(with:.mouseMoved,location:NSPoint(x:x,y:300),modifierFlags:[],timestamp:0,windowNumber:0,context:nil,eventNumber:0,clickCount:0,pressure:0)!
-        }
-        view.mouseMoved(with:move(450));view.mouseMoved(with:move(451))
-        try await Task.sleep(for:.milliseconds(50))
+    @MainActor func testFinalPointerSampleIsDeliveredAndExitCancelsPendingSample() {
+        let time=ManualArchivePointerScheduler()
+        let view=ArchiveSceneView(frame:NSRect(x:0,y:0,width:900,height:600),pointerScheduler:time.scheduler)
+        var delivered=0
+        view.onPointer={ _,_,_ in delivered += 1 }
+        view.mouseMoved(with:pointerEvent(x:450));view.mouseMoved(with:pointerEvent(x:451))
+        XCTAssertEqual(delivered,1)
+        time.advance(by:ArchivePointerCoalescer.interval);time.fire(0)
         XCTAssertEqual(delivered,2,"The last small movement must not be dropped by the hit-test throttle")
-        view.mouseMoved(with:move(452));view.mouseMoved(with:move(453))
-        view.mouseExited(with:move(453))
-        let beforeExit = delivered
-        try await Task.sleep(for:.milliseconds(50))
-        XCTAssertEqual(delivered,beforeExit,"A delayed sample must not restore hover after the mouse exits")
+        view.mouseMoved(with:pointerEvent(x:452));view.mouseMoved(with:pointerEvent(x:453))
+        view.mouseExited(with:pointerEvent(x:453))
+        time.advance(by:ArchivePointerCoalescer.interval);time.fire(1,includingCancelled:true)
+        XCTAssertEqual(delivered,2,"An already awakened sample must not restore hover after exit")
     }
 
-    @MainActor func testFastPointerBurstCoalescesEvenAcrossDistantCards() async throws {
-        let view = ArchiveSceneView(frame:NSRect(x:0,y:0,width:1440,height:900))
-        var samples:[CGFloat] = []
-        view.onPointer = { near,_,_ in samples.append(near.x) }
-        func event(_ index:Int)->NSEvent {
-            NSEvent.mouseEvent(with:.mouseMoved,location:CGPoint(x:100+index*11,y:400),modifierFlags:[],timestamp:0,windowNumber:0,context:nil,eventNumber:0,clickCount:0,pressure:0)!
+    @MainActor func testFastPointerBurstCoalescesEvenAcrossDistantCards() {
+        let time=ManualArchivePointerScheduler()
+        let view=ArchiveSceneView(frame:NSRect(x:0,y:0,width:1440,height:900),pointerScheduler:time.scheduler)
+        var delivered=0
+        view.onPointer={ _,_,_ in delivered += 1 }
+        for index in 0..<100 {view.mouseMoved(with:pointerEvent(x:CGFloat(100+index*11)))}
+        XCTAssertEqual(delivered,1,"Large pointer travel must not bypass the frame-rate limit")
+        XCTAssertEqual(time.jobs.count,1)
+        time.advance(by:ArchivePointerCoalescer.interval);time.fire(0)
+        XCTAssertEqual(delivered,2,"Deliver only the newest trailing sample")
+        view.mouseMoved(with:pointerEvent(x:111));view.mouseMoved(with:pointerEvent(x:1189))
+        view.mouseDown(with:pointerEvent(x:1189,type:.leftMouseDown))
+        XCTAssertEqual(delivered,3,"A click immediately flushes its actual location")
+        time.advance(by:ArchivePointerCoalescer.interval);time.fire(1,includingCancelled:true)
+        XCTAssertEqual(delivered,3,"A click leaves no stale hover task")
+    }
+
+    @MainActor func testPendingNativeInputCannotReviveAfterInteractionCancellation() {
+        for action in ["scroll","drag","deactivate","hide","detach","dismantle"] {
+            let time=ManualArchivePointerScheduler(),archive=ArchiveGlassScene()
+            let view=ArchiveSceneView(frame:NSRect(x:0,y:0,width:900,height:600),pointerScheduler:time.scheduler)
+            let window=NSWindow(contentRect:view.frame,styleMask:.borderless,backing:.buffered,defer:false)
+            window.isReleasedWhenClosed=false;window.contentView=view
+            view.scene=archive.scene;view.pointOfView=archive.cameraNode;view.archive=archive
+            archive.setActive(true)
+            var delivered=0
+            view.onPointer={ _,_,_ in delivered += 1 }
+            view.mouseMoved(with:pointerEvent(x:450,window:window))
+            if action == "drag" {view.mouseDown(with:pointerEvent(x:450,type:.leftMouseDown,window:window))}
+            view.mouseMoved(with:pointerEvent(x:451,window:window))
+            XCTAssertEqual(delivered,1,action)
+            switch action {
+            case "scroll":view.scrollWheel(with:NSEvent(cgEvent:CGEvent(scrollWheelEvent2Source:nil,units:.pixel,wheelCount:1,wheel1:12,wheel2:0,wheel3:0)!)!)
+            case "drag":view.mouseDragged(with:pointerEvent(x:480,type:.leftMouseDragged,window:window))
+            case "deactivate":archive.setActive(false)
+            case "hide":view.isHidden=true
+            case "detach":view.removeFromSuperview()
+            default:view.cancelPendingInteraction()
+            }
+            time.advance(by:ArchivePointerCoalescer.interval)
+            time.fire(0,includingCancelled:true)
+            XCTAssertEqual(delivered,1,"Pending input must not revive after \(action)")
+            window.orderOut(nil);view.cancelPendingInteraction();archive.stopMotion()
         }
-        for index in 0..<100 { view.mouseMoved(with:event(index)) }
-        XCTAssertEqual(samples.count,1,"Large pointer travel must not bypass the frame-rate limit")
-        try await Task.sleep(for:.milliseconds(40))
-        XCTAssertEqual(samples.count,2,"Deliver only the newest trailing sample")
-        view.mouseMoved(with:event(1));view.mouseMoved(with:event(99))
-        view.mouseDown(with:event(99))
-        let count = samples.count
-        try await Task.sleep(for:.milliseconds(40))
-        XCTAssertEqual(samples.count,count,"A click flushes pending input instead of leaving a stale hover task")
+    }
+
+    @MainActor func testRealWindowDeliversFinalNSEventThroughContinuousScheduler() async throws {
+        let archive=ArchiveGlassScene(),size=CGSize(width:900,height:600)
+        archive.update(frames:[],images:[:],appearance:.warmDay,selected:nil,size:size,reduced:false)
+        archive.setActive(true)
+        let view=ArchiveSceneView(frame:CGRect(origin:.zero,size:size))
+        view.scene=archive.scene;view.pointOfView=archive.cameraNode;view.archive=archive
+        let window=NSWindow(contentRect:view.frame,styleMask:.borderless,backing:.buffered,defer:false)
+        window.isReleasedWhenClosed=false;window.contentView=view
+        defer {view.cancelPendingInteraction();window.orderOut(nil);archive.stopMotion()}
+        _=view.snapshot()
+        let finalPoint=CGPoint(x:551,y:300)
+        let expected=try XCTUnwrap(archive.ray(at:finalPoint,in:size)).0
+        let delivered=expectation(description:"The last native pointer event reaches the scene")
+        delivered.assertForOverFulfill=true
+        view.onPointer={ near,_,_ in
+            if abs(near.x-expected.x) < 0.0001 && abs(near.y-expected.y) < 0.0001 {delivered.fulfill()}
+        }
+        view.mouseMoved(with:pointerEvent(x:450,window:window))
+        view.mouseMoved(with:pointerEvent(x:finalPoint.x,window:window))
+        await fulfillment(of:[delivered],timeout:2)
+    }
+
+    @MainActor private func pointerEvent(x:CGFloat,type:NSEvent.EventType = .mouseMoved,window:NSWindow? = nil)->NSEvent {
+        NSEvent.mouseEvent(with:type,location:CGPoint(x:x,y:300),modifierFlags:[],timestamp:0,windowNumber:window?.windowNumber ?? 0,context:nil,eventNumber:0,clickCount:0,pressure:0)!
     }
 
     @MainActor func testCachedCardHitMatchesNativeFacesAfterWavesAndScrolling() throws {

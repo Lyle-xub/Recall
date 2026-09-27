@@ -687,13 +687,24 @@ final class ArchiveSceneView: SCNView {
     let textOverlay = IndexedTextOverlay()
     var selectedRegions:[TextRegion] = []
     weak var archive:ArchiveGlassScene?
-    override init(frame:NSRect,options:[String:Any]? = nil) {
+    private let pointerScheduler:ArchivePointerScheduler
+    private lazy var pointerSamples=ArchivePointerCoalescer(scheduler:pointerScheduler) { [weak self] point in
+        self?.updatePointer(at:point)
+    }
+    override convenience init(frame:NSRect,options:[String:Any]? = nil) {
+        self.init(frame:frame,pointerScheduler:.continuous,options:options)
+    }
+    init(frame:NSRect,pointerScheduler:ArchivePointerScheduler,options:[String:Any]? = nil) {
+        self.pointerScheduler=pointerScheduler
         super.init(frame:frame,options:options)
         textOverlay.isHidden = true;addSubview(textOverlay)
     }
     required init?(coder:NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func layout() { super.layout();updateTextSelection();refreshViewport(force:true) }
-    override func viewDidMoveToWindow() { super.viewDidMoveToWindow();window?.acceptsMouseMovedEvents = true }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow();window?.acceptsMouseMovedEvents = true
+        if window == nil {cancelPendingInteraction()}
+    }
     var onViewportChange:((ArchiveViewportRecords)->Void)?
     private var lastViewport = ArchiveViewportRecords()
     private var lastViewportTime:TimeInterval = 0
@@ -743,11 +754,8 @@ final class ArchiveSceneView: SCNView {
     private var pressPoint: CGPoint?
     private var dragged = false
     private var pointerTracking:NSTrackingArea?
-    private var lastHitTime:TimeInterval = 0
     private var aimedID:String?
     private var aimPoint:CGPoint?
-    private var pendingPointer:CGPoint?
-    private var pointerDelivery:Task<Void,Never>?
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         guard pointerTracking == nil else { return }
@@ -756,27 +764,12 @@ final class ArchiveSceneView: SCNView {
     }
     override func mouseEntered(with event:NSEvent) { mouseMoved(with:event) }
     override func mouseMoved(with event:NSEvent) {
-        let p = convert(event.locationInWindow,from:nil)
-        let now = ProcessInfo.processInfo.systemUptime
-        if now-lastHitTime >= 1/60 {
-            updatePointer(at:p)
-        } else {
-            // Deliver the final sample even when a fast mouse stops between
-            // ticks. Otherwise the summit can remain on the previous card.
-            pendingPointer = p
-            if pointerDelivery == nil {
-                let delay = max(0,1/60-(now-lastHitTime))
-                pointerDelivery = Task { @MainActor [weak self] in
-                    do { try await Task.sleep(for:.seconds(delay)) } catch { return }
-                    guard let self,let point = self.pendingPointer else { return }
-                    self.updatePointer(at:point)
-                }
-            }
-        }
+        guard !isHidden,archive?.isActive != false else {return}
+        pointerSamples.submit(convert(event.locationInWindow,from:nil))
     }
     private func updatePointer(at point:CGPoint) {
-        pointerDelivery?.cancel();pointerDelivery = nil;pendingPointer = nil
-        lastHitTime = ProcessInfo.processInfo.systemUptime;aimPoint = point
+        guard !isHidden,archive?.isActive != false else {return}
+        aimPoint = point
         let (near,far) = pointerRay(at:point)
         let previous = aimedID
         aimedID = archive?.canHitRestingSheets == true ? archive?.record(at:near,toward:far):memoryID(at:point)
@@ -787,7 +780,7 @@ final class ArchiveSceneView: SCNView {
         archive?.ray(at:point,in:bounds.size) ?? (unprojectPoint(SCNVector3(point.x,point.y,0)),unprojectPoint(SCNVector3(point.x,point.y,1)))
     }
     private func clearPointerAim() {
-        pointerDelivery?.cancel();pointerDelivery = nil;pendingPointer = nil
+        pointerSamples.cancel()
         aimedID = nil;aimPoint = nil;onHover?(nil)
     }
     func cancelPendingInteraction() {
@@ -801,7 +794,7 @@ final class ArchiveSceneView: SCNView {
         onScroll?(-event.scrollingDeltaY,-event.scrollingDeltaX,event.hasPreciseScrollingDeltas)
     }
     override func mouseDown(with event:NSEvent) {
-        if pendingPointer != nil { updatePointer(at:convert(event.locationInWindow,from:nil)) }
+        pointerSamples.flush(at:convert(event.locationInWindow,from:nil))
         pressPoint = event.locationInWindow;dragged = false
     }
     override func mouseDragged(with event:NSEvent) {
