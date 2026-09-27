@@ -76,3 +76,11 @@ Callback intervals measure main-thread delivery, **not physical screen FPS**. Th
 - Final Debug SHA-256: `d8fb64006fabced65cddd51b0cef79f00de4f4bef8a3d0a5247eb543e57187a8`; signed fixture SHA-256: `88098a3c05dff41e210a74f6c85acf096c05ab362ab21d854b729818ecb35415`.
 - Actual Mac pointer testing selected five lines from the dense OCR fixture without navigating, then opened details from the image's blank area. The selected text stayed aligned and preserved through forward and reverse transitions. Immediate open-and-back returned cleanly.
 - The original movie fixture still presented burned-in time **5.417 seconds** after entering details and pressing Play, with correctly fitted rounded video and no black rectangle in that captured state.
+
+### Performance build installation
+
+- Source commit: `0f0fd320c017c7f7abf5de7df67bd2fa794a0802`. Release packaging completed; `codesign --verify --deep --strict` passed, with the same Developer ID designated requirement as the previous installation.
+- Installed `/Applications/Recall.app` at 2026-09-27T17:16:55.537358+08:00. Executable SHA-256: `0427577d91c49649f65ddb8a3e9ca19f4d501c2fdc096942af076b119b250e89`.
+- The previous `c40c0e1` application quit normally. Its bundle, closed-library SQLite snapshot and settings are retained in `.test-data/install-macos-composition-20260927/`, alongside the installation receipt. The snapshot passed SQLite `quick_check`.
+- Restart displayed all 21,384 existing memories. Settings were unchanged; restoring the previous recording request resulted in `active: true`, `requested: true`, `owner: desktop`, with no error. A subsequent read counted 21,390 memories.
+- Commit `0f0fd32` passed both remote workflows: [native macOS and Windows builds](https://github.com/Lyle-xub/Recall/actions/runs/36308609122) and [CLI checks on macOS, Windows and Linux](https://github.com/Lyle-xub/Recall/actions/runs/36308609096).
