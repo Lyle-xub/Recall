@@ -88,14 +88,24 @@ a mutation merely to change its display format.
 
 | Platform | Default library |
 | --- | --- |
-| macOS | `~/Library/Application Support/RewindReplica` |
-| Windows | `%LOCALAPPDATA%\RewindReplica` |
-| Linux | `$XDG_DATA_HOME/RewindReplica`, otherwise `~/.local/share/RewindReplica` |
+| macOS | `~/Library/Application Support/Recall` |
+| Windows | `%LOCALAPPDATA%\Recall` |
+| Linux | `$XDG_DATA_HOME/Recall`, otherwise `~/.local/share/Recall` |
 
 `--data-dir PATH` takes precedence over `RECALL_DATA_DIR`, which takes precedence
 over these defaults. Use an absolute path for scripts. A missing library is an error
-for read commands; only `library init` explicitly creates one. No command implicitly
-migrates an existing database. Unknown schemas are rejected before a write.
+for read commands; only `library init` explicitly creates one. Database formats
+are never implicitly converted. Unknown schemas are rejected before a write.
+
+The previous default folder was named `RewindReplica`. When accessing the default
+library for the first time after upgrading, Recall moves that whole folder to
+`Recall` if the new folder does not exist and the old library is not in use.
+This preserves the database, media, settings and downloaded models without
+copying the library or replacing its schema. Quit older Recall applications,
+CLI commands and model workers before this move. If both folders exist, Recall
+reports a conflict and leaves both intact. Explicit `--data-dir` and
+`RECALL_DATA_DIR` paths are used as supplied and are not automatically relocated.
+`--help` and `--version` do not relocate data.
 
 Windows-format libraries work on all three platforms. macOS retains its native
 schema, compressed OCR and media through the Swift adapter and therefore requires

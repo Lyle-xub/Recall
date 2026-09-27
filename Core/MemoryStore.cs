@@ -10,7 +10,8 @@ public sealed class MemoryStore : IDisposable
     {
         get;
     }
-    private readonly SqliteConnection db;
+    private readonly SqliteConnection db = null!;
+    private readonly LibraryLocationLease? location;
     private readonly object gate = new();
     private readonly object mediaGate = new();
     public void WithMediaLock(Action action)
@@ -18,9 +19,11 @@ public sealed class MemoryStore : IDisposable
         lock (mediaGate)
             action();
     }
-    public MemoryStore(string root, bool readOnly = false, bool initialize = true)
+    public MemoryStore(string root, bool readOnly = false, bool initialize = true, DefaultLibrary? locationPair = null)
     {
         Root = Path.GetFullPath(root);
+        location = LibraryLocationLease.Access(Root, locationPair, createParent: !readOnly && initialize);
+        try {
         var format = LibraryFormats.Detect(Root);
         if (format is LibraryFormat.MacOS or LibraryFormat.Unknown)
             throw new InvalidDataException("This database requires its original platform adapter; no schema changes were made.");
@@ -34,7 +37,7 @@ public sealed class MemoryStore : IDisposable
         Directory.CreateDirectory(Root);
         foreach (var dir in new[] { "frames", "recordings", "icons" })
             Directory.CreateDirectory(Path.Combine(Root, dir));
-        db = new(new SqliteConnectionStringBuilder { DataSource = Path.Combine(Root, "memory.sqlite"), DefaultTimeout = 15 }.ToString());
+        db = new(new SqliteConnectionStringBuilder { DataSource = Path.Combine(Root, "memory.sqlite"), DefaultTimeout = 15, Pooling = false }.ToString());
         db.Open();
         Execute("PRAGMA journal_mode=WAL");
         Execute("PRAGMA busy_timeout=15000");
@@ -67,6 +70,7 @@ public sealed class MemoryStore : IDisposable
                 Save(frame);
         }
         try {RecoverPendingCleanups();}catch {db.Dispose();throw;}
+        } catch { db?.Dispose(); location?.Dispose(); throw; }
     }
     private static double Seconds(DateTimeOffset date) => date.ToUnixTimeMilliseconds() / 1000.0;
     private SqliteCommand Command(string sql, params object?[] values)
@@ -542,6 +546,7 @@ public sealed class MemoryStore : IDisposable
         lock (gate)
         {
             db.Dispose();
+            location?.Dispose();
         }
     }
 }

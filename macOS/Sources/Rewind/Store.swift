@@ -4,6 +4,7 @@ import CSQLite
 final class MemoryStore: @unchecked Sendable {
     let root: URL
     private var db: OpaquePointer?
+    private let location:LibraryLocationLease?
     private let lock = NSRecursiveLock()
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
@@ -16,14 +17,18 @@ final class MemoryStore: @unchecked Sendable {
     private var segmentMaintenance:[Int]?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-    init(root: URL, readOnly:Bool = false, maintenanceOnly:Bool = false) throws {
+    init(root: URL, readOnly:Bool = false, maintenanceOnly:Bool = false,locationPair:DefaultLibrary? = nil) throws {
         self.root = root
+        location = try LibraryLocationLease.access(root,locations:locationPair,createParent:!readOnly && !maintenanceOnly)
+        var initialized=false
+        defer {if !initialized {sqlite3_close(db)}}
         // Maintenance opens an already initialized library on its own worker.
         // Never run startup recovery again or share the UI writer's mutex.
         if readOnly || maintenanceOnly {
             let access = readOnly ? SQLITE_OPEN_READONLY:SQLITE_OPEN_READWRITE
             guard sqlite3_open_v2(root.appendingPathComponent("memory.sqlite").path,&db,access | SQLITE_OPEN_FULLMUTEX,nil) == SQLITE_OK else { throw RewindError.message("Cannot open memory database for reading.") }
             sqlite3_busy_timeout(db,5000)
+            initialized=true
             return
         }
         try FileManager.default.createDirectory(at: root.appendingPathComponent("frames"), withIntermediateDirectories: true)
@@ -55,6 +60,7 @@ final class MemoryStore: @unchecked Sendable {
         try recoverVideoArchives()
         try recoverImageArchives()
         try recoverInterruptedVisualSessions()
+        initialized=true
     }
     // The headless owner holds the same exclusive lease as the desktop, so it
     // can recover interrupted work without creating or migrating any tables.

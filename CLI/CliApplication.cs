@@ -26,7 +26,10 @@ public static class CliApplication
             }
             if(a.Has("version"))
             {a.Allow("version",0);if(json)await PrintJson(output,new {version=CommandHelp.Version});else new HumanOutput(output,humanStyle,a).Render(new {version=CommandHelp.Version});return 0;}
-            var root=Path.GetFullPath(a.Get("data-dir")??LibraryClient.DefaultRoot);
+            var commandTopic = CommandHelp.Find(a.Words) ?? throw new RecallException("usage", "Unknown command. Use recall help.");
+            a.Allow(commandTopic.Options, commandTopic.Words);
+            var root=Path.GetFullPath(a.Get("data-dir")??(commandTopic.Name == "ocr image" ? Environment.GetEnvironmentVariable("RECALL_DATA_DIR") ?? DefaultLibrary.Platform.Current : LibraryClient.DefaultRoot));
+            using var location = commandTopic.Name == "ocr image" ? null : LibraryLocationLease.Access(root);
             AppPaths.DataRoot=root;
             var client=new LibraryClient(root);
             var progress=json?error:new HumanOutput(error,errorStyle,a).Progress();

@@ -12,7 +12,9 @@ struct CoreCLIError: LocalizedError {
 final class CoreCLILease {
     let directory:URL
     private var descriptor:Int32 = -1
-    init(root:URL) throws {
+    private let location:LibraryLocationLease?
+    init(root:URL,coordinate:Bool = true,locationPair:DefaultLibrary? = nil) throws {
+        location = coordinate ? try LibraryLocationLease.access(root,locations:locationPair,createParent:true):nil
         directory = root.appendingPathComponent(".recall-control")
         try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
         guard (try? directory.resourceValues(forKeys:[.isSymbolicLinkKey]).isSymbolicLink) != true else { throw CoreCLIError(code:"invalid_path",message:"The control directory must not be a symbolic link.") }

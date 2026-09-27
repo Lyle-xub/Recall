@@ -29,11 +29,14 @@ public static class Wire
 public sealed class LibraryLease : IDisposable
 {
     readonly FileStream file;
+    readonly LibraryLocationLease? location;
     int released;
     public string DirectoryPath { get; }
     [DllImport("libc", SetLastError = true)] static extern int flock(int fd, int operation);
-    public LibraryLease(string root)
+    public LibraryLease(string root, bool coordinate = true, DefaultLibrary? locationPair = null)
     {
+        location = coordinate ? LibraryLocationLease.Access(root, locationPair, createParent: true) : null;
+        try {
         DirectoryPath = Path.Combine(root, ".recall-control");
         Directory.CreateDirectory(DirectoryPath);
         if ((File.GetAttributes(DirectoryPath) & FileAttributes.ReparsePoint) != 0) throw new RecallException("invalid_path", "The control directory must not be a symbolic link.");
@@ -43,12 +46,14 @@ public sealed class LibraryLease : IDisposable
         FileStream? opened = null;
         try
         {
-            opened = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
+            opened = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
             if (OperatingSystem.IsWindows()) opened.Lock(0, 1);
             else if (flock(opened.SafeFileHandle.DangerousGetHandle().ToInt32(), 2 | 4) != 0) throw new IOException("Library is owned by another process.");
             file = opened;
         }
         catch (IOException) { opened?.Dispose(); throw new RecallException("busy", "The application or another CLI command owns this library. Retry after its current operation finishes."); }
+        catch { opened?.Dispose(); throw; }
+        } catch { location?.Dispose(); throw; }
     }
     public void Dispose()
     {
@@ -56,6 +61,7 @@ public sealed class LibraryLease : IDisposable
         if (OperatingSystem.IsWindows()) file.Unlock(0, 1);
         else flock(file.SafeFileHandle.DangerousGetHandle().ToInt32(), 8);
         file.Dispose();
+        location?.Dispose();
     }
 }
 

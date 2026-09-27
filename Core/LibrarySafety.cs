@@ -12,9 +12,8 @@ public static class LibrarySafety
     }
     public static void CheckLegacyDefaultOwner(string root)
     {
-        if(OperatingSystem.IsLinux() || LibraryControlClient.Owner(root)!=null) return;
-        var defaultRoot=OperatingSystem.IsMacOS() ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),"Library","Application Support","RewindReplica") : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"RewindReplica");
-        if(!Path.GetFullPath(root).Equals(defaultRoot,OperatingSystem.IsWindows()?StringComparison.OrdinalIgnoreCase:StringComparison.Ordinal))return;
+        if(LibraryControlClient.Owner(root)!=null) return;
+        if(!DefaultLibrary.Platform.Contains(root))return;
         foreach(var process in new[]{"Recall","RewindReplica"}.SelectMany(Process.GetProcessesByName))
         {
             using(process)

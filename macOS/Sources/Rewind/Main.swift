@@ -33,15 +33,16 @@ import Combine
     private var cliLease:CoreCLILease?
     func applicationDidFinishLaunching(_ notification: Notification) {
         let args = CommandLine.arguments
-        let dataRoot: URL? = args.firstIndex(of:"--data-dir").flatMap {args.indices.contains($0+1) ? URL(fileURLWithPath:args[$0+1]):nil}
-        if dataRoot == nil, let identifier = Bundle.main.bundleIdentifier,
+        let dataRoot: URL? = args.firstIndex(of:"--data-dir").flatMap {args.indices.contains($0+1) ? URL(fileURLWithPath:args[$0+1]):nil} ?? ProcessInfo.processInfo.environment["RECALL_DATA_DIR"].flatMap {$0.isEmpty ? nil:URL(fileURLWithPath:$0)}
+        if dataRoot == nil,!args.contains("--data-dir"), let identifier = Bundle.main.bundleIdentifier,
            let running = NSRunningApplication.runningApplications(withBundleIdentifier:identifier).first(where:{$0.processIdentifier != ProcessInfo.processInfo.processIdentifier}) {
             running.activate(options:[.activateAllWindows])
             if let url = running.bundleURL { NSWorkspace.shared.openApplication(at:url,configuration:NSWorkspace.OpenConfiguration()) }
             NSApp.terminate(nil); return
         }
         do {
-            let root = dataRoot ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("RewindReplica")
+            if let index=args.firstIndex(of:"--data-dir"),!args.indices.contains(index+1) {throw CoreCLIError(code:"usage",message:"--data-dir requires a path.")}
+            let root = try DefaultLibrary.resolve(explicit:dataRoot)
             cliLease = try CoreCLILease(root:root)
             model = try AppModel(root:root,maintenanceOnly:args.contains("--headless-service"))
             try model.enableCLIControl(lease:cliLease!)

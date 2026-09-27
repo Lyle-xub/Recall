@@ -1,12 +1,12 @@
 """Export only synthetic demo fixtures from the native Mac app for the Windows build."""
-import json, sqlite3, shutil
+import json, os, sqlite3, shutil
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 root=Path(__file__).resolve().parent.parent
-source=Path.home()/'Library/Application Support/RewindReplica'
+source=Path(os.environ.get('RECALL_DATA_DIR',Path.home()/'Library/Application Support/Recall')).expanduser()
 target=root/'shared/demo'
 (target/'frames').mkdir(parents=True,exist_ok=True)
-db=sqlite3.connect(source/'memory.sqlite')
+db=sqlite3.connect((source/'memory.sqlite').resolve().as_uri()+'?mode=ro',uri=True)
 frames=[]
 def date(value):
     return (datetime(2001,1,1,tzinfo=timezone.utc)+timedelta(seconds=value)).isoformat()

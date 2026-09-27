@@ -27,7 +27,9 @@ Windows 安装器尚未配置代码签名证书。`-SkipSmoke` 仅供诊断，�
 
 默认 `Ctrl + Shift + Space` 唤起，`Ctrl + Alt + Space` 为备用；托盘菜单也可打开。快捷键、登录启动、任务栏图标、麦克风与系统音频都可在设置中更改。
 
-打开任何 Recall 界面会暂停采集，关闭界面后仅恢复原有录制意愿。已保存媒体的 OCR 与转写继续处理。默认数据目录沿用 `%LOCALAPPDATA%\RewindReplica`，保持旧版数据兼容。测试使用单独的临时库。
+打开任何 Recall 界面会暂停采集，关闭界面后仅恢复原有录制意愿。已保存媒体的 OCR 与转写继续处理。默认数据目录为 `%LOCALAPPDATA%\Recall`，数据库、媒体、设置和内置模型统一存放于此。测试使用单独的临时库。
+
+旧版默认目录 `%LOCALAPPDATA%\RewindReplica` 会在未被占用、且新目录不存在时整体迁移到 `Recall`。升级前退出旧版应用和 CLI；如果两个目录都存在，会提示冲突并保留两者。通过 `--data-dir` 或 `RECALL_DATA_DIR` 指定的自定义目录不自动迁移。
 
 ## 工程
 

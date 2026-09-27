@@ -20,7 +20,7 @@ struct ModelDownload: Codable, Identifiable {
     let root: URL
     private var downloads: [String:NativeModelDownload] = [:]
     init() {
-        root = URL(fileURLWithPath:ProcessInfo.processInfo.environment["REWIND_MODEL_ROOT"] ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("RewindReplica/models").path)
+        root = URL(fileURLWithPath:ProcessInfo.processInfo.environment["REWIND_MODEL_ROOT"] ?? (DefaultLibrary.configuredRoot ?? DefaultLibrary.platform.current).appendingPathComponent("models").path)
         try? FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
         let url = ProcessInfo.processInfo.environment["REWIND_CATALOG_PATH"].map{URL(fileURLWithPath:$0)} ?? Bundle.main.resourceURL?.appendingPathComponent("models/catalog.json")
         catalog = url.flatMap {try? Data(contentsOf:$0)}.flatMap {try? JSONDecoder().decode([ModelDownload].self,from:$0)} ?? []

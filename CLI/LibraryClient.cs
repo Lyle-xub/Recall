@@ -6,10 +6,7 @@ namespace Recall.Cli;
 public sealed class LibraryClient(string root)
 {
     public string Root { get; } = Path.GetFullPath(root);
-    public static string DefaultRoot => Environment.GetEnvironmentVariable("RECALL_DATA_DIR") ?? (OperatingSystem.IsMacOS()
-        ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Library", "Application Support", "RewindReplica")
-        : OperatingSystem.IsWindows() ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RewindReplica")
-        : Path.Combine(Environment.GetEnvironmentVariable("XDG_DATA_HOME") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share"), "RewindReplica"));
+    public static string DefaultRoot => DefaultLibrary.Resolve();
     public static string? MacHelper
     {
         get

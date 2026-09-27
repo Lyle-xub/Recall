@@ -27,6 +27,8 @@ async Task<JsonElement> Run(string library, int expected, params string[] words)
 Directory.CreateDirectory(root);
 try
 {
+    await MigrationChecks.Run(root,Assert);
+    if(args.Contains("--migration-only")) {Console.WriteLine($"{tests} migration assertions passed.");return;}
     var windows = Path.Combine(root, "windows");
     await Run(windows, 0, "--help"); Assert(!Directory.Exists(windows), "Help does not create a library");
     await Run(windows, 3, "records", "list"); Assert(!Directory.Exists(windows), "Read does not initialize missing library");

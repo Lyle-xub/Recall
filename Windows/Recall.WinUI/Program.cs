@@ -24,6 +24,12 @@ internal static class Program
             Recall.Ocr.OcrWorker.Run(args.Contains("--fallback"));
             return;
         }
+        var data = Array.IndexOf(args, "--data-dir");
+        if (data >= 0)
+        {
+            if (data + 1 >= args.Length) throw new ArgumentException("--data-dir requires a path.");
+            AppPaths.DataRoot = Path.GetFullPath(args[data + 1]);
+        }
         if (args.Contains("--smoke-test"))
             AppPaths.DataRoot = Path.Combine(Path.GetTempPath(), "Recall-Smoke-" + Guid.NewGuid());
         var parity = Array.IndexOf(args, "--visual-parity");
@@ -36,7 +42,11 @@ internal static class Program
             TraceStartup("Main entered; session=" + System.Diagnostics.Process.GetCurrentProcess().SessionId);
             AppDomain.CurrentDomain.UnhandledException += (_, e) => TraceStartup("Unhandled: " + e.ExceptionObject);
         }
-        single = new Mutex(true, args.Contains("--smoke-test") || parity >= 0 ? "Local\\Recall.Native.Windows.Validation" : "Local\\Recall.Native.Windows", out var first);
+        var explicitRoot = data >= 0 || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("RECALL_DATA_DIR"));
+        var mutexName = args.Contains("--smoke-test") || parity >= 0 ? "Local\\Recall.Native.Windows.Validation" : "Local\\Recall.Native.Windows";
+        if (explicitRoot && !args.Contains("--smoke-test") && parity < 0)
+            mutexName += "." + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(AppPaths.DataRoot.ToUpperInvariant())))[..16];
+        single = new Mutex(true, mutexName, out var first);
         if (!first)
         {
             TraceStartup("An existing validation instance owns the mutex");
@@ -78,8 +88,10 @@ internal sealed class App : Application, Microsoft.UI.Xaml.Markup.IXamlMetadataP
     {
         arguments = args;
         Program.TraceStartup("Application constructor");
-        UnhandledException += (_, e) => { Program.TraceStartup("XAML unhandled: " + e.Exception); Directory.CreateDirectory(AppPaths.DataRoot); File.AppendAllText(Path.Combine(AppPaths.DataRoot, "errors.log"), DateTimeOffset.Now + " " + e.Exception + Environment.NewLine); };
+        UnhandledException += (_, e) => { Program.TraceStartup("XAML unhandled: " + e.Exception); };
     }
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint="MessageBoxW", CharSet=System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern int StartupMessage(IntPtr owner, string text, string caption, uint type);
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
         Program.TraceStartup("OnLaunched");
@@ -87,7 +99,15 @@ internal sealed class App : Application, Microsoft.UI.Xaml.Markup.IXamlMetadataP
         // metadata provider. Loading here avoids the native constructor fail-fast.
         Resources.MergedDictionaries.Add(new XamlControlsResources());
         Program.TraceStartup("XAML resources initialized");
-        var runtime = await Task.Run(() => new AppRuntime());
+        AppRuntime runtime;
+        try { runtime = await Task.Run(() => new AppRuntime()); }
+        catch (Exception error)
+        {
+            // Startup may fail before a safe data root exists; do not resolve it again to log the error.
+            Program.TraceStartup("Library startup failed: " + error);
+            StartupMessage(IntPtr.Zero, error.Message, "Recall could not open your library", 0x10);
+            Exit(); return;
+        }
         Program.TraceStartup("Runtime initialized");
         var smoke = Array.IndexOf(arguments, "--smoke-test");
         var parity = Array.IndexOf(arguments, "--visual-parity");

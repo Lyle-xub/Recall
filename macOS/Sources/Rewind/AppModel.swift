@@ -256,7 +256,8 @@ import ServiceManagement
          archiveRefreshDelay:@escaping @MainActor ()async throws->Void = {try await Task.sleep(for:.milliseconds(120))},
          archiveWindowLoad:(@Sendable (ArchiveWindowQuery)throws->ArchiveWindow)? = nil) throws {
         self.archiveRefreshDelay=archiveRefreshDelay
-        let root = root ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("RewindReplica")
+        let root = try DefaultLibrary.resolve(explicit:root)
+        DefaultLibrary.configuredRoot = root
         store = try MemoryStore(root:root,maintenanceOnly:maintenanceOnly)
         if maintenanceOnly {try store.recoverForHeadless()}
         storageOptimizer = StorageOptimizer(store:store)
