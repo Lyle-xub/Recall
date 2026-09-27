@@ -30,6 +30,7 @@ public sealed class CaptureService : IDisposable
     private readonly SemaphoreSlim indexGate = new(1,1);
     private readonly CancellationTokenSource lifetime = new();
     private readonly Task indexingWorker;
+    private readonly VisualPromotionWorker visualPromotion;
     private RecordingSession? stoppedSession;
     private readonly SemaphoreSlim ocrGate = new(1);
     public event Action<MemoryFrame>? FrameAdded;
@@ -41,9 +42,27 @@ public sealed class CaptureService : IDisposable
     public CaptureService(MemoryStore store)
     {
         this.store = store;
+        visualPromotion = new VisualPromotionWorker((sessionId, token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            foreach (var frame in store.FinalizeVisualSession(sessionId, reference =>
+            {
+                token.ThrowIfCancellationRequested();
+                return VisualVideoReader.Verify(store.Root, reference, token);
+            })) FrameAdded?.Invoke(frame);
+            return Task.CompletedTask;
+        }, error => Error?.Invoke("Visual archive verification retained original captures. " + error.Message), lifetime.Token);
+        // Discovery scans historical metadata only once at startup. Steady-state
+        // OCR and segment completion signal their specific ready session IDs.
+        foreach (var sessionId in store.UnfinishedVisualSessions()) visualPromotion.Request(sessionId);
         indexingWorker = Task.Run(IndexLoop);
         foreach (var frame in store.PendingFrames())
             QueueIndex(frame.Id);
+    }
+    private void QueueVisualPromotion(string sessionId)
+    {
+        if (store.Session(sessionId) is { UnifiedVisualArchive: true, VisualArchiveReady: true, EndedAt: not null })
+            visualPromotion.Request(sessionId);
     }
     private void QueueIndex(string id)
     {
@@ -51,12 +70,6 @@ public sealed class CaptureService : IDisposable
     }
     private async Task IndexLoop()
     {
-        foreach (var sessionId in store.UnfinishedVisualSessions())
-        {
-            if (lifetime.IsCancellationRequested) return;
-            try { foreach (var frame in store.FinalizeVisualSession(sessionId, reference => VisualVideoReader.Verify(store.Root, reference))) FrameAdded?.Invoke(frame); }
-            catch (Exception ex) { Error?.Invoke("Visual archive recovery retained original captures. " + ex.Message); }
-        }
         await foreach (var id in indexing.Reader.ReadAllAsync())
         {
             if (lifetime.IsCancellationRequested)
@@ -120,7 +133,7 @@ public sealed class CaptureService : IDisposable
                 });
                 if (frame.SessionId is { } visualSession && store.Session(visualSession)?.UnifiedVisualArchive == true)
                 {
-                    store.FinalizeVisualSession(visualSession, reference => VisualVideoReader.Verify(store.Root, reference));
+                    QueueVisualPromotion(visualSession);
                     if (frame.ImagePath.EndsWith(".recallvideo", StringComparison.OrdinalIgnoreCase) && File.Exists(original)) File.Delete(original);
                 }
                 else if (File.Exists(original))
@@ -143,11 +156,17 @@ public sealed class CaptureService : IDisposable
         var temporary=Path.Combine(Path.GetTempPath(),Guid.NewGuid()+".png");
         try
         {
-            var frame=store.Frame(id) ?? throw new RecallException("not_found","Memory not found.");
-            using(var image=ImageArchive.Load(store.Root,frame.ImagePath)) image.Save(temporary,ImageFormat.Png);
+            string? sessionId = null;
+            store.WithMediaLock(() =>
+            {
+                var frame = store.Frame(id) ?? throw new RecallException("not_found", "Memory not found.");
+                using var image = ImageArchive.Load(store.Root, frame.ImagePath);
+                image.Save(temporary, ImageFormat.Png);
+                sessionId = frame.SessionId;
+            });
             var result=await OcrEngine.Recognize(temporary,language,ct);
             store.Recognized(id,result.Text,result.Regions);
-            if (frame.SessionId is { } sessionId) store.FinalizeVisualSession(sessionId, reference => VisualVideoReader.Verify(store.Root, reference));
+            if (sessionId != null) QueueVisualPromotion(sessionId);
             FrameAdded?.Invoke(store.Frame(id)!);
             return new {completed=1,id};
         }
@@ -367,11 +386,7 @@ public sealed class CaptureService : IDisposable
         catch (Exception ex) { Error?.Invoke("Microphone track: " + ex.Message); }
         s = s with { EndedAt = DateTimeOffset.Now };
         store.SaveSession(s);
-        if (s.VisualArchiveReady)
-        {
-            await Task.Run(() => store.FinalizeVisualSession(s.Id, reference => VisualVideoReader.Verify(store.Root, reference)));
-            foreach (var frame in store.MetadataFrames().Where(f => f.SessionId == s.Id)) FrameAdded?.Invoke(frame);
-        }
+        if (s.VisualArchiveReady) visualPromotion.Request(s.Id);
         return s;
     }
     public async Task<RecordingSession?> Stop()
@@ -517,14 +532,24 @@ public sealed class CaptureService : IDisposable
     }
     public async Task Shutdown()
     {
-        await Stop();
-        lifetime.Cancel();
-        indexing.Writer.TryComplete();
-        await indexingWorker;
-        neural.Dispose();
-        ocr?.Dispose();
-        ocrGate.Dispose();
-        lifetime.Dispose();
+        try { await Stop(); }
+        finally
+        {
+            lifetime.Cancel();
+            indexing.Writer.TryComplete();
+            try { await indexingWorker; }
+            finally
+            {
+                try { await visualPromotion.Stop(); }
+                finally
+                {
+                    neural.Dispose();
+                    ocr?.Dispose();
+                    ocrGate.Dispose();
+                    lifetime.Dispose();
+                }
+            }
+        }
     }
     public void Dispose()
     {

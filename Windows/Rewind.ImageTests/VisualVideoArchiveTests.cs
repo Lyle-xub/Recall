@@ -121,7 +121,7 @@ internal static class VisualVideoArchiveTests
         store.RecoverInterruptedVisualSessions();
         Check(File.Exists(Path.Combine(root, abandonedSpool)) && store.Frame("abandoned")!.VisualSampleVerified == false && store.Session("abandoned")!.EndedAt != null,
             "Interrupted encoder recovery must retain the only source and clear unproven sample metadata.");
-        return 20 + RapidSamples(root, width, height);
+        return 20 + RapidSamples(root, width, height) + VisualPromotionWorkerTests.Run().GetAwaiter().GetResult();
     }
 
     static int RapidSamples(string root, int width, int height)

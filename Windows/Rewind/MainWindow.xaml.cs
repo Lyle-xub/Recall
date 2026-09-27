@@ -32,7 +32,7 @@ public partial class MainWindow : Window {
     private readonly List<ChatMessage> messages=[];
     private int visibilityGeneration;
     private bool resettingChat;
-    private bool demo,trash,starred,meetingView,ready,quitting,transitioning;
+    private bool demo,trash,starred,meetingView,ready,quitting,transitioning,shutdownStarted;
     private string? appFilter;
     private DateTimeOffset? since;
     private CancellationTokenSource? chatCancellation;
@@ -50,7 +50,7 @@ public partial class MainWindow : Window {
         var menu=new System.Windows.Forms.ContextMenuStrip();menu.Items.Add("Open Rewind",null,(_,_)=>Dispatcher.Invoke(ShowRewind));menu.Items.Add("Start / pause recording",null,(_,_)=>Dispatcher.Invoke(async()=>await ToggleRecording()));menu.Items.Add("Settings…",null,(_,_)=>Dispatcher.Invoke(OpenSettings));menu.Items.Add("Quit",null,(_,_)=>Dispatcher.Invoke(async()=>await Quit()));tray.ContextMenuStrip=menu;tray.DoubleClick+=(_,_)=>Dispatcher.Invoke(ShowRewind);
         SourceInitialized+=(_,_)=>{var handle=new WindowInteropHelper(this).Handle;HwndSource.FromHwnd(handle)?.AddHook(Hook);if(!RegisterHotKey(handle,1,0x4000|0x0002|0x0004,0x20))Notify("Ctrl+Shift+Space is in use. Open Rewind from the tray.");SetWindowDisplayAffinity(handle,0x11);FitDisplay();};
         Closing+=(_,e)=>{if(!quitting){e.Cancel=true;HideRewind();}};
-        Closed+=(_,_)=>{UnregisterHotKey(new WindowInteropHelper(this).Handle,1);tray.Dispose();capture.Dispose();LocalInference.Stop();Store.Dispose();};
+        Closed+=(_,_)=>{UnregisterHotKey(new WindowInteropHelper(this).Handle,1);tray.Dispose();LocalInference.Stop();Store.Dispose();};
         Microsoft.Win32.SystemEvents.SessionSwitch+=(_,e)=>{if(e.Reason==Microsoft.Win32.SessionSwitchReason.SessionLock)Dispatcher.BeginInvoke(async()=>{if(capture.IsRecording)await ToggleRecording();});};
         PrepareDesktopBackdrop();Loaded+=(_,_)=>AnimateIn(this);ready=true;if(demoMode){DemoData.Install(Store);demo=true;SearchBox.Text="tps reports";}Reload();
     }
@@ -118,7 +118,21 @@ public partial class MainWindow : Window {
     internal async Task ApplySettings(AppSettings next,string chatKey,string speechKey){_ = ModelClient.Endpoint(next.Chat,"models");if(next.TranscriptionEnabled)_=ModelClient.Endpoint(next.Speech,"audio/transcriptions");var resume=capture.IsRecording;if(resume){var session=await capture.Stop();if(session!=null)await Transcribe(session);}SecretStore.Save("chat",chatKey);SecretStore.Save("speech",speechKey);Settings=next;File.WriteAllText(settingsFile,JsonSerializer.Serialize(Settings,new JsonSerializerOptions{WriteIndented=true}));
         using var key=Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run",true);if(next.LaunchAtLogin)key?.SetValue("RewindReplica",'"'+Environment.ProcessPath+'"');else key?.DeleteValue("RewindReplica",false);Store.Retain(next.RetentionDays);Reload();if(resume)await capture.Start(Settings);Notify("Settings saved");}
     private void OpenSettings(){ShowRewind();new SettingsWindow(this){Owner=this}.ShowDialog();}
-    private async Task Quit(){try{var session=await capture.Stop();if(session!=null)await Transcribe(session);}catch(Exception ex){MessageBox.Show(ex.Message,"Recording finalization");}quitting=true;chatCancellation?.Cancel();Close();Application.Current.Shutdown();}
+    private async Task Quit()
+    {
+        if(shutdownStarted)return;
+        shutdownStarted=true;
+        try{var session=await capture.Stop();if(session!=null)await Transcribe(session);}
+        catch(Exception ex){MessageBox.Show(ex.Message,"Recording finalization");}
+        finally
+        {
+            // Cancellation joins OCR and visual promotion before Closed releases
+            // the store, including the failed transcription/finalization path.
+            try{await capture.Shutdown();}
+            catch(Exception ex){MessageBox.Show(ex.Message,"Capture shutdown");}
+        }
+        quitting=true;chatCancellation?.Cancel();Close();Application.Current.Shutdown();
+    }
     private static void OpenUrl(Uri uri){if(uri.Scheme is "https" or "http")Process.Start(new ProcessStartInfo(uri.AbsoluteUri){UseShellExecute=true});}
     private async Task SendQuestion(){if(resettingChat)return;if(chatCancellation!=null){chatCancellation.Cancel();return;}var question=QuestionBox.Text.Trim();if(question.Length==0)return;QuestionBox.Clear();var history=messages.ToList();messages.Add(new("user",question));RenderChat();chatCancellation=new();SendButton.Content="■";
         try{var sources=Store.Retrieve(question,demo,since,appFilter);if(sources.Count==0){messages.Add(new("assistant","No memories are available in this range. Start recording or import an image first."));return;}var lines=sources.Select(f=>f.SessionId).Where(x=>x!=null).Distinct().SelectMany(x=>Store.Transcript(x!)).ToList();var displayedSources=Settings.Chat.IsBuiltin?sources.Take(5).ToList():sources;var index=messages.Count;messages.Add(new("assistant","",displayedSources));RenderChat();var lastRender=Stopwatch.StartNew();var answer=await ModelClient.Answer(question,displayedSources,lines,history,Settings.Chat,SecretStore.Read("chat"),chatCancellation.Token,partial=>{messages[index]=new("assistant",partial,displayedSources);if(lastRender.ElapsedMilliseconds>70){RenderChat();lastRender.Restart();}});messages[index]=new("assistant",answer,displayedSources);}catch(OperationCanceledException){}catch(Exception ex){Notify(ex.Message);messages.RemoveAll(m=>m.Role=="assistant"&&m.Text.Length==0);}finally{chatCancellation.Dispose();chatCancellation=null;SendButton.Content="↑";RenderChat();}}

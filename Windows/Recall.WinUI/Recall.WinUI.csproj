@@ -45,7 +45,7 @@
     <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="../Rewind/ImageArchive.cs;../Rewind/VisualVideoArchive.cs;../Rewind/NeuralOcrClient.cs;../Rewind/SecretStore.cs;../Rewind/CaptureService.cs;../Rewind/AudioTrackPolicy.cs" Link="Core/%(Filename).cs" />
+    <Compile Include="../Rewind/ImageArchive.cs;../Rewind/VisualVideoArchive.cs;../Rewind/VisualPromotionWorker.cs;../Rewind/NeuralOcrClient.cs;../Rewind/SecretStore.cs;../Rewind/CaptureService.cs;../Rewind/AudioTrackPolicy.cs" Link="Core/%(Filename).cs" />
     <Content Include="Assets/**" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../Rewind/tessdata/**" Link="tessdata/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../shared/models/**" Link="models/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />

@@ -15,6 +15,11 @@ additional independently addressable sample. The timestamp returned by the
 writer is stored with the card. It is not inferred later from a screenshot's
 wall-clock timestamp.
 
+The sink writer's video processor has frame-rate conversion disabled so
+forced captures retain their original presentation times, including samples
+less than a second apart. Readers validate the native presentation dimensions
+and the decoder's declared display aperture before removing codec padding.
+
 The native writer prefers an available hardware HEVC encoder with an installed
 HEVC decoder. H.264 is the compatibility fallback. Hardware transforms are
 enabled where supported; this is not a promise that every H.264 fallback uses
@@ -41,6 +46,12 @@ uncommitted publication from a committed reference whose source still needs
 retiring. An interrupted recording falls back to its preserved image sources.
 Decoding does not hold the database gate; normal search and metadata updates
 can proceed while a session's cards are verified.
+
+Completed sessions are verified by one background worker. Repeated requests
+for the same session are combined, including OCR completions that arrive
+during verification. Rolling into the next recording segment does not wait
+for every card to be decoded. Shutdown joins the worker; deferred cards keep
+their original images and are discovered on the next startup.
 
 ## Existing images and OCR
 
@@ -89,6 +100,11 @@ shared across sessions; malformed references stop cleanup instead of allowing
 it to guess. Exports copy referenced recordings and materialize packed tiles
 into independent loose payloads under the export directory.
 
+Standalone image optimization checks every primary and meeting-image user.
+After encoding, it checks them again inside the same transaction that updates
+the references. A new OCR retry, pending shared reference or unified-session
+change keeps the original image; abandoned candidate files are removed.
+
 ## Validation
 
 The storage regression suite covers legacy reads, exact-sample promotion
@@ -105,10 +121,17 @@ card, decodes its original dimensions and verifies an independent export.
 real capture, indexing, export, maintenance protection and graceful shutdown
 through the packaged CLI. These use isolated libraries, not user records.
 
-Validation results are recorded after the complete local and remote runs.
+Local shared-core validation passed 327 checks and the complete CLI suite
+passed 317 checks. The native CI workflow retains synthetic video/timestamp
+evidence under `windows-image-tests`, desktop smoke evidence under
+`windows-smoke`, and CLI lifecycle results in
+`windows-cli-archive/acceptance.json`. The CLI matrix additionally runs the
+packaged distribution on Windows, macOS and Linux.
 Hosted Windows results do not certify every physical GPU/driver or establish
 a universal compression ratio for real user libraries.
 
 Native API references: [sink-writer input and encoding parameters](https://learn.microsoft.com/en-us/windows/win32/api/mfreadwrite/nf-mfreadwrite-imfsinkwriter-setinputmediatype),
 [hardware transform selection](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-readwrite-enable-hardware-transforms),
-[H.264 quality and GOP properties](https://learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-encoder).
+[H.264 quality and GOP properties](https://learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-encoder),
+[disabling frame-rate conversion](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-xvp-disable-frc),
+[valid video display aperture](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-mt-minimum-display-aperture-attribute).

@@ -199,7 +199,7 @@ public static class VisualVideoReader
     public static bool Verify(string root, VisualArchive reference, CancellationToken cancellation = default)
     {
         try { using var image = Load(root, reference, cancellation: cancellation); return image.Width == reference.Width && image.Height == reference.Height; }
-        catch (Exception ex) when (ex is COMException or IOException or InvalidOperationException or ArgumentException) { return false; }
+        catch (Exception ex) when (ex is COMException or IOException or InvalidDataException or InvalidOperationException or ArgumentException) { return false; }
     }
 
     private static Bitmap Decode(string path, VisualArchive reference, int maxEdge, CancellationToken cancellation)
