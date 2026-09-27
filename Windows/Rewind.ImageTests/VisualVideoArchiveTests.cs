@@ -45,6 +45,15 @@ internal static class VisualVideoArchiveTests
             duration = writer.DurationTicks; count = writer.SampleCount;
             Check(redTime == 0 && blueTime == 13_750_000 && greenTime == 26_250_000 && count == 3, "The submitted sample PTS must be retained exactly.");
         }
+        var timing = new[]
+        {
+            JsonSerializer.Serialize(new { SubmittedTicks = new[] { redTime, blueTime, greenTime }, DurationTicks = duration }),
+            VisualVideoReader.InspectSamples(path, decode: false),
+            VisualVideoReader.InspectSamples(path, decode: true),
+            VisualVideoReader.InspectSamples(path, decode: true, seekTicks: blueTime)
+        };
+        File.WriteAllLines(Path.Combine(root, "timing.jsonl"), timing);
+        foreach (var line in timing) Console.WriteLine("NATIVE VIDEO TIMING " + line);
         var reference = new VisualArchive(1, relative, blueTime, width, height);
         using (var decoded = VisualVideoReader.Load(root, reference))
         {

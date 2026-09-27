@@ -229,6 +229,7 @@ public static class VisualVideoReader
             }
             finally { Marshal.FreeCoTaskMem(position); }
             var deadline = Stopwatch.StartNew();
+            var observed = new List<string>();
             // Seeking lands on a preceding keyframe. Accept only the exact
             // decoded sample; a nearby thumbnail must never prove durability.
             for (int count = 0; count < 1200 && deadline.Elapsed < TimeSpan.FromSeconds(15); count++)
@@ -240,6 +241,7 @@ public static class VisualVideoReader
                     if (sample != null)
                     {
                         sample.GetSampleTime(out var sampleTime);
+                        if (observed.Count < 24) observed.Add($"sample={sampleTime},reader={timestamp},flags={flags}");
                         if (sampleTime == time)
                         {
                             reader.GetCurrentMediaType(index, out var actual);
@@ -248,12 +250,70 @@ public static class VisualVideoReader
                         }
                         if (sampleTime > time) break;
                     }
+                    if (sample == null && observed.Count < 24) observed.Add($"no-sample,reader={timestamp},flags={flags}");
                     if ((flags & MF_SOURCE_READER_FLAG.MF_SOURCE_READERF_ENDOFSTREAM) != 0) break;
                 }
                 finally { NativeVideo.Release(sample); }
             }
-            throw new InvalidDataException("The exact visual archive sample is unavailable. The original image must be retained.");
+            throw new InvalidDataException($"The exact visual archive sample is unavailable (expected {time}; observed [{string.Join("; ", observed)}]). The original image must be retained.");
         }
+        finally { NativeVideo.Release(requested); NativeVideo.Release(reader); NativeVideo.Release(attributes); }
+    }
+
+    // Synthetic Windows test diagnostics distinguish muxer timestamp changes
+    // from decoder or seek behavior without ever accepting a nearby sample.
+    internal static string InspectSamples(string path, bool decode, long? seekTicks = null)
+    {
+        NativeVideo.Startup();
+        IMFSourceReader? reader = null;
+        IMFMediaType? requested = null;
+        var attributes = MediaFoundationApi.CreateAttributes(2);
+        var observations = new List<object>();
+        try
+        {
+            attributes.SetUINT32(NativeVideo.VideoProcessing, 1);
+            attributes.SetUINT32(MediaFoundationAttributes.MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1);
+            MediaFoundationInterop.MFCreateSourceReaderFromURL(path, attributes, out reader);
+            var index = MediaFoundationInterop.MF_SOURCE_READER_FIRST_VIDEO_STREAM;
+            reader.SetStreamSelection(MediaFoundationInterop.MF_SOURCE_READER_ALL_STREAMS, false);
+            reader.SetStreamSelection(index, true);
+            if (decode)
+            {
+                requested = MediaFoundationApi.CreateMediaType();
+                requested.SetGUID(MediaFoundationAttributes.MF_MT_MAJOR_TYPE, MediaTypes.MFMediaType_Video);
+                requested.SetGUID(MediaFoundationAttributes.MF_MT_SUBTYPE, NativeVideo.Rgb32);
+                reader.SetCurrentMediaType(index, IntPtr.Zero, requested);
+            }
+            if (seekTicks is { } seek)
+            {
+                var position = Marshal.AllocCoTaskMem(24);
+                try
+                {
+                    for (int i = 0; i < 24; i++) Marshal.WriteByte(position, i, 0);
+                    Marshal.WriteInt16(position, 20); Marshal.WriteInt64(position, 8, seek);
+                    reader.SetCurrentPosition(Guid.Empty, position);
+                }
+                finally { Marshal.FreeCoTaskMem(position); }
+            }
+            for (int i = 0; i < 32; i++)
+            {
+                reader.ReadSample(index, 0, out _, out var flags, out var timestamp, out var sample);
+                try
+                {
+                    long? sampleTime = null, duration = null;
+                    if (sample != null)
+                    {
+                        sample.GetSampleTime(out var pts); sampleTime = pts;
+                        try { sample.GetSampleDuration(out var span); duration = span; } catch (COMException) { }
+                    }
+                    observations.Add(new { ReaderTicks = timestamp, SampleTicks = sampleTime, DurationTicks = duration, Flags = flags.ToString() });
+                    if ((flags & MF_SOURCE_READER_FLAG.MF_SOURCE_READERF_ENDOFSTREAM) != 0) break;
+                }
+                finally { NativeVideo.Release(sample); }
+            }
+            return System.Text.Json.JsonSerializer.Serialize(new { Decode = decode, SeekTicks = seekTicks, Samples = observations });
+        }
+        catch (Exception error) { return System.Text.Json.JsonSerializer.Serialize(new { Decode = decode, SeekTicks = seekTicks, Samples = observations, Error = error.ToString() }); }
         finally { NativeVideo.Release(requested); NativeVideo.Release(reader); NativeVideo.Release(attributes); }
     }
 

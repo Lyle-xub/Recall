@@ -25,6 +25,8 @@ jobs:
       - run: dotnet run --project Windows/Rewind.Tests/Rewind.Tests.csproj
       - shell: pwsh
         run: ./scripts/build-windows.ps1
+        env:
+          RECALL_IMAGE_TEST_OUTPUT: ${{ github.workspace }}/release/windows-image-tests
       - name: Build CLI for native desktop integration
         run: python scripts/build-cli.py
       - name: Windows navigation, recording recovery and CLI ownership
@@ -45,6 +47,7 @@ jobs:
           name: Recall-Windows-native-validation
           path: |
             release/windows-smoke
+            release/windows-image-tests
             release/windows-integration/**/*.json
             release/windows-integration/startup.log
             release/windows-cli-archive/acceptance.json

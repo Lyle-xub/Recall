@@ -117,7 +117,21 @@ static class ArchiveMediaChecks
         File.WriteAllText(referencePath, JsonSerializer.Serialize(reference));
 
         var adjacent = Path.Combine(root, "recordings", "adjacent.mp4");
-        await Ffmpeg("-i", red, "-vf", "settb=1/1000000,setpts=300500", "-frames:v", "1", "-fps_mode", "passthrough", "-enc_time_base", "1:1000000", "-video_track_timescale", "1000000", "-c:v", "libx264", "-crf", "0", "-threads", "1", "-y", adjacent);
+        // Keep the target inside the timeline: older FFmpeg versions round a
+        // lone nonzero-start sample via the MP4 movie edit list, and may omit
+        // their final sample when its inferred duration is zero. Neither is a
+        // useful fixture for testing exact frame selection.
+        await Ffmpeg("-loop", "1", "-i", red, "-vf", "settb=1/1000000,setpts=N*300500", "-frames:v", "3", "-fps_mode", "passthrough", "-enc_time_base", "1:1000000", "-video_track_timescale", "1000000", "-movie_timescale", "1000000", "-c:v", "libx264", "-bf", "0", "-crf", "0", "-threads", "1", "-y", adjacent);
+        var fixtureProbe = await ChildProcess.Run(Environment.GetEnvironmentVariable("RECALL_FFPROBE") ?? "ffprobe",
+            ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=time_base:frame=pts", "-of", "json", adjacent], null, default, 30);
+        assert(fixtureProbe.ExitCode == 0, "VFR fixture timestamps can be inspected before exercising the decoder");
+        using (var probed = JsonDocument.Parse(fixtureProbe.Output))
+        {
+            var timeBase = probed.RootElement.GetProperty("streams")[0].GetProperty("time_base").GetString();
+            var timestamps = probed.RootElement.GetProperty("frames").EnumerateArray().Select(f=>f.GetProperty("pts").GetInt64()).ToArray();
+            Console.WriteLine($"ARCHIVE_VFR_FIXTURE: time_base={timeBase}, decoded_pts=[{string.Join(',', timestamps)}]");
+            assert(timeBase == "1/1000000" && timestamps.Contains(0) && timestamps.Contains(300500) && !timestamps.Contains(300000), "VFR fixture contains an actual .3005-second frame and no .3000-second frame");
+        }
         File.WriteAllText(referencePath, JsonSerializer.Serialize(reference with { Video = "recordings/adjacent.mp4", Ticks = 180, Timescale = 600 }));
         try { using var image = await PortableImage.Open(root, "frames/exact.recallvideo"); assert(false, "A .3005-second VFR sample must not stand in for a .3000-second reference"); }
         catch (RecallException e) { assert(e.Code == "unsupported_media", "Low-timescale rounding cannot accept an adjacent VFR sample"); }

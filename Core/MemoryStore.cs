@@ -66,6 +66,7 @@ public sealed partial class MemoryStore : IDisposable
         Execute("CREATE INDEX IF NOT EXISTS frames_meeting_image ON frames(json_extract(json,'$.MeetingImagePath'))");
         Execute("CREATE INDEX IF NOT EXISTS frames_ocr ON frames(ocr_id)");
         Execute("CREATE INDEX IF NOT EXISTS frames_pixel ON frames(json_extract(json,'$.PixelHash'))");
+        Execute("CREATE INDEX IF NOT EXISTS frames_session ON frames(json_extract(json,'$.SessionId'))");
         Execute("CREATE TABLE IF NOT EXISTS ocr_payloads(id TEXT UNIQUE NOT NULL,text TEXT NOT NULL,regions TEXT NOT NULL,meeting_regions TEXT NOT NULL)");
         Execute("CREATE VIRTUAL TABLE IF NOT EXISTS ocr_fts USING fts5(text,content='ocr_payloads',content_rowid='rowid',tokenize='unicode61 remove_diacritics 2',prefix='2 3 4')");
         Execute("CREATE TRIGGER IF NOT EXISTS ocr_insert AFTER INSERT ON ocr_payloads BEGIN INSERT INTO ocr_fts(rowid,text) VALUES(new.rowid,new.text); END");

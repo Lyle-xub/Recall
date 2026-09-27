@@ -166,7 +166,23 @@ public sealed class HumanOutput(TextWriter writer,TerminalStyle style,Arguments?
         if(V(e,"state") is "failed" or "cancelled" or "interrupted")Text(T("Resume: recall tasks resume ID (use the same --data-dir).","恢复：recall tasks resume ID（使用相同的 --data-dir）。"));JsonHint();
     }
     void Sessions(JsonElement e)
-    {foreach(var item in Rows(e).Take(20)){Line(TerminalText.Clean(V(item,"id")));Field("Started","开始",Date(V(item,"startedAt")));Field("Ended","结束",V(item,"endedAt").Length>0?Date(V(item,"endedAt")):T("in progress","进行中"));Field("Audio","音频",Bool(Get(item,"hasAudio")));}if(Count(e)==0)Text(T("No sessions.","没有会话。"));Omitted(Count(e),20);}
+    {
+        foreach(var item in Rows(e).Take(20))
+        {
+            Line(TerminalText.Clean(V(item,"id")));
+            Field("Started","开始",Date(V(item,"startedAt")));
+            Field("Ended","结束",V(item,"endedAt").Length>0?Date(V(item,"endedAt")):T("in progress","进行中"));
+            Field("Audio","音频",Bool(Get(item,"hasAudio")));
+            if(V(item,"videoCodec").Length>0) Field("Video codec","视频编码",V(item,"videoCodec").ToUpperInvariant());
+            if(V(item,"videoWidth").Length>0 && V(item,"videoHeight").Length>0)
+                Field("Capture size","采集尺寸",V(item,"videoWidth")+" × "+V(item,"videoHeight"));
+            if(Yes(item,"unifiedVisualArchive"))
+                Field("Archive","归档",Yes(item,"visualArchiveReady")?T("Shared video frames ready","共享视频帧已就绪"):T("Original images retained","原始图片已保留"));
+            Field("Compatibility","兼容说明",V(item,"videoDiagnostic"));
+        }
+        if(Count(e)==0) Text(T("No sessions.","没有会话。"));
+        Omitted(Count(e),20);
+    }
     void Transcript(JsonElement e)
     {if(Count(e)==0)Text(T("No transcript lines.","没有转录文本。"));foreach(var item in Rows(e)){Line(style.Dim(Date(V(item,"timestamp"))+"  "+TerminalText.Clean(V(item,"speaker"))));Text(V(item,"text"));}}
     void ModelCatalog(JsonElement e)
