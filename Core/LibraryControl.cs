@@ -144,6 +144,35 @@ public static class LibraryControlClient
         if (!Guid.TryParseExact(id,"N",out _)) throw new RecallException("usage","Invalid request ID.");
         return Path.Combine(root,".recall-control",id+suffix);
     }
+    static JsonElement? ReadReceipt(string path)
+    {
+        try
+        {
+            if((File.GetAttributes(path)&FileAttributes.ReparsePoint)!=0)return null;
+            using var document=JsonDocument.Parse(File.ReadAllText(path));
+            return document.RootElement.ValueKind==JsonValueKind.Object?document.RootElement.Clone():null;
+        }
+        catch(Exception error) when(error is IOException or JsonException or UnauthorizedAccessException) {return null;}
+    }
+    static string? ReceiptText(JsonElement value,string name)=>value.TryGetProperty(name,out var field)&&field.ValueKind==JsonValueKind.String?field.GetString():null;
+    static int ReceiptPid(JsonElement value,string name)=>value.TryGetProperty(name,out var field)&&field.ValueKind==JsonValueKind.Number&&field.TryGetInt32(out var pid)?pid:-1;
+    static bool TaskIdentity(JsonElement task,string id,JsonElement? owner=null)=>
+        ReceiptText(task,"id")==id && Guid.TryParseExact(ReceiptText(task,"instance"),"N",out _) && ReceiptPid(task,"ownerPid")>0 &&
+        (owner==null || ReceiptText(task,"instance")==ReceiptText(owner.Value,"instance") && ReceiptPid(task,"ownerPid")==ReceiptPid(owner.Value,"pid"));
+    static bool SameOwner(JsonElement? current,JsonElement expected)=>current!=null &&
+        ReceiptText(current.Value,"instance")==ReceiptText(expected,"instance") && ReceiptPid(current.Value,"pid")==ReceiptPid(expected,"pid");
+    static bool CompletedReceipt(string root,string id,JsonElement? owner,out JsonElement response)
+    {
+        response=default;
+        var task=ReadReceipt(RequestPath(root,id,".task.json"));
+        if(task==null || !TaskIdentity(task.Value,id,owner) || ReceiptText(task.Value,"state")!="finished")return false;
+        var reply=ReadReceipt(RequestPath(root,id,".response.json"));
+        if(reply==null || !reply.Value.TryGetProperty("ok",out var ok))return false;
+        if(ok.ValueKind==JsonValueKind.True && reply.Value.TryGetProperty("result",out _) ||
+            ok.ValueKind==JsonValueKind.False && reply.Value.TryGetProperty("error",out var error) && error.ValueKind==JsonValueKind.Object && ReceiptText(error,"code")!=null && ReceiptText(error,"message")!=null)
+        {response=reply.Value;return true;}
+        return false;
+    }
     public static object[] Requests(string root)
     {
         var folder=Path.Combine(root,".recall-control");
@@ -152,52 +181,79 @@ public static class LibraryControlClient
     }
     public static object Result(string root,string id)
     {
-        var reply=RequestPath(root,id,".response.json");
-        if(File.Exists(reply)) { using var response=JsonDocument.Parse(File.ReadAllText(reply)); return response.RootElement.Clone(); }
+        if(CompletedReceipt(root,id,null,out var response))return response;
         var path=RequestPath(root,id,".task.json");
         if(!File.Exists(path)) throw new RecallException("not_found","Request receipt not found.");
-        using var task=JsonDocument.Parse(File.ReadAllText(path));
+        var task=ReadReceipt(path);
+        if(task==null || !TaskIdentity(task.Value,id))throw new RecallException("invalid_response","Request receipt identity could not be verified.");
         var owner=Owner(root);
-        var current=owner != null && owner.Value.Text("instance")==task.RootElement.Text("instance");
-        return new {id,state=current?task.RootElement.Text("state"):"interrupted",completionKnown=false};
+        var state=ReceiptText(task.Value,"state");
+        var current=owner!=null && TaskIdentity(task.Value,id,owner);
+        return new {id,state=current && (state is "queued" or "running") ? state:"interrupted",completionKnown=false};
     }
-    public static async Task<JsonElement> Send(string root, string operation, object args, CancellationToken ct, string? requestId = null, TimeSpan? timeout = null)
+    public static Task<JsonElement> Send(string root, string operation, object args, CancellationToken ct, string? requestId = null, TimeSpan? timeout = null)
+        =>SendUsingPoll(root,operation,args,ct,token=>Task.Delay(100,token),requestId,timeout);
+    internal static async Task<JsonElement> SendUsingPoll(string root,string operation,object args,CancellationToken ct,Func<CancellationToken,Task> poll,string? requestId=null,TimeSpan? timeout=null)
     {
         var id=requestId??Guid.NewGuid().ToString("N");
         var request=RequestPath(root,id,".request.json");var reply=RequestPath(root,id,".response.json");
-        JsonElement Response()
+        JsonElement Response(JsonElement response)
         {
-            using var response=JsonDocument.Parse(File.ReadAllText(reply));
-            if(!response.RootElement.Flag("ok"))
+            if(!response.Flag("ok"))
             {
-                var error=response.RootElement.GetProperty("error");
+                var error=response.GetProperty("error");
                 throw new RecallException(error.Text("code")??"operation_failed",error.Text("message")??"Application request failed.",new {requestId=id,result=$"recall tasks result {id}"});
             }
-            return response.RootElement.GetProperty("result").Clone();
+            return response.GetProperty("result").Clone();
         }
-        if(File.Exists(reply)) return Response();
-        var owner=Owner(root)??throw new RecallException("service_unavailable","Recall is not running for this library. Start the desktop application or the headless recording service.");
+        RecallException Interrupted()=>new("interrupted","The owner changed before acknowledging completion. Inspect the durable receipt before retrying.",new {requestId=id,result=$"recall tasks result {id}"});
+        if(CompletedReceipt(root,id,null,out var completed))return Response(completed);
+        var previous=ReadReceipt(RequestPath(root,id,".task.json"));
+        var owner=Owner(root);
+        if(previous!=null && (owner==null || !TaskIdentity(previous.Value,id,owner)))
+        {
+            // A resumed request can also finish while its initial receipt and
+            // owner snapshots are being read.
+            if(CompletedReceipt(root,id,null,out completed))return Response(completed);
+            throw Interrupted();
+        }
+        if(owner==null)throw new RecallException("service_unavailable","Recall is not running for this library. Start the desktop application or the headless recording service.");
         if(!File.Exists(request))
         {
-            Wire.Atomic(RequestPath(root,id,".task.json"),new {id,operation,state="queued",ownerPid=owner.Number("pid",-1),instance=owner.Text("instance"),updated=DateTimeOffset.UtcNow});
-            Wire.Atomic(request,new {instance=owner.Text("instance"),operation,args});
+            // Never replay an uncertain existing receipt. In particular a
+            // response without its final task marker is not permission to run
+            // an already committed mutation a second time.
+            if(previous!=null || File.Exists(reply) || File.Exists(RequestPath(root,id,".task.json")))
+            {
+                if(CompletedReceipt(root,id,owner,out completed))return Response(completed);
+                throw Interrupted();
+            }
+            Wire.Atomic(RequestPath(root,id,".task.json"),new {id,operation,state="queued",ownerPid=owner.Value.Number("pid",-1),instance=owner.Value.Text("instance"),updated=DateTimeOffset.UtcNow});
+            Wire.Atomic(request,new {instance=owner.Value.Text("instance"),operation,args});
         }
         using var deadline=CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(timeout??TimeSpan.FromSeconds(120));
         try
         {
-            while(!File.Exists(reply))
+            while(true)
             {
-                await Task.Delay(100,deadline.Token);
-                if(Owner(root)?.Text("instance")!=owner.Text("instance"))
-                    throw new RecallException("interrupted","The owner changed before acknowledging completion. Inspect the durable receipt before retrying.",new {requestId=id,result=$"recall tasks result {id}"});
+                // Hosts publish response -> finished task -> remove owner. A
+                // completed receipt remains authoritative after orderly exit.
+                if(CompletedReceipt(root,id,owner,out completed))return Response(completed);
+                if(!SameOwner(Owner(root),owner.Value))
+                {
+                    // The host may have finished between the first read and
+                    // our observation that ownership changed.
+                    if(CompletedReceipt(root,id,owner,out completed))return Response(completed);
+                    throw Interrupted();
+                }
+                await poll(deadline.Token);
             }
-            return Response();
         }
         catch(OperationCanceledException)
         {
             File.WriteAllText(RequestPath(root,id,".cancel"),"");
-            throw new RecallException(ct.IsCancellationRequested?"cancelled":"timeout","Stopped waiting. A queued request will be cancelled; an in-flight commit can still finish. Its durable receipt records the outcome.",new {requestId=id,completionKnown=File.Exists(reply),result=$"recall tasks result {id}"});
+            throw new RecallException(ct.IsCancellationRequested?"cancelled":"timeout","Stopped waiting. A queued request will be cancelled; an in-flight commit can still finish. Its durable receipt records the outcome.",new {requestId=id,completionKnown=CompletedReceipt(root,id,owner,out _),result=$"recall tasks result {id}"});
         }
     }
 }

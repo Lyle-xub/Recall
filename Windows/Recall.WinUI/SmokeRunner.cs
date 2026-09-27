@@ -46,6 +46,33 @@ internal static class SmokeRunner
             Check(frame.ImagePath.EndsWith(".recallframe"), "New images use shared tile archives");
             using (var decoded = ImageArchive.Load(runtime.Store.Root, frame.ImagePath))
                 Check(decoded.Width == 1000 && decoded.Height == 500, "Archive preserves pixel dimensions");
+            string meetingArchive;
+            using (var image = new Bitmap(1000, 500))
+            {
+                using var g = Graphics.FromImage(image);
+                g.Clear(System.Drawing.Color.White);
+                using var font = new Font("Segoe UI", 40);
+                // Deliberately distinct vertical placement checks that the two
+                // coordinate lists belong to their own materialized image.
+                g.DrawString("Meeting budget 67890", font, System.Drawing.Brushes.Black, 45, 280);
+                meetingArchive = ImageArchive.Pack(runtime.Store.Root, image);
+            }
+            runtime.Store.Save(frame with { MeetingImagePath = meetingArchive, Text = "Stale OCR", Regions = [], MeetingRegions = [] });
+            await runtime.Capture.IndexOne(frame.Id, "eng", CancellationToken.None);
+            frame = runtime.Store.Frame(frame.Id)!;
+            Check(frame.Text.Contains("12345") && frame.Text.Contains("papers", StringComparison.OrdinalIgnoreCase) &&
+                frame.Text.Contains("67890") && frame.Text.Contains("budget", StringComparison.OrdinalIgnoreCase),
+                "Desktop reindex recognizes archived main and meeting images with bundled OCR");
+            Check(frame.Regions.Any(region => region.Text.Contains("12345") && region.Y < .5) &&
+                frame.MeetingRegions.Any(region => region.Text.Contains("67890") && region.Y > .5),
+                "Desktop reindex retains separate main and meeting coordinates");
+            Check(frame.ImagePath.EndsWith(".recallframe") && frame.MeetingImagePath == meetingArchive,
+                "Desktop reindex preserves both archive references");
+            bool unsupportedLanguage = false;
+            try { await runtime.Capture.IndexOne(frame.Id, "fra", CancellationToken.None); }
+            catch (RecallException error) when (error.Code == "unsupported_language") { unsupportedLanguage = true; }
+            Check(unsupportedLanguage && runtime.Store.Frame(frame.Id)!.Text == frame.Text,
+                "Desktop reindex rejects unsupported languages without replacing existing OCR");
             window.Show();
             await Task.Delay(700);
             foreach (var page in new[] { "home", "search", "usage", "ask", "settings" })

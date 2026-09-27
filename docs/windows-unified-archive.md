@@ -6,6 +6,10 @@ and OCR coordinates are compressed losslessly. The macOS application sources
 are unchanged. This is a Windows implementation using the shared C# core;
 it does not replace the Mac library schema or its Swift adapter.
 
+Upgrade the Windows application and CLI together before writing the new
+archives. Older binaries do not understand the new packed payloads or compressed
+OCR records; the new versions continue to read the previous formats.
+
 ## New recording
 
 One serialized capture loop supplies the exact same native-resolution bitmap
@@ -85,6 +89,12 @@ materialization uses FFmpeg, verifies the timestamp and dimensions, and cleans
 temporary images on success, cancellation and failure. No nearest-frame
 fallback is accepted. The ordinary Mac library path still uses its Swift helper.
 
+Windows desktop indexing also uses the bundled OCR engines, including both
+the main capture and any meeting image; it does not require a `tesseract`
+executable on `PATH`. The desktop model automatically recognizes English and
+Simplified Chinese. `eng`, `chi_sim`, and their combination select this native
+path; unsupported languages return an explicit error without replacing OCR.
+
 On Windows, `recall recording start` first uses an existing owner. Otherwise
 it can start the installed desktop in background service mode, using the
 requested library and the same native encoder. A portable desktop location
@@ -122,7 +132,10 @@ real capture, indexing, export, maintenance protection and graceful shutdown
 through the packaged CLI. These use isolated libraries, not user records.
 
 Local shared-core validation passed 327 checks and the complete CLI suite
-passed 317 checks. The native CI workflow retains synthetic video/timestamp
+passed 368 checks, including the real Mac native service lifecycle. Seventeen
+deterministic receipt checks passed ten consecutive runs; they cover successful
+and failed completion during owner exit and reject unverified acknowledgements.
+The native CI workflow retains synthetic video/timestamp
 evidence under `windows-image-tests`, desktop smoke evidence under
 `windows-smoke`, and CLI lifecycle results in
 `windows-cli-archive/acceptance.json`. The CLI matrix additionally runs the

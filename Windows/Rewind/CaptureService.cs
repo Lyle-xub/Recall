@@ -152,25 +152,57 @@ public sealed class CaptureService : IDisposable
     }
     public async Task<object> IndexOne(string id,string language,CancellationToken ct)
     {
+        // Desktop capture uses one bundled bilingual model, with the same
+        // English/Simplified Chinese Tesseract fallback. Language codes select
+        // this supported set; they do not imply an English-only output filter.
+        if (language is not ("eng" or "chi_sim" or "eng+chi_sim" or "chi_sim+eng"))
+            throw new RecallException("unsupported_language", "Windows desktop OCR automatically recognizes English and Simplified Chinese. Use eng, chi_sim, or eng+chi_sim.");
         await indexGate.WaitAsync(ct);
-        var temporary=Path.Combine(Path.GetTempPath(),Guid.NewGuid()+".png");
+        var temporary = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".png");
+        var meetingTemporary = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".png");
         try
         {
             string? sessionId = null;
+            bool hasMeeting = false;
             store.WithMediaLock(() =>
             {
                 var frame = store.Frame(id) ?? throw new RecallException("not_found", "Memory not found.");
                 using var image = ImageArchive.Load(store.Root, frame.ImagePath);
                 image.Save(temporary, ImageFormat.Png);
+                if (!string.IsNullOrEmpty(frame.MeetingImagePath))
+                {
+                    using var meeting = ImageArchive.Load(store.Root, frame.MeetingImagePath);
+                    meeting.Save(meetingTemporary, ImageFormat.Png);
+                    hasMeeting = true;
+                }
                 sessionId = frame.SessionId;
             });
-            var result=await OcrEngine.Recognize(temporary,language,ct);
-            store.Recognized(id,result.Text,result.Regions);
+            var result = await Recognize(temporary, ct);
+            var text = result.Text;
+            List<TextRegion>? meetingRegions = null;
+            if (hasMeeting)
+            {
+                var meeting = await Recognize(meetingTemporary, ct);
+                meetingRegions = meeting.Regions;
+                text = string.Join("\n", new[] { text, meeting.Text }.Where(value => !string.IsNullOrWhiteSpace(value)));
+            }
+            // Publish both OCR results together. A failed/cancelled secondary
+            // image must not erase previously indexed meeting text or regions.
+            ct.ThrowIfCancellationRequested();
+            store.Recognized(id, text, result.Regions, meetingRegions);
             if (sessionId != null) QueueVisualPromotion(sessionId);
             FrameAdded?.Invoke(store.Frame(id)!);
             return new {completed=1,id};
         }
-        finally {if(File.Exists(temporary))File.Delete(temporary);indexGate.Release();}
+        finally
+        {
+            try
+            {
+                if (File.Exists(temporary)) File.Delete(temporary);
+                if (File.Exists(meetingTemporary)) File.Delete(meetingTemporary);
+            }
+            finally { indexGate.Release(); }
+        }
     }
     public async Task<MemoryFrame> Import(string file)
     {

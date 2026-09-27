@@ -47,9 +47,11 @@ async Task<JsonElement> Run(string library, int expected, params string[] words)
 Directory.CreateDirectory(root);
 try
 {
+    if(args.Contains("--control-receipt-only")) {await ControlReceiptChecks.Run(root,Assert);Console.WriteLine($"{tests} control receipt assertions passed.");return;}
     if(args.Contains("--archive-media-only")) {await ArchiveMediaChecks.Run(root,Assert,Run);Console.WriteLine($"{tests} archive media assertions passed.");return;}
     await MigrationChecks.Run(root,Assert);
     if(args.Contains("--migration-only")) {Console.WriteLine($"{tests} migration assertions passed.");return;}
+    await ControlReceiptChecks.Run(root,Assert);
     await ArchiveMediaChecks.Run(root,Assert,Run);
     var windows = Path.Combine(root, "windows");
     await Run(windows, 0, "--help"); Assert(!Directory.Exists(windows), "Help does not create a library");

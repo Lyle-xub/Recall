@@ -79,7 +79,7 @@ static class DurableChecks
                 try {await queued;throw new Exception("Queued request was not cancelled");}
                 catch(RecallException e) {assert(e.Code=="cancelled","Cancelling a queued request returns its durable receipt");cancelled=Wire.Element(e.Details!).Text("requestId")!;}
                 release.TrySetResult();
-                await Until(()=>File.Exists(Path.Combine(library,".recall-control",cancelled+".response.json")));
+                await Until(()=>CompletedReceipt(library,cancelled));
                 assert(Wire.Element(LibraryControlClient.Result(library,request)).Flag("ok"),"Completion after timeout is preserved in the receipt");
                 assert(Wire.Element(LibraryControlClient.Result(library,cancelled)).GetProperty("error").Text("code")=="cancelled" && calls==1,"Queued cancellation never invokes the mutation handler");
                 await LibraryControlClient.Send(library,"slow",new {},default,request);
@@ -91,7 +91,7 @@ static class DurableChecks
         Wire.Atomic(Path.Combine(library,".recall-control",stale+".request.json"),new {instance="old-owner",operation="stale",args=new {}});
         using(var owner=new LibraryControlHost(library,"test",(_,_)=>throw new Exception("Stale handler must not run")))
         {
-            await Until(()=>File.Exists(Path.Combine(library,".recall-control",stale+".response.json")));
+            await Until(()=>CompletedReceipt(library,stale));
             assert(Wire.Element(LibraryControlClient.Result(library,stale)).GetProperty("error").Text("code")=="stale_owner","New owner drains stale requests without executing them");
         }
         entered=new(TaskCreationOptions.RunContinuationsAsynchronously);release=new(TaskCreationOptions.RunContinuationsAsynchronously);calls=0;
@@ -209,4 +209,5 @@ static class DurableChecks
         for(var i=0;i<200;i++){if(condition())return;await Task.Delay(25);}
         throw new Exception("Timed out waiting for a durable operation");
     }
+    static bool CompletedReceipt(string root,string id)=>File.Exists(Path.Combine(root,".recall-control",id+".task.json")) && Wire.Element(LibraryControlClient.Result(root,id)).TryGetProperty("ok",out _);
 }
