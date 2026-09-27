@@ -45,6 +45,7 @@ import Combine
         }
         model.$settings.map(\.glassArchiveEnabled).removeDuplicates().receive(on:RunLoop.main).sink { [weak self] _ in self?.sync() }.store(in:&subscriptions)
         model.$timelineCursor.removeDuplicates().receive(on:RunLoop.main).sink { [weak self] _ in self?.sync() }.store(in:&subscriptions)
+        model.$timelineJumpOpen.removeDuplicates().receive(on:RunLoop.main).sink { [weak self] _ in self?.sync() }.store(in:&subscriptions)
         NotificationCenter.default.publisher(for:NSApplication.didHideNotification).sink { [weak self] _ in self?.dismiss() }.store(in:&subscriptions)
     }
     deinit { if let mouseMonitor { NSEvent.removeMonitor(mouseMonitor) } }
@@ -55,7 +56,7 @@ import Combine
     }
     private func sync() {
         guard presented, let parent, parent.isVisible,
-              !model.settings.glassArchiveEnabled || hoverReveal || model.timelineCursor != nil,
+              !model.settings.glassArchiveEnabled || hoverReveal || model.timelineCursor != nil || model.timelineJumpOpen,
               !model.searchPresented, !model.askOpen, !model.inspectorOpen, !model.settingsOpen, !model.usageOpen, !model.onboardingOpen else {
             setVisible(false); return
         }

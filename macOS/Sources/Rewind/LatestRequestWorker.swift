@@ -9,6 +9,7 @@ import Foundation
     private var task: Task<Void,Never>?
     private var revision = 0
     private(set) var operationCount = 0
+    var isIdle:Bool {task == nil}
     init(operation:@escaping @Sendable (Input)throws->Output) { self.operation = operation }
     func submit(_ input:Input,apply:@escaping(Output)->Void,fail:@escaping(Error)->Void = {_ in}) {
         revision += 1; pending = (input,revision,apply,fail)
@@ -27,5 +28,5 @@ import Foundation
         }
     }
     func cancel() { revision += 1; pending = nil }
-    func waitUntilIdle() async { await task?.value }
+    func waitUntilIdle() async { while let task {await task.value} }
 }

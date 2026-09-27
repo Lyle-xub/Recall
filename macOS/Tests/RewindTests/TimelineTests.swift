@@ -138,6 +138,29 @@ final class TimelineTests: XCTestCase {
         XCTAssertTrue(controller.panel.isVisible,"Reopening classic mode keeps the timeline available")
         await model.shutDownRecording();await model.storageOptimizer.stop()
     }
+    @MainActor func testExplicitDateJumpRevealsRestingArchiveTimeline()async throws {
+        let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {try? FileManager.default.removeItem(at:root)}
+        _ = try MemoryStore(root:root)
+        let model=try AppModel(root:root,maintenanceOnly:true)
+        model.onboardingOpen=false;model.settings.glassArchiveEnabled=true
+        let parent=NSWindow(contentRect:CGRect(x:0,y:0,width:1200,height:800),styleMask:.borderless,backing:.buffered,defer:false)
+        parent.isReleasedWhenClosed=false
+        let controller=TimelinePanelController(parent:parent,model:model)
+        defer {controller.dismiss();parent.orderOut(nil);model.prepareToQuit()}
+        parent.orderFront(nil);controller.present()
+        XCTAssertFalse(controller.panel.isVisible)
+        let revealed=XCTestExpectation(description:"Explicit date jump reveals native panel")
+        let subscription=model.$timelineVisible.dropFirst().filter {$0}.prefix(1).sink {_ in revealed.fulfill()}
+        model.timelineJumpOpen=true
+        await fulfillment(of:[revealed],timeout:2)
+        XCTAssertTrue(controller.panel.isVisible)
+        XCTAssertTrue(model.timelineVisible)
+        XCTAssertNil(model.timelineCursor,"Opening the picker must not invent a timeline selection")
+        withExtendedLifetime(subscription) {}
+        controller.dismiss()
+        XCTAssertFalse(model.timelineJumpOpen,"Closing the overlay also closes its date picker")
+    }
     @MainActor func testBlurMaskExistsBeforeTheFirstWindowLayout() {
         let view = DesktopEffectView(frame:NSRect(x:0,y:0,width:1200,height:220))
         XCTAssertNil(view.window)

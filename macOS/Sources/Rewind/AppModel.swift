@@ -33,6 +33,9 @@ import ServiceManagement
     private var archiveProtectedFrames:[ArchivePinnedRecord] = []
     private var archivePendingQuery:ArchiveWindowQuery?
     private var archiveRefreshTask:Task<Void,Never>?
+    private var archiveRefreshRevision=0
+    private var archiveWindowRefreshing=false
+    private let archiveRefreshDelay:@MainActor ()async throws->Void
     private let archiveNavigationWorker:LatestRequestWorker<ArchiveWindowQuery,ArchiveWindow>
     @Published var archiveDay = Calendar.current.startOfDay(for:Date())
     private var archiveDayInitialized = false
@@ -240,7 +243,10 @@ import ServiceManagement
     }
     func stopCLIControl() async { await cliControl?.stop();cliControl = nil }
 
-    init(root: URL? = nil,maintenanceOnly:Bool = false) throws {
+    init(root: URL? = nil,maintenanceOnly:Bool = false,
+         archiveRefreshDelay:@escaping @MainActor ()async throws->Void = {try await Task.sleep(for:.milliseconds(120))},
+         archiveWindowLoad:(@Sendable (ArchiveWindowQuery)throws->ArchiveWindow)? = nil) throws {
+        self.archiveRefreshDelay=archiveRefreshDelay
         let root = root ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("RewindReplica")
         store = try MemoryStore(root:root,maintenanceOnly:maintenanceOnly)
         if maintenanceOnly {try store.recoverForHeadless()}
@@ -256,7 +262,7 @@ import ServiceManagement
         navigationWorker = LatestRequestWorker { try TimelineNavigationResult.load($0,store:navigationDB) }
         activityWorker = LatestRequestWorker { try TimelineActivityResult.load($0,store:activityDB) }
         let archiveDB = try MemoryStore(root:root,readOnly:true)
-        archiveNavigationWorker = LatestRequestWorker { try archiveDB.archiveWindow($0) }
+        archiveNavigationWorker = LatestRequestWorker(operation:archiveWindowLoad ?? {try archiveDB.archiveWindow($0)})
         transcriptWorker = LatestRequestWorker { try RecordingRecognitionDetail.load($0,store:previewDB) }
         searchWorker = LatestRequestWorker { try MemorySearchPage.load($0,store:searchDB) }
         capture = CaptureEngine(store:store)
@@ -383,7 +389,7 @@ import ServiceManagement
         if searchPresented { reloadSearch() }
     }
     func reload() {
-        archiveRefreshTask?.cancel()
+        cancelArchiveRefresh()
         navigationWorker.cancel(); requestedNavigationDate = nil
         frameCache.removeAll(); frameCacheOrder.removeAll()
         do {
@@ -459,16 +465,17 @@ import ServiceManagement
         submitArchiveWindow(ArchiveWindowQuery(day:day,epoch:archiveEpoch),navigating:true)
     }
     private func cancelArchiveWindowLoad() {
-        archiveNavigationWorker.cancel();archiveWindowLoading=false;archiveRequestedRow=nil;archiveNavigating=false;archiveRequestedDay=nil;archivePendingQuery=nil
+        archiveNavigationWorker.cancel();archiveWindowLoading=false;archiveWindowRefreshing=false;archiveRequestedRow=nil;archiveNavigating=false;archiveRequestedDay=nil;archivePendingQuery=nil
     }
     private func applyArchiveWindow(_ window:ArchiveWindow) {
         archiveWindow=window;archiveProtectedFrames=window.pins;archiveFrames=window.frames
         if let day=window.columns.first(where:{$0.lane == 0})?.day {archiveDay=day}
-        archiveWindowLoading=false;archiveRequestedRow=nil;archiveNavigating=false;archiveRequestedDay=nil
+        archiveWindowLoading=false;archiveWindowRefreshing=false;archiveRequestedRow=nil;archiveNavigating=false;archiveRequestedDay=nil
         if let row=window.focusRow {archiveScrollRow=row}
     }
-    private func submitArchiveWindow(_ request:ArchiveWindowQuery,navigating:Bool = false) {
+    private func submitArchiveWindow(_ request:ArchiveWindowQuery,navigating:Bool = false,refreshing:Bool = false) {
         var query=request;query.pins=archiveProtectedFrames;archivePendingQuery=query
+        archiveWindowRefreshing = archiveWindowRefreshing || refreshing
         let captureRevision=archiveCaptureRevision
         archiveWindowLoading=true;archiveRequestedRow=query.row;archiveNavigating=navigating;archiveRequestedDay=query.day
         archiveWindowRequestCount += 1
@@ -483,7 +490,7 @@ import ServiceManagement
             }
         },fail:{ [weak self] error in
             guard let self,self.archiveEpoch == query.epoch else {return}
-            self.archiveWindowLoading=false;self.archiveRequestedRow=nil;self.archiveNavigating=false;self.error=error.localizedDescription
+            self.archiveWindowLoading=false;self.archiveWindowRefreshing=false;self.archiveRequestedRow=nil;self.archiveNavigating=false;self.error=error.localizedDescription
         })
     }
     /// Called with world coordinates even when no record metadata is loaded at
@@ -496,7 +503,7 @@ import ServiceManagement
             archiveEpoch += 1
             submitArchiveWindow(ArchiveWindowQuery(day:archiveDay,epoch:archiveEpoch),navigating:true);return
         }
-        if archiveWindow.covers(row) {
+        if archiveWindow.covers(row),!archiveWindowRefreshing {
             if archiveWindowLoading {cancelArchiveWindowLoad()}
             return
         }
@@ -510,15 +517,20 @@ import ServiceManagement
     /// uniqueness. Coalesce maintenance notifications into one background read.
     func refreshArchiveWindowAfterMaintenance() {
         guard !archiveWindow.columns.isEmpty else {return}
-        archiveRefreshTask?.cancel()
+        cancelArchiveRefresh()
+        let revision=archiveRefreshRevision,delay=archiveRefreshDelay
         archiveRefreshTask=Task { [weak self] in
-            do {try await Task.sleep(for:.milliseconds(120))} catch {return}
-            guard let self else {return}
+            defer {if let self,self.archiveRefreshRevision == revision {self.archiveRefreshTask=nil}}
+            do {try await delay()} catch {return}
+            guard let self,!Task.isCancelled else {return}
             if self.archiveNavigating {await self.archiveNavigationWorker.waitUntilIdle()}
             guard !Task.isCancelled,!self.storageClearing else {return}
             self.archiveEpoch += 1
-            self.submitArchiveWindow(ArchiveWindowQuery(day:self.archiveDay,row:self.archiveScrollRow,near:self.archiveTimelinePosition,anchors:self.archiveAnchors(near:self.archiveScrollRow),epoch:self.archiveEpoch))
+            self.submitArchiveWindow(ArchiveWindowQuery(day:self.archiveDay,row:self.archiveScrollRow,near:self.archiveTimelinePosition,anchors:self.archiveAnchors(near:self.archiveScrollRow),epoch:self.archiveEpoch),refreshing:true)
         }
+    }
+    private func cancelArchiveRefresh() {
+        archiveRefreshRevision += 1;archiveRefreshTask?.cancel();archiveRefreshTask=nil
     }
     private func archiveAnchors(near row:Double)->[ArchivePageAnchor] {
         var anchors=archiveWindow.anchors(near:row)
@@ -719,10 +731,15 @@ import ServiceManagement
         },fail:{ [weak self] in self?.requestedNavigationDate = nil; self?.error = $0.localizedDescription })
     }
     func waitForPendingLoads() async {
-        await archiveRefreshTask?.value
-        await archiveNavigationWorker.waitUntilIdle()
-        await activityWorker.waitUntilIdle(); await navigationWorker.waitUntilIdle()
-        await previewWorker.waitUntilIdle(); await transcriptWorker.waitUntilIdle(); await searchWorker.waitUntilIdle()
+        repeat {
+            await archiveRefreshTask?.value
+            await archiveNavigationWorker.waitUntilIdle()
+            await activityWorker.waitUntilIdle(); await navigationWorker.waitUntilIdle()
+            await previewWorker.waitUntilIdle(); await transcriptWorker.waitUntilIdle(); await searchWorker.waitUntilIdle()
+            // A maintenance notification can replace the debounce task during
+            // any await above. Completion means the current refresh has applied,
+            // not merely that an older, cancelled task has finished.
+        } while archiveRefreshTask != nil || !archiveNavigationWorker.isIdle
     }
     func step(_ offset: Int) {
         guard !timeline.isEmpty else {return}
@@ -807,7 +824,7 @@ import ServiceManagement
     func stopRecording() async { recordingCoordinator.request(false);await recordingCoordinator.waitUntilSettled() }
     func shutDownRecording() async { await recordingCoordinator.shutdown();transcriptionTask?.cancel() }
     // Prevent a pending animation completion from restarting capture during quit.
-    func prepareToQuit() { archiveRefreshTask?.cancel();cancelArchiveWindowLoad();cancelArchiveExtraction();recordingCoordinator.request(false) }
+    func prepareToQuit() { cancelArchiveRefresh();cancelArchiveWindowLoad();cancelArchiveExtraction();recordingCoordinator.request(false) }
     private func beginCapture() async throws {
         error = nil;capturePermissionRequired = false
         try await capture.start(settings:settings,allowed:{ [weak self] in self?.recordingCoordinator.state.shouldCapture == true })
