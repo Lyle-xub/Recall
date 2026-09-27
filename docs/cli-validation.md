@@ -1,35 +1,37 @@
 # CLI validation and handoff — 2026-09-27
 
-## CLI completion: headless ownership and durable operations
+Work is isolated on `feat/cross-platform-cli`, based on
+`feat/windows-visual-parity` at `12c9aac`. The original visual-development checkout
+and README are unchanged. See [CLI commands and library rules](cli.md).
 
-This revision completes the previously uncommitted CLI work on
-`feat/cross-platform-cli`. Windows visual development remains paused.
+## Completed behavior
 
 - `recording start` can launch a headless owner; `service start` remains idle.
-  Concurrent starts share one owner, parent process pipes close promptly, and
-  native Mac shutdown drains work without entering AppKit's nested quit loop.
-- Index jobs persist progress and request receipts. Cancellation, bounded RPC
-  waits, late acknowledgements and stale-owner recovery retain an inspectable
-  outcome instead of silently replaying an uncertain mutation.
+  Concurrent starts share one owner. Native Mac shutdown drains work without
+  entering AppKit's nested quit loop.
+- Index jobs persist per-record progress and request receipts. Cancellation,
+  bounded RPC waits, late acknowledgements and stale-owner recovery retain an
+  inspectable outcome instead of replaying an uncertain mutation.
 - Native inference shares one owner per user/engine, verifies process and model
   identity, and prevents cross-library model deletion or replacement during use.
 - Portable capture refuses unsupported exclusion/display/audio requirements.
-  Portable optimization preserves original dimensions and OCR, validates encoded
-  output and skips unrecognized/active media. Incomplete exports are not published.
+  Portable optimization preserves dimensions and OCR, validates encoded output
+  and skips unrecognized/active media. Incomplete exports are not published.
 - Configuration preserves unrelated fields. Cleanup retains a recovery journal
-  when the database commit succeeds but physical media deletion is interrupted;
+  when database deletion commits but physical media deletion is interrupted;
   a later writable open retries only safe, unreferenced media paths.
 
-Source-level acceptance on macOS:
+## Local acceptance
 
 | Check | Result |
 | --- | --- |
-| CLI subprocess tests, real Tesseract, native Mac helper lifecycle | 194 assertions passed |
-| Shared C# core | 85 assertions passed |
+| Published Mac ARM64 CLI, real Tesseract, native helper and real models | 206 assertions passed |
+| Shared C# database, retrieval, privacy and model contracts | 85 assertions passed |
 | Swift native CLI and storage cleanup | 15 tests passed |
-| Independent maintenance acceptance | 16 checks passed |
-| Independent native owner / OCR / export acceptance | 12 checks passed |
-| C# build and whitespace validation | Passed |
+| Independent maintenance acceptance, Debug and published bundle | 16 checks passed per build |
+| Independent native owner / OCR / export acceptance, Debug and published bundle | 12 checks passed per build |
+| WinUI source compilation on Mac | 0 errors / 0 warnings |
+| Self-contained Mac archive and 214-file SHA-256 manifest | Verified |
 
 The independent maintenance checks used actual FFmpeg/FFprobe and an intentionally
 invalid encoder result. They confirmed unchanged original media on failure, full
@@ -39,99 +41,106 @@ Mac-format library and a synthetic Aurora image, exercising actual Tesseract OCR
 configuration, star mutation, job receipts, export, service exit and SQLite integrity.
 No user history was modified or captured by these checks.
 
-## Earlier CLI handoff (before this completion revision)
+The published bundle used the already-installed Qwen3-1.7B-Q8_0 model and native
+llama-server: two concurrent grounded answers reused one model process, completed
+in 10.2 seconds, and used approximately 3,986 MiB engine RSS. Native Whisper base
+transcribed a generated speech fixture and persisted its transcript in 1.2 seconds.
+The test-owned engine processes exited afterwards. These are observations on this
+Mac, not cross-platform performance guarantees; no model download was required.
 
-Work is isolated on `feat/cross-platform-cli`, based on
-`feat/windows-visual-parity` at `12c9aac`. The original visual-development checkout
-and README files are unchanged. See [CLI commands and library rules](cli.md).
+## Hosted CI
 
-## Verified locally
+The initial completion run
+[36286656941](https://github.com/Lyle-xub/Recall/actions/runs/36286656941)
+passed Mac (194 CLI assertions and 15 native integration tests) and Linux
+(153 CLI assertions), with 85 shared-core assertions on all three platforms.
+Its Windows packaged test exposed an inherited output-handle bug during concurrent
+headless service startup. Source commit `29f4147` corrects it using a native Windows
+launcher that inherits no caller handles. Real child-process regressions cover
+inheritable file handles, Unicode/space paths, empty arguments, embedded quotes and
+trailing backslashes. The 30-second command timeout was retained.
 
-| Check | Result |
-| --- | --- |
-| Shared C# database, retrieval, privacy and model contracts | 85 assertions passed |
-| Published macOS ARM64 CLI subprocess suite | 134 assertions passed |
-| Native Mac store, desktop refresh, cleanup, usage and model tests | 25 tests passed |
-| WinUI source compilation on Mac | 0 errors / 0 warnings |
-| Self-contained Mac archive and SHA-256 manifest | Built with `scripts/build-cli.py` |
-| Windows source package with extracted `Core/` | Built and ZIP integrity verified |
+The correction is validated by
+[final CLI run 36287203829](https://github.com/Lyle-xub/Recall/actions/runs/36287203829):
+all three jobs passed. Windows passed 143 CLI assertions, Linux 153, and Mac 194;
+all platforms passed 85 shared-core assertions, and Mac passed 15 native integration
+tests. The run publishes the self-contained platform archives and their SHA-256
+files.
 
-The subprocess suite covers desktop-produced records visible in CLI, CLI imports
-visible in the desktop store, live-owner mutation routing, exclusive ownership,
-concurrent start requests reaching one recorder, WAL readers, cleanup previews and
-star protection, schema rejection without changing bytes, native Swift schema and
-OCR preservation, exports, Unicode/literal search, real Tesseract OCR, grounded model
-requests and transcript persistence through a local mock HTTP server. Mac tests
-also exercise the actual `AppModel` refresh after a file-RPC mutation. Test libraries
-are temporary directories; no real captured history is cleared.
+Linux also passed actual capture, OCR, search, stop, optimization and export inside
+a private Xvfb desktop containing only generated Aurora text. Its uploaded
+`Recall-CLI-Linux-capture-evidence` artifact records two frames, a successful search,
+two optimization completions, SQLite integrity `ok`, and 15.44 seconds elapsed in the final run.
+The script creates a new display; it never records the user's current desktop.
 
-The Windows recorder test uses the real shared coordinator with a fake capture
-engine. It does not claim verification of physical recording, microphone permission
-dialogs or Windows screen-capture consent through the CLI. Large model downloads
-and native LLM inference were not executed for this validation.
+Windows CI does not install an OCR engine. Its capture coordinator tests use a fake
+capture engine. The actual FFmpeg/X11 capture path is exercised only in Linux CI.
+The lightweight model tests on hosted runners use a local mock HTTP service;
+real Qwen/Whisper execution was verified separately on the local Mac as above.
 
-Mac native OCR tests initially selected Apple's fallback recognizer because the new
-worktree lacked the original checkout's ignored `native-runtimes` directory. That
-fallback failed with an ICC-profile decoding error on the local beta OS. Reusing
-the same installed offline OCR dependencies as the original checkout restored the
-baseline and all selected tests passed. CLI standalone OCR was separately verified
-against the public synthetic Aurora fixture through Tesseract.
+## Desktop regression boundary
 
-## CI and portability fixes
+The additional
+[desktop run 36286656950](https://github.com/Lyle-xub/Recall/actions/runs/36286656950)
+passed the full Windows build. Its Mac suite ran 219 tests, skipped 24, and failed
+`ArchiveReadabilityTests.testFinalPointerSampleIsDeliveredAndExitCancelsPendingSample`.
+At final source commit `29f4147`,
+[desktop run 36287203763](https://github.com/Lyle-xub/Recall/actions/runs/36287203763)
+again ran 219 Mac tests, skipped 24, and failed the related
+`ArchiveReadabilityTests.testFastPointerBurstCoalescesEvenAcrossDistantCards`.
+These tests expect a scheduled trailing pointer sample within 40–50 milliseconds.
 
-All three published bundles passed on GitHub-hosted runners: 90 CLI assertions
-on Windows, 102 on Linux and 134 on macOS ARM64, plus 85 shared-core assertions
-on each. Mac CI also passed 11 native desktop/store/cleanup tests.
-Linux includes real Tesseract OCR; Windows CI does not install an OCR engine.
-The existing full Windows desktop build also passed in
-[native build run 36264386680](https://github.com/Lyle-xub/Recall/actions/runs/36264386680).
+These tests and their pointer implementation were not changed by the CLI work.
+Both had already failed in
+[earlier desktop run 36264717534](https://github.com/Lyle-xub/Recall/actions/runs/36264717534).
+This is a separately recorded desktop regression risk; the full Mac desktop suite
+is not claimed to be green. A same-runner baseline comparison has not been
+performed. Glass UI development remains paused.
 
-Portability fixes found by CI:
+## Distribution and remaining platform checks
 
-- A test fixture's pooled SQLite connection kept the database handle open on Windows.
-  The fixture now disables pooling before byte-for-byte schema-preservation checks.
-- The Mac runner's default SDK could not compile existing glass API references.
-  Both workflows now select Xcode 26.2; the packaging script checks for SDK 26+.
-- Xcode 26.2 timed out on two large existing SwiftUI expressions that compiled under
-  the local Swift 6.4 toolchain. Thumbnail and usage-chart expressions were factored
-  into smaller functions without changing their styles or interaction behavior.
+The local Mac ARM64 archive was rebuilt from source commit `29f4147`:
 
-The final code validation runs at
-[Shared library CLI run 36264717513](https://github.com/Lyle-xub/Recall/actions/runs/36264717513).
-Its artifacts are the self-contained platform archives, each accompanied by a
-SHA-256 file. No production release, notarization, README rewrite or branch merge
-is part of this CLI handoff.
+- File: `release/Recall-CLI-osx-arm64.tar.gz` (35,786,023 bytes).
+- SHA-256: `b0473b88f79fa83d86b98a8f20602462a4741182b145fd207a411973a4ec255d`.
+- Its internal manifest verifies all 214 payload files. The archive contains both
+  the `recall` launcher and `recall-macos-core` helper.
 
-## Full desktop test limitation
+The basic CLI archive includes the self-contained .NET application and, on Mac,
+the Swift adapter. It does not include native model runtime binaries or weights.
+Supply them through the documented runtime/model directories, or select a configured
+model endpoint. Copy the complete extracted distribution directory.
 
-The additional [full desktop run 36264717534](https://github.com/Lyle-xub/Recall/actions/runs/36264717534)
-passed the Windows build, but its Mac suite reported 215 tests, 24 skips and three
-failed timing assertions:
+Mac builds are ad-hoc signed, not notarized. Native Mac screen/microphone permission
+flows, physical Windows console capture, Wayland compositor compatibility and native
+audio capture still require platform smoke tests. Portable recording currently
+supports still screenshots and OCR, not native video/audio or application metadata.
 
-- `ArchiveReadabilityTests.testFastPointerBurstCoalescesEvenAcrossDistantCards`
-- `ArchiveReadabilityTests.testFinalPointerSampleIsDeliveredAndExitCancelsPendingSample`
-- `RecognitionStatusTests.testTransientQueueAndIdleNeverReachVisibleStatus`
+Older desktop builds do not implement the ownership/RPC protocol. Stop them before
+offline CLI writes, or build compatible desktop and CLI versions together. Read-only
+CLI commands do not need a running desktop. A compatible headless service can now
+start without opening the UI; Linux supports FFmpeg/X11 or compatible grim/Wayland
+capture in an authorized graphical session.
 
-These existing tests and their pointer/status implementations were not edited by
-this CLI work. Their failure concerns scheduled UI callbacks on the hosted runner;
-no claim is made that the full Mac desktop suite is green or that the baseline has
-been independently rerun on that same runner. This remains a desktop follow-up,
-separate from the passing three-platform CLI suite. Glass UI development is paused.
+No production release, notarization, README rewrite or branch merge is part of
+this handoff. The two obsolete local branches `feat/rhine-glass-replica` and
+`backup/main-before-release-20260926` were deleted after verifying their tips were
+already ancestors of `main`; neither branch existed on the remote.
 
-## Continue on another machine
+## Reproduce
 
 ```sh
 git fetch origin
 git switch --track origin/feat/cross-platform-cli
 python3 scripts/build-cli.py
+dotnet run --project Windows/Rewind.Tests/Rewind.Tests.csproj
+dotnet run --project CLI.Tests/Recall.Cli.Tests.csproj
+swift test --package-path macOS --filter 'NativeCLIIntegrationTests|StorageCleanupTests'
 ```
 
-Use Python instead of `python3` where appropriate on Windows. macOS needs Xcode 26+
-selected, Windows/Linux need .NET 10 SDK to build, and published bundles require
-neither Python nor .NET at runtime. Copy the full distribution directory.
-
-Start the compatible desktop to use `recording start/stop`, the desktop OCR queue
-and media optimization. Existing older desktop builds do not implement the lease
-and RPC protocol; close them before offline CLI writes, or upgrade both components
-together. Read-only CLI commands do not need a running desktop. Linux supports data,
-OCR, model and maintenance commands but has no native screen recorder in this repo.
+Use Python instead of `python3` where appropriate on Windows. Building needs .NET 10
+SDK and Python; Mac additionally needs an SDK from Xcode 26+. Published bundles do
+not need Python or .NET at runtime. The documented `RECALL_CLI_BINARY`,
+`RECALL_MAC_CORE` and `RECALL_OCR_FIXTURE` overrides test the published bundle and
+real OCR. For real models, also supply an already-installed runtime/model directory
+and a generated `RECALL_REAL_AUDIO` speech fixture.
