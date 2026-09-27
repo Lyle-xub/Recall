@@ -216,7 +216,7 @@ final class ArchiveReadabilityTests:XCTestCase {
         XCTAssertGreaterThan(checked,80)
     }
 
-    @MainActor func testCachedProjectionMatchesNativeCameraAndFallsBackDuringPan() async throws {
+    @MainActor func testCachedProjectionMatchesDisplayedCameraThroughoutFrameDrivenPan() async throws {
         let archive = ArchiveGlassScene(),view = ArchiveSceneView(frame:.zero)
         view.scene = archive.scene;view.pointOfView = archive.cameraNode;view.archive = archive
         defer { archive.stopMotion() }
@@ -241,13 +241,42 @@ final class ArchiveReadabilityTests:XCTestCase {
         window.orderFront(nil)
         defer { window.orderOut(nil);archive.onPresentationChanged = nil }
         archive.scroll(by:8,horizontal:3,precise:false)
-        XCTAssertNil(archive.ray(at:point,in:view.bounds.size),"A camera pan must use its live presentation transform")
-        try await Task.sleep(for:.milliseconds(450))
+        let before=try XCTUnwrap(archive.ray(at:point,in:view.bounds.size))
+        let displayedBefore=view.unprojectPoint(SCNVector3(point.x,point.y,0))
+        XCTAssertEqual(before.0.z,displayedBefore.z,accuracy:0.001,"Input must not aim at the future scroll destination")
+        for _ in 0..<120 {
+            archive.advance(dt:1/60)
+            let current=try XCTUnwrap(archive.ray(at:point,in:view.bounds.size))
+            let displayed=view.unprojectPoint(SCNVector3(point.x,point.y,0))
+            XCTAssertEqual(current.0.x,displayed.x,accuracy:0.001)
+            XCTAssertEqual(current.0.y,displayed.y,accuracy:0.001)
+            XCTAssertEqual(current.0.z,displayed.z,accuracy:0.001)
+        }
         _ = view.snapshot()
         let ray = try XCTUnwrap(archive.ray(at:point,in:view.bounds.size))
         let expected = view.unprojectPoint(SCNVector3(point.x,point.y,0))
         XCTAssertEqual(ray.0.x,expected.x,accuracy:0.001)
         XCTAssertEqual(ray.0.y,expected.y,accuracy:0.001)
         XCTAssertEqual(ray.0.z,expected.z,accuracy:0.001)
+    }
+
+    @MainActor func testClickDuringUnsettledScrollFreezesCameraForExtraction()throws {
+        let day=Calendar.current.startOfDay(for:Date()),size=CGSize(width:1440,height:900)
+        let frames=(0..<24).map {index in MemoryFrame(timestamp:day.addingTimeInterval(Double(index)*60),appName:"Selection",bundleID:"test",title:"",imagePath:"\(index).png",text:"",regions:[])}
+        let archive=ArchiveGlassScene(),view=ArchiveSceneView(frame:CGRect(origin:.zero,size:size))
+        view.scene=archive.scene;view.pointOfView=archive.cameraNode;view.archive=archive
+        defer {archive.stopMotion()}
+        archive.update(frames:frames,images:[:],appearance:.warmDay,selected:nil,size:size,reduced:false,day:day)
+        archive.scroll(by:12,horizontal:4,precise:false);archive.advance(dt:1/60)
+        let displayedCamera=archive.cameraNode.position
+        archive.update(frames:frames,images:[:],appearance:.warmDay,selected:frames[12].id,size:size,reduced:false,day:day)
+        for _ in 0..<240 {archive.advance(dt:1/60)}
+        XCTAssertEqual(archive.cameraNode.position.x,displayedCamera.x,accuracy:0.0001)
+        XCTAssertEqual(archive.cameraNode.position.z,displayedCamera.z,accuracy:0.0001)
+        let surface=try XCTUnwrap(archive.selectionSurface())
+        let point=view.projectPoint(surface.1.parent!.worldPosition)
+        let center=ArchiveViewportLayout.extractionCenterY(in:size,verticalSpan:CGFloat(archive.cameraNode.camera!.orthographicScale)*2)
+        XCTAssertEqual(point.x,size.width/2,accuracy:1)
+        XCTAssertEqual(point.y,size.height/2+center/(CGFloat(archive.cameraNode.camera!.orthographicScale)*2)*size.height,accuracy:1)
     }
 }

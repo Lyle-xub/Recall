@@ -39,9 +39,13 @@ private final class ArchiveRecordControl: SCNNode {
     private var viewport = CGSize(width:2000,height:876)
     private var verticalSpan:CGFloat = 9
     private var cameraTransform = matrix_identity_float4x4
-    private var cameraAnimating = false
-    private var cameraPanRevision = 0
+    private var cameraScroll=ArchiveMotionSpring(value:0)
+    private var cameraAcross=ArchiveMotionSpring(value:0)
+    private var cameraFrequency=22.0
     var onPresentationChanged:(()->Void)?
+    /// Opt-in instrumentation for native interaction benchmarks. No samples
+    /// or timestamps are collected in the normal application path.
+    var onWorkMeasured:((String,Duration)->Void)?
     private(set) var dayColumns:[ArchiveDayColumn] = []
     private var currentID:String?
     private(set) var hoveredID:String?
@@ -149,20 +153,23 @@ private final class ArchiveRecordControl: SCNNode {
     }
 
     func update(frames:[MemoryFrame],images:[String:NSImage],appearance:OverlayAppearance,selected:String?,size:CGSize,reduced:Bool,day:Date? = nil,timelinePosition:Date? = nil,window:ArchiveWindow? = nil) {
+        let started=onWorkMeasured == nil ? nil:ContinuousClock.now
+        defer {if let started {onWorkMeasured?("update",started.duration(to:.now))}}
         let resized = viewport != size
         reducedMotion = reduced;viewport = size
         verticalSpan = 9*2.22/max(1,size.width/max(1,size.height))
-        cameraNode.camera?.orthographicScale = verticalSpan/2
+        if resized || layoutRevision == 0 {cameraNode.camera?.orthographicScale = verticalSpan/2}
         if resized {
             for id in Array(extractions.keys) { extractions[id]?.destination = extractionDestination() }
         }
         let isNight = appearance == .deepNight
-        scene.fogColor = isNight ? NSColor(red:0.04,green:0.05,blue:0.07,alpha:1):NSColor(red:0.90,green:0.89,blue:0.86,alpha:1)
+        if isNight != night {scene.fogColor = isNight ? NSColor(red:0.04,green:0.05,blue:0.07,alpha:1):NSColor(red:0.90,green:0.89,blue:0.86,alpha:1)}
         let center = Calendar.current.startOfDay(for:day ?? frames.max(by: { $0.timestamp < $1.timestamp })?.timestamp ?? Date())
         let suppliedWindow=window?.columns.isEmpty == false ? window:nil
         let nextWindowKeys=suppliedWindow?.columns.map { "\($0.day)|\($0.startIndex)|\($0.totalCount)|\($0.origin)" } ?? []
         if let suppliedWindow,windowEpoch != suppliedWindow.epoch {
             scrollOffset=CGFloat(suppliedWindow.focusRow ?? 0);navigationTarget=nil
+            cameraScroll=ArchiveMotionSpring(value:Double(scrollOffset));cameraAcross=ArchiveMotionSpring(value:Double(horizontalOffset))
             windowEpoch=suppliedWindow.epoch;virtualBucket=nil
         }
         dataWindow=suppliedWindow;retainedFrames=frames;retainedImages=images
@@ -173,6 +180,7 @@ private final class ArchiveRecordControl: SCNNode {
         }
         updateImages(images)
         if selected != currentID {
+            if selected != nil {freezeScrolling()}
             hoveredID = nil
             onPresentationChanged?()
             if let previous = currentID,var motion = extractions[previous] {
@@ -232,7 +240,7 @@ private final class ArchiveRecordControl: SCNNode {
     /// never replace its moving root node or restart an extraction.
     private func reconcile(frames:[MemoryFrame],images:[String:NSImage],placeView:Bool = true) {
         SCNTransaction.begin();SCNTransaction.disableActions = true
-        defer { SCNTransaction.commit() }
+        defer {SCNTransaction.commit()}
         let rack:SCNNode
         if let existing = scene.rootNode.childNode(withName:"racks",recursively:false) { rack = existing }
         else { rack = SCNNode();rack.name = "racks";scene.rootNode.addChildNode(rack) }
@@ -322,13 +330,21 @@ private final class ArchiveRecordControl: SCNNode {
     /// Image arrivals only replace the artwork texture. Glass geometry, labels,
     /// metadata textures and the spring-driven root stay intact.
     private func updateImages(_ images:[String:NSImage]) {
+        let started=onWorkMeasured == nil ? nil:ContinuousClock.now
+        defer {if let started {onWorkMeasured?("images",started.duration(to:.now))}}
+        let changes=framesByID.compactMap { id,frame -> (String,NSImage?,SCNNode,SCNNode)? in
+            let image=images[frame.imagePath]
+            guard image.map(ObjectIdentifier.init) != imageKeys[id],let node=nodes[id],
+                  let artwork=node.childNode(withName:"artwork",recursively:false) else {return nil}
+            return (id,image,node,artwork)
+        }
+        // Even an empty SceneKit transaction takes the render lock on commit.
+        // Model/loading publications often change no screenshot textures.
+        guard !changes.isEmpty else {return}
         SCNTransaction.begin();SCNTransaction.disableActions = true
-        defer { SCNTransaction.commit() }
-        for (id,frame) in framesByID {
-            let image = images[frame.imagePath],key = image.map(ObjectIdentifier.init)
-            guard key != imageKeys[id],let node = nodes[id],
-                  let artwork = node.childNode(withName:"artwork",recursively:false) else { continue }
-            imageKeys[id] = key;textureUpdateCount += 1
+        defer {SCNTransaction.commit()}
+        for (id,image,node,artwork) in changes {
+            imageKeys[id] = image.map(ObjectIdentifier.init);textureUpdateCount += 1
             artwork.geometry?.firstMaterial?.diffuse.contents = image
             artwork.isHidden = image == nil
             if let image { imageAspects[id] = image.size.width/max(1,image.size.height) }
@@ -346,10 +362,10 @@ private final class ArchiveRecordControl: SCNNode {
     var canHitRestingSheets:Bool { extractions.isEmpty }
     /// Orthographic picking needs only the camera pose and view size. Native
     /// unprojectPoint can flush/wait for the renderer even with cached bounds.
-    /// During an implicit camera pan, use SceneKit's presentation transform.
+    /// The frame clock moves the actual camera and this cache together, so
+    /// picking never targets a future implicit-animation destination.
     func ray(at point:CGPoint,in size:CGSize)->(SCNVector3,SCNVector3)? {
-        guard size == viewport,size.width > 0,size.height > 0,
-              !cameraAnimating else { return nil }
+        guard size == viewport,size.width > 0,size.height > 0 else { return nil }
         let x = Float((point.x/size.width-0.5)*verticalSpan*size.width/size.height)
         let y = Float((point.y/size.height-0.5)*verticalSpan)
         let near = cameraTransform*SIMD4<Float>(x,y,-0.1,1)
@@ -401,6 +417,8 @@ private final class ArchiveRecordControl: SCNNode {
         wake()
     }
     func viewportRecords(in renderer:SCNSceneRenderer)->ArchiveViewportRecords {
+        let started=onWorkMeasured == nil ? nil:ContinuousClock.now
+        defer {if let started {onWorkMeasured?("viewport",started.duration(to:.now))}}
         let visible = Set(framesByID.keys.filter { id in
             guard let node = nodes[id] else { return false }
             return renderer.isNode(node,insideFrustumOf:cameraNode)
@@ -417,7 +435,7 @@ private final class ArchiveRecordControl: SCNNode {
         return ArchiveViewportRecords(visible:visible,nearby:nearby)
     }
     private func placeCamera() {
-        let dx = horizontalOffset*0.894,dz = scrollOffset+horizontalOffset*0.447
+        let dx=CGFloat(cameraAcross.value)*0.894,dz=CGFloat(cameraScroll.value)+CGFloat(cameraAcross.value)*0.447
         let position = SCNVector3(cameraHome.x+dx,cameraHome.y,cameraHome.z+dz)
         if abs(cameraNode.position.x-position.x)+abs(cameraNode.position.z-position.z) > 0.00001 {
             cameraNode.position = position
@@ -425,7 +443,16 @@ private final class ArchiveRecordControl: SCNNode {
             // Translation leaves the view direction unchanged.
         }
     }
+    func freezeScrolling(report:Bool = false) {
+        // Selection belongs to the displayed camera, not an unrendered input
+        // destination. Otherwise a newly extracted card drifts during its turn.
+        scrollOffset=CGFloat(cameraScroll.value);horizontalOffset=CGFloat(cameraAcross.value)
+        cameraScroll.velocity=0;cameraAcross.velocity=0;navigationTarget=nil
+        if report {onWindowDemand?(Double(scrollOffset))}
+    }
     func scroll(by delta:CGFloat,horizontal:CGFloat = 0,precise:Bool) {
+        let started=onWorkMeasured == nil ? nil:ContinuousClock.now
+        defer {if let started {onWorkMeasured?("scroll",started.duration(to:.now))}}
         guard currentID == nil,extractions.isEmpty else { return }
         navigationTarget = nil
         let next = min(maxScroll,max(minScroll,scrollOffset+delta*(precise ? 0.018:0.42)))
@@ -437,21 +464,10 @@ private final class ArchiveRecordControl: SCNNode {
         onWindowDemand?(Double(next))
         crestTarget = Double(next)+Double(delta)*(precise ? 0.025:0.16)
         acrossTarget = Double(nextHorizontal)*0.12
-        let duration:Double = reducedMotion ? 0:precise ? 0.12:0.28
-        cameraPanRevision += 1
-        let revision = cameraPanRevision
-        cameraAnimating = duration > 0
-        SCNTransaction.begin();SCNTransaction.animationDuration = duration
-        if cameraAnimating {
-            SCNTransaction.completionBlock = { [weak self] in
-                Task { @MainActor in
-                    guard let self,self.cameraPanRevision == revision else { return }
-                    self.cameraAnimating = false
-                }
-            }
-        }
-        SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name:.easeOut)
-        placeCamera();SCNTransaction.commit()
+        // Input only accumulates a destination. The existing display clock
+        // commits camera and ridge together once, rather than contending with
+        // the renderer for a second transaction on every wheel/drag event.
+        cameraFrequency=precise ? 22:12
         if reducedMotion { advance(dt:1,immediate:true) } else { wake() }
     }
     func attachAnimation(to view:NSView) {
@@ -495,9 +511,13 @@ private final class ArchiveRecordControl: SCNNode {
     /// One clock drives the ridge, the extraction and the return. Geometry,
     /// artwork and controls stay attached to the same opaque root throughout.
     func advance(dt:Double,immediate:Bool = false) {
+        let started=onWorkMeasured == nil ? nil:ContinuousClock.now
+        defer {if let started {onWorkMeasured?("advance",started.duration(to:.now))}}
         guard isActive else { return }
+        // Commit the actual camera with its picking transform before another
+        // input event. Leaving this implicit can expose a stale native camera.
         SCNTransaction.begin();SCNTransaction.disableActions = true
-        defer { SCNTransaction.commit() }
+        defer {SCNTransaction.commit()}
         if immediate { crest = ArchiveMotionSpring(value:crestTarget);across = ArchiveMotionSpring(value:acrossTarget) }
         else { crest.step(to:crestTarget,frequency:8,dt:dt);across.step(to:acrossTarget,frequency:7,dt:dt) }
         var active = !crest.settled(at:crestTarget) || !across.settled(at:acrossTarget)
@@ -505,9 +525,18 @@ private final class ArchiveRecordControl: SCNNode {
             if immediate { navigationMotion = ArchiveMotionSpring(value:navigationTarget) }
             else { navigationMotion.step(to:navigationTarget,frequency:10,dt:dt) }
             scrollOffset = CGFloat(navigationMotion.value);horizontalOffset *= immediate ? 0:0.82
-            placeCamera()
+            cameraScroll=ArchiveMotionSpring(value:Double(scrollOffset));cameraAcross=ArchiveMotionSpring(value:Double(horizontalOffset))
             active = active || !navigationMotion.settled(at:navigationTarget)
+        } else {
+            if immediate || abs(cameraScroll.value-Double(scrollOffset)) > Double(ArchiveDayLayout.renderedRows)/2 {
+                cameraScroll=ArchiveMotionSpring(value:Double(scrollOffset));cameraAcross=ArchiveMotionSpring(value:Double(horizontalOffset))
+            } else {
+                cameraScroll.step(to:Double(scrollOffset),frequency:cameraFrequency,dt:dt)
+                cameraAcross.step(to:Double(horizontalOffset),frequency:cameraFrequency,dt:dt)
+            }
+            active = active || !cameraScroll.settled(at:Double(scrollOffset)) || !cameraAcross.settled(at:Double(horizontalOffset))
         }
+        placeCamera()
         var focus:Double = 0
         for (id,node) in nodes {
             guard let slot = slots[id],var height = heights[id] else { continue }
@@ -865,6 +894,7 @@ final class ArchiveSceneView: SCNView {
                 // the hovered sheet, not a newly exposed neighbour.
                 let stable = aimPoint.map { hypot(point.x-$0.x,point.y-$0.y) <= 8 } ?? false
                 let aimed = aimedID.flatMap { archive?.hoveredID == $0 && archive?.recordIDs.contains($0) == true ? $0:nil }
+                archive?.freezeScrolling(report:true)
                 onSelect?(stable ? aimed ?? memoryID(at:point):memoryID(at:point))
             }
         }

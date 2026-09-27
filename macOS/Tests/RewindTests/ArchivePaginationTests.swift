@@ -129,7 +129,7 @@ final class ArchivePaginationTests:XCTestCase {
         XCTAssertLessThanOrEqual(loader.cachedBytes,ArchiveImageLoader.memoryBudget)
         XCTAssertEqual(loader.images.count,24)
         for frame in frames.prefix(4) {
-            loader.showDetail(detail,for:frame.imagePath)
+            await loader.showDetail(detail,for:frame.imagePath)
             XCTAssertLessThanOrEqual(loader.cachedBytes,ArchiveImageLoader.memoryBudget,"Detailed images cannot bypass the protected cache budget")
         }
         XCTAssertLessThanOrEqual(loader.cachedImageCount,50)

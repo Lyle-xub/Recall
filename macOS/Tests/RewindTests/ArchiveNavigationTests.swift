@@ -97,11 +97,11 @@ final class ArchiveNavigationTests:XCTestCase {
         XCTAssertEqual(loader.images.count,12)
         let detail = try XCTUnwrap(CGContext(data:nil,width:320,height:200,bitsPerComponent:8,bytesPerRow:0,
             space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage())
-        for frame in items.prefix(3) { loader.showDetail(detail,for:frame.imagePath) }
+        for frame in items.prefix(3) { await loader.showDetail(detail,for:frame.imagePath) }
         XCTAssertEqual(loader.images.values.filter { $0.size.width == 320 }.count,2)
         XCTAssertEqual(loader.images[items[0].imagePath]?.size.width,80)
         let publications = loader.publicationCount
-        loader.showDetail(detail,for:items[2].imagePath)
+        await loader.showDetail(detail,for:items[2].imagePath)
         XCTAssertEqual(loader.publicationCount,publications,"Revisiting the current detail must not invalidate the whole SwiftUI scene")
         loader.request([items[0]],viewport:.init(visible:[items[0].id]),root:URL(fileURLWithPath:"/"))
         XCTAssertEqual(Set(loader.images.keys),[items[0].imagePath])

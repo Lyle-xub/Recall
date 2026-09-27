@@ -126,7 +126,8 @@ struct ArchiveStackView: View {
                     do { try await Task.sleep(for:.milliseconds(350)) } catch { return }
                 }
                 guard let pixels = await MemoryImagePipeline.previews.image(at:url,maxPixels:2600),!Task.isCancelled else { return }
-                imageLoader.showDetail(pixels,for:frame.imagePath)
+                await imageLoader.showDetail(pixels,for:frame.imagePath)
+                guard !Task.isCancelled,focusedID == id else {return}
                 if frame.regions.isEmpty,recognizedRegions[id] == nil {
                     let regions = await Task.detached(priority:.userInitiated) { (try? NativeOCR.recognize(pixels).1) ?? [] }.value
                     if !Task.isCancelled { recognizedRegions[id] = regions }
@@ -139,7 +140,8 @@ struct ArchiveStackView: View {
                 // are ready; the focused task then upgrades it for text selection.
                 guard let pixels = await MemoryImagePipeline.previews.image(at:model.store.root.appendingPathComponent(frame.imagePath),maxPixels:1600),
                       !Task.isCancelled,model.archiveExtractionID == id else { return }
-                imageLoader.showDetail(pixels,for:frame.imagePath)
+                await imageLoader.showDetail(pixels,for:frame.imagePath)
+                guard !Task.isCancelled,model.archiveExtractionID == id else {return}
                 model.pinArchiveRecord(id);focusedID = id
             }
             .onChange(of:focusedID) { _,id in model.pinArchiveRecord(id) }

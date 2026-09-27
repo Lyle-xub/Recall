@@ -172,16 +172,13 @@ struct TimelineView: View {
     }
     private var playhead: some View {
         VStack(spacing:7) {
-            Button { jumpOpen = true } label: {
+            Button { model.dateJump=model.timelineDate;jumpOpen = true } label: {
                 Text(relativeTime).font(.system(size:13,weight:.semibold,design:.rounded))
                     .monospacedDigit().padding(.horizontal,22).frame(height:44).contentShape(Rectangle())
                     .liquidGlass(radius:20)
             }.buttonStyle(.plain).help(cursor.recallFormatted(date:.complete,time:.standard))
                 .popover(isPresented:$jumpOpen) {
-                    VStack(spacing:16) {
-                        DatePicker("Go to date",selection:$model.dateJump).datePickerStyle(.graphical)
-                        Button("Rewind to this time") { model.jump(to:model.dateJump); jumpOpen = false }.buttonStyle(.borderedProminent)
-                    }.padding(20).frame(width:330)
+                    TimelineDateJumpPicker(date:$model.dateJump) {model.jump(to:model.dateJump);jumpOpen=false}
                 }
             Capsule().fill(.white).frame(width:3,height:94).shadow(color:.black.opacity(0.2),radius:3).allowsHitTesting(false)
         }
@@ -193,6 +190,30 @@ struct TimelineView: View {
         if seconds < 3600 { let minutes = seconds/60; return "\(minutes) minute\(minutes == 1 ? "":"s") ago" }
         if seconds < 86400 { let hours = seconds/3600; return "\(hours) hour\(hours == 1 ? "":"s") ago" }
         return date.recallFormatted(.dateTime.month(.abbreviated).day().hour().minute())
+    }
+}
+
+/// The calendar gets its own row; its intrinsic width must never compete with
+/// a long label or the time field inside a compact popover.
+struct TimelineDateJumpPicker:View {
+    @Binding var date:Date
+    var jump:()->Void
+    var body:some View {
+        VStack(alignment:.leading,spacing:16) {
+            Text("Jump to date").font(.headline).fixedSize(horizontal:false,vertical:true)
+            DatePicker("Date",selection:$date,displayedComponents:.date)
+                .datePickerStyle(.graphical).labelsHidden().accessibilityLabel("Date")
+                .frame(maxWidth:.infinity)
+            Divider()
+            HStack(alignment:.firstTextBaseline,spacing:16) {
+                Text("Time").foregroundStyle(.secondary).fixedSize()
+                Spacer(minLength:0)
+                DatePicker("Time",selection:$date,displayedComponents:.hourAndMinute)
+                    .datePickerStyle(.field).labelsHidden().accessibilityLabel("Time").fixedSize()
+            }
+            Button(action:jump) {Text("Rewind to this time").frame(maxWidth:.infinity)}
+                .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+        }.frame(width:320).padding(20)
     }
 }
 

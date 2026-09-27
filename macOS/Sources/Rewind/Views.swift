@@ -248,7 +248,7 @@ struct RootView: View {
                     systemImage:model.settings.appearance == .deepNight ? "sun.max":"moon") { model.toggleAppearance() }
             }
             Button("Welcome to Recall…",systemImage:"sparkle") {model.showOnboarding()}
-            Button("Jump to date…",systemImage:"calendar") {model.searchPresented = false;model.askOpen = false;model.timelineJumpOpen = true}
+            Button("Jump to date…",systemImage:"calendar") {model.searchPresented = false;model.askOpen = false;model.dateJump=model.timelineDate;model.timelineJumpOpen = true}
             Divider()
             Button("Import images…",systemImage:"square.and.arrow.down") {model.importImages()}
             Button("Export current results…",systemImage:"square.and.arrow.up") {model.exportMemories()}
