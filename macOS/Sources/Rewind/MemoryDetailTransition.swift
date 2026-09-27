@@ -65,6 +65,8 @@ struct MemoryImageFlight {
     var presentedFrame:CGRect {flight?.rect ?? image.frame}
     var presentedCornerRadius:CGFloat {flight?.radius ?? image.cornerRadius}
     private var clock:CADisplayLink?
+    weak var workBudget:ForegroundWorkBudget?
+    private var activityLease:UUID?
     private var previousTime:TimeInterval=0
     private var key:String?
     private var target:CGRect?
@@ -93,6 +95,7 @@ struct MemoryImageFlight {
         return flight == nil ? super.hitTest(point):self
     }
     func update(id:String,url:URL,regions:[TextRegion],destination:CGRect,inWindow:Bool = false,source:MemoryImageTransitionSource?,radius:CGFloat,reduced:Bool) {
+        guard workBudget?.state.stopped != true else {stop();return}
         guard window != nil else {
             pendingUpdate={ [weak self] in self?.update(id:id,url:url,regions:regions,destination:destination,inWindow:inWindow,source:source,radius:radius,reduced:reduced) };return
         }
@@ -125,6 +128,7 @@ struct MemoryImageFlight {
         image.layer?.shadowPath=CGPath(roundedRect:image.bounds,cornerWidth:radius,cornerHeight:radius,transform:nil)
         compose(rect:from,radius:fromRadius)
         CATransaction.commit()
+        if activityLease == nil {activityLease=workBudget?.beginActivity()}
         onMotionChanged?(revision,true)
         if reduced {advance(by:MemoryImageFlight.duration)}
         else {start()}
@@ -155,7 +159,7 @@ struct MemoryImageFlight {
         else {compose(rect:flight.rect,radius:flight.radius)}
         CATransaction.commit()
         self.flight=flight
-        if flight.finished {self.flight=nil;clock?.invalidate();clock=nil;onMotionChanged?(revision,false);onSettled?(revision)}
+        if flight.finished {self.flight=nil;clock?.invalidate();clock=nil;releaseActivity();onMotionChanged?(revision,false);onSettled?(revision)}
     }
     private func compose(rect:CGRect,radius:CGFloat) {
         let sx=rect.width/max(1,image.frame.width),sy=rect.height/max(1,image.frame.height)
@@ -183,7 +187,9 @@ struct MemoryImageFlight {
         image.layer?.shadowRadius=28;image.layer?.shadowOffset=CGSize(width:0,height:-12)
         image.layer?.shadowPath=CGPath(roundedRect:image.bounds,cornerWidth:radius,cornerHeight:radius,transform:nil)
     }
+    private func releaseActivity() {let lease=activityLease;activityLease=nil;workBudget?.endActivity(lease)}
     func stop(cancelImage:Bool = true) {
+        releaseActivity()
         if let flight {
             CATransaction.begin();CATransaction.setDisableActions(true)
             land(rect:flight.rect,radius:flight.radius);CATransaction.commit()
@@ -207,11 +213,13 @@ private struct MemoryMovingImage:NSViewRepresentable {
     let radius:CGFloat
     let reduced:Bool
     let interactive:Bool
+    let workBudget:ForegroundWorkBudget
     let onSize:(CGSize)->Void
     let onMotionChanged:(Bool)->Void
     let onOpen:(()->Void)?
     func makeNSView(context:Context)->MemoryImageTransitionView {MemoryImageTransitionView()}
     func updateNSView(_ native:MemoryImageTransitionView,context:Context) {
+        native.workBudget=workBudget
         native.image.onImageSize=onSize;native.image.onOpen=onOpen;native.interactionEnabled=interactive
         native.onMotionChanged={ [weak native] revision,moving in
             DispatchQueue.main.async {guard native?.revision == revision else {return};onMotionChanged(moving)}
@@ -249,7 +257,7 @@ struct MemoryDetailStage:View {
         ZStack(alignment:.topLeading) {
             MemoryMovingImage(id:frame.id,url:model.store.root.appendingPathComponent(path),regions:isDetail && model.meetingView ? frame.meetingRegions:frame.regions,
                 destination:isDetail ? detail ?? history:history,destinationInWindow:isDetail && detail != nil,source:source,radius:isDetail ? 14:22,reduced:reduceMotion,
-                interactive:!model.videoReady,onSize:{imageSize=$0},onMotionChanged:{moving in
+                interactive:!model.videoReady,workBudget:model.foregroundWork,onSize:{imageSize=$0},onMotionChanged:{moving in
                     guard model.inspectorOpen == presentation.detail,model.selected?.id == presentation.id else {return}
                     if moving {if settledPresentation == presentation {settledPresentation=nil}}
                     else if settledPresentation != presentation {settledPresentation=presentation}

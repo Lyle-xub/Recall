@@ -112,6 +112,11 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
     private var captureTasks: [UUID:Task<Void,Never>] = [:]
     private var ocrQueue: [MemoryFrame] = []
     private var ocrTask: Task<Void,Never>?
+    private let workBudget:ForegroundWorkBudget?
+    typealias IndexFrame = @Sendable (URL,Bool) async throws->ScreenIndexResult
+    typealias ReadFrame = @Sendable (String) async->MemoryFrame?
+    private let indexFrame:IndexFrame?
+    private let readFrame:ReadFrame?
     private let indexProcessor = ScreenIndexProcessor()
     private let frameWriter:CaptureFrameStore
     private var continuityID = UUID().uuidString
@@ -145,8 +150,8 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
     var onIndexingIssue: ((String?) -> Void)?
     var onStopped: (() -> Void)?
 
-    init(store: MemoryStore) {
-        self.store = store
+    init(store: MemoryStore,workBudget:ForegroundWorkBudget? = nil,indexFrame:IndexFrame? = nil,readFrame:ReadFrame? = nil) {
+        self.store = store;self.workBudget=workBudget;self.indexFrame=indexFrame;self.readFrame=readFrame
         frameWriter = CaptureFrameStore(store:store)
         usageRecorder = AppUsageRecorder(store:store,backgroundWrites:true)
         diagnostics = CaptureDiagnostics(root:store.root)
@@ -348,19 +353,29 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
             while !ocrQueue.isEmpty,!Task.isCancelled {
                 // Retain the deadline even when the queue briefly empties, so
                 // incoming captures cannot bypass the background work budget.
-                do { try await ContinuousClock().sleep(until:nextIndexingAllowed) }
+                do {
+                    try await ContinuousClock().sleep(until:nextIndexingAllowed)
+                    try await workBudget?.waitForBackgroundWork()
+                }
                 catch { break }
                 let queued = ocrQueue.removeFirst(),database = store
-                guard let frame = try? await Task.detached(priority:.utility,operation:{ try database.frame(queued.id) }).value,
-                      frame.deletedAt == nil else { continue }
+                let loaded:MemoryFrame?
+                if let readFrame {loaded=await readFrame(queued.id)}
+                else {loaded=try? await Task.detached(priority:.utility,operation:{try database.frame(queued.id)}).value}
+                guard let frame=loaded,frame.deletedAt == nil else {continue}
                 if frame.indexingComplete == true { onIndexed?(frame);continue }
+                // A database await may span fresh input. Keep the accepted ID
+                // in this task and recheck immediately before starting OCR.
+                do {try await workBudget?.waitForBackgroundWork()} catch {break}
                 var issue:MediaRecognitionState?
                 onFrameRecognition?(frame.id,.processing)
                 processingFrame = true; recognizingText = true; publishRecognitionProgress()
                 defer { processingFrame = false; recognizingText = false; publishRecognitionProgress();onFrameRecognition?(frame.id,issue) }
                 do {
                     let url = store.root.appendingPathComponent(frame.imagePath), started = Date()
-                    let result = try await indexProcessor.process(url,archiveImage:frame.visualTime == nil)
+                    let result:ScreenIndexResult
+                    if let indexFrame {result=try await indexFrame(url,frame.visualTime == nil)}
+                    else {result=try await indexProcessor.process(url,archiveImage:frame.visualTime == nil)}
                     // Saving the index is part of the same operation; do not
                     // flash a queued state between recognition and commit.
                     // A delayed OCR result must not resurrect a trashed/deleted frame or undo a star.
@@ -369,7 +384,8 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
                     let saved = try await Task.detached(priority:.utility) {
                         try database.updateIndex(frameID:frame.id,text:result.text,regions:result.regions,archive:frame.visualTime == nil ? result.archive:nil,sourceURL:result.sourceURL)
                     }.value
-                    nextIndexingAllowed = .now.advanced(by:.seconds(BackgroundProcessingPolicy.recoveryInterval(after:Date().timeIntervalSince(started))))
+                    let work=Date().timeIntervalSince(started)
+                    nextIndexingAllowed = .now.advanced(by:.seconds(workBudget?.recoveryInterval(after:work) ?? BackgroundProcessingPolicy.recoveryInterval(after:work)))
                     guard let saved else { continue }
                     try Task.checkCancellation()
                     onIndexed?(saved)

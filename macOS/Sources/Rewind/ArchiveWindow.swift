@@ -9,6 +9,19 @@ struct ArchiveNavigationTarget:Equatable,Sendable {
     let recordID:String?
 }
 
+struct ArchiveImageReference:Equatable,Sendable {
+    let id:String
+    let path:String
+}
+/// One replaceable destination, not a cache of previous timeline visits.
+/// The main card is decoded at extraction resolution before nearby thumbnails.
+struct ArchiveImagePreparation:Equatable,Sendable {
+    let generation:Int
+    let target:ArchiveImageReference
+    let nearby:[ArchiveImageReference]
+    var images:[ArchiveImageReference] {[target]+nearby}
+}
+
 struct ArchivePageAnchor:Sendable {
     let day:Date
     let id:String
@@ -39,6 +52,24 @@ struct ArchiveWindow:Sendable {
         return loaded+pins.filter {!ids.contains($0.frame.id)}.map(\.frame)
     }
     var minimumRow:Int {min(0,columns.map(\.origin).min() ?? 0)}
+    func imagePreparation(for target:ArchiveNavigationTarget)->ArchiveImagePreparation? {
+        guard let id=target.recordID,let frame=frames.first(where:{$0.id == id}) else {return nil}
+        var candidates:[(MemoryFrame,Double)]=[]
+        for column in columns {
+            let offset:Double=column.lane == 0 ? 0:column.lane < 0 ? 3.5:1.5
+            for (index,frame) in column.records.enumerated() {
+                let row=Double(column.origin+column.startIndex+index)-offset
+                candidates.append((frame,abs(row-target.row)+Double(abs(column.lane))*2))
+            }
+        }
+        candidates.sort { $0.1 == $1.1 ? $0.0.id < $1.0.id:$0.1 < $1.1 }
+        var paths:Set<String>=[frame.imagePath],nearby:[ArchiveImageReference]=[]
+        for (candidate,_) in candidates where paths.insert(candidate.imagePath).inserted {
+            nearby.append(ArchiveImageReference(id:candidate.id,path:candidate.imagePath))
+            if nearby.count == 23 {break}
+        }
+        return ArchiveImagePreparation(generation:target.generation,target:ArchiveImageReference(id:id,path:frame.imagePath),nearby:nearby)
+    }
     func navigationTarget(at date:Date,generation:Int,requireCovered:Bool = false)->ArchiveNavigationTarget? {
         guard let column=columns.first(where:{$0.lane == 0 && Calendar.current.isDate($0.day,inSameDayAs:date)}),
               let first=column.records.first,let last=column.records.last else {return nil}

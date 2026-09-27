@@ -89,7 +89,7 @@ struct ArchiveStackView: View {
                         Task { @MainActor in
                             model.requestArchiveNavigationWindow(at:row,target:target)
                         }
-                    },onRewindOrigin:rewind)
+                    },onRewindOrigin:rewind,workBudget:model.foregroundWork)
                     .accessibilityRepresentation {
                         VStack {
                             ForEach(frames) { frame in
@@ -158,8 +158,9 @@ struct ArchiveStackView: View {
                 let retained = Set(ids)
                 recognizedRegions = recognizedRegions.filter { retained.contains($0.key) }
             }
-            .onAppear { requestImages() }
+            .onAppear { imageLoader.bind(to:model.foregroundWork);requestImages() }
             .onChange(of:frames.map(\.imagePath)) { _,_ in requestImages() }
+            .onChange(of:model.archiveImagePreparation) { _,_ in requestImages() }
             .onChange(of:active) { _,isActive in
                 if isActive { requestImages() } else { imageLoader.stop();model.cancelArchiveExtraction() }
             }
@@ -168,7 +169,7 @@ struct ArchiveStackView: View {
     }
     private func requestImages() {
         guard active else { return }
-        imageLoader.request(frames,viewport:imageLoader.viewport,root:model.store.root)
+        imageLoader.request(frames,viewport:imageLoader.viewport,root:model.store.root,preparation:model.archiveImagePreparation)
     }
     private func toggle(_ id:String?) {
         model.cancelArchiveExtraction()

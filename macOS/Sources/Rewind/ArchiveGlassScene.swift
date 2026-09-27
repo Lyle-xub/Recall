@@ -2,6 +2,7 @@ import AppKit
 import SceneKit
 import SwiftUI
 import simd
+import Combine
 
 private final class ArchiveRecordControl: SCNNode {
     var recordID = ""
@@ -94,6 +95,28 @@ private final class ArchiveRecordControl: SCNNode {
     private(set) var textureUpdateCount = 0
     private(set) var layoutUpdateCount = 0
     private(set) var informationTextureBuildCount = 0
+    fileprivate weak var workBudget:ForegroundWorkBudget?
+    private var budgetSubscription:AnyCancellable?
+    private var activityLease:UUID?
+    private var memoryPressureLimited=false
+    func bind(to budget:ForegroundWorkBudget) {
+        guard workBudget !== budget else {return}
+        workBudget?.endActivity(activityLease);activityLease=nil;workBudget=budget
+        applyBudget(budget.state,force:true)
+        budgetSubscription=budget.changes.sink { [weak self] state in self?.applyBudget(state) }
+        if isAnimating {activityLease=budget.beginActivity()}
+    }
+    private func applyBudget(_ state:ForegroundWorkBudget.State,force:Bool = false) {
+        if state.stopped {setActive(false);return}
+        let limited=state.pressure != .normal
+        guard force || memoryPressureLimited != limited else {return}
+        memoryPressureLimited=limited
+        // Ordinary input keeps the appearance stable. Only memory-pressure
+        // edges change this pass, without starting another motion lease.
+        SCNTransaction.begin();SCNTransaction.disableActions=true
+        cameraNode.camera?.wantsDepthOfField = !memoryPressureLimited && (currentID.flatMap {extractions[$0]?.spring.value} ?? 0) < 0.995
+        SCNTransaction.commit();animationView?.needsDisplay=true
+    }
     private var navigationTarget:Double?
     private var resolvedNavigation:ArchiveNavigationTarget?
     private var reportedNavigationGeneration:Int?
@@ -113,6 +136,7 @@ private final class ArchiveRecordControl: SCNNode {
     var residentNodeCount:Int {nodes.count}
     var recordIDs:Set<String> { Set(framesByID.keys) }
     var renderedCardCount:Int { nodes.count-blankIDs.count }
+    func hasPreparedImage(at path:String)->Bool {retainedImages[path] != nil}
     var blankCardCount:Int { blankIDs.count }
     private let cameraHome = SCNVector3(-12.9,17.7,22.2)
     private var target = SCNVector3(-1.9,5.4,0.2)
@@ -500,6 +524,7 @@ private final class ArchiveRecordControl: SCNNode {
     }
     private func wake() {
         guard isActive,!isAnimating else { return }
+        activityLease=workBudget?.beginActivity()
         previousTime = ProcessInfo.processInfo.systemUptime
         if let animationView {
             let link = animationView.displayLink(target:frameClock,selector:#selector(ArchiveFrameClock.tick(_:)))
@@ -519,8 +544,12 @@ private final class ArchiveRecordControl: SCNNode {
         advance(dt:min(1/20,max(1/240,now-previousTime)))
         previousTime = now
     }
-    func stopMotion() { timer?.invalidate();timer = nil;displayLink?.invalidate();displayLink = nil }
+    func stopMotion() {
+        timer?.invalidate();timer=nil;displayLink?.invalidate();displayLink=nil
+        let lease=activityLease;activityLease=nil;workBudget?.endActivity(lease)
+    }
     func setActive(_ active:Bool) {
+        let active=active && workBudget?.state.stopped != true
         guard active != isActive else { return }
         isActive = active
         if active {
@@ -624,7 +653,7 @@ private final class ArchiveRecordControl: SCNNode {
         let idleAperture = hovered == nil ? 5.8:18.0
         let desiredAperture = idleAperture+(64-idleAperture)*focus
         // An opened card is flat and in focus; the blur pass adds no detail.
-        let blur = focus < 0.995
+        let blur = !memoryPressureLimited && focus < 0.995
         if cameraNode.camera?.wantsDepthOfField != blur { cameraNode.camera?.wantsDepthOfField = blur }
         if immediate {
             focalDistance = ArchiveMotionSpring(value:desiredDistance)
@@ -987,8 +1016,10 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
     var onNavigationSettled:((ArchiveNavigationTarget)->Void)? = nil
     var onNavigationWindowDemand:((Double,ArchiveNavigationTarget)->Void)? = nil
     var onRewindOrigin:((String,CGRect?)->Void)? = nil
+    var workBudget:ForegroundWorkBudget? = nil
     func makeCoordinator()->ArchiveGlassScene { ArchiveGlassScene() }
     func makeNSView(context:Context)->SCNView {
+        if let workBudget {context.coordinator.bind(to:workBudget)}
         let view = ArchiveSceneView(frame:.zero)
         view.archive = context.coordinator
         context.coordinator.attachAnimation(to:view)
@@ -1011,7 +1042,7 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
             if action == "rewind",let onRewindOrigin {onRewindOrigin(id,view?.selectedImageRectInWindow());return true}
             onRecordAction(id,action);return true
         }
-        view.onScroll = { [weak coordinator = context.coordinator] delta,horizontal,precise in coordinator?.scroll(by:delta,horizontal:horizontal,precise:precise) }
+        view.onScroll = { [weak coordinator = context.coordinator] delta,horizontal,precise in coordinator?.workBudget?.interaction();coordinator?.scroll(by:delta,horizontal:horizontal,precise:precise) }
         return view
     }
     static func dismantleNSView(_ view:SCNView,coordinator:ArchiveGlassScene) {
@@ -1019,6 +1050,7 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
         coordinator.setActive(false);coordinator.stopMotion();coordinator.onPresentationChanged = nil
     }
     func updateNSView(_ view:SCNView,context:Context) {
+        if let workBudget {context.coordinator.bind(to:workBudget)}
         context.coordinator.onWindowDemand=onWindowDemand
         context.coordinator.onNavigationSettled=onNavigationSettled
         context.coordinator.onNavigationWindowDemand=onNavigationWindowDemand

@@ -7,6 +7,7 @@ import ServiceManagement
 @MainActor final class AppModel: ObservableObject {
     let store: MemoryStore
     let capture: CaptureEngine
+    let foregroundWork:ForegroundWorkBudget
     let storageUsage: StorageUsageModel
     @Published private(set) var storageClearing = false
     @Published private(set) var storageCleanupStatus = ""
@@ -18,7 +19,11 @@ import ServiceManagement
     @Published var archiveTimelinePosition:Date?
     @Published private(set) var archiveExtractionID:String?
     @Published private(set) var archiveNavigationTarget:ArchiveNavigationTarget?
+    @Published private(set) var archiveImagePreparation:ArchiveImagePreparation?
+    private(set) var archiveDestinationWindow:ArchiveWindow?
+    private var archiveDestinationRevision=0
     private var archiveNavigationGeneration=0
+    private var archiveNavigationIntent:Date?
     private var archiveSettledGeneration:Int?
     private var archiveSettlementWaiters:[CheckedContinuation<Void,Never>]=[]
     @Published private(set) var timelineDragging = false
@@ -269,7 +274,8 @@ import ServiceManagement
         archiveNavigationWorker = LatestRequestWorker(operation:archiveWindowLoad ?? {try archiveDB.archiveWindow($0)})
         transcriptWorker = LatestRequestWorker { try RecordingRecognitionDetail.load($0,store:previewDB) }
         searchWorker = LatestRequestWorker { try MemorySearchPage.load($0,store:searchDB) }
-        capture = CaptureEngine(store:store)
+        foregroundWork=ForegroundWorkBudget(observeSystem:!maintenanceOnly)
+        capture = CaptureEngine(store:store,workBudget:foregroundWork)
         settings = (try? JSONDecoder().decode(AppSettings.self,from:Data(contentsOf:root.appendingPathComponent("settings.json")))) ?? AppSettings()
         storageOptimizer.onImageArchived = { [weak self] source,destination in
             guard let self else { return }
@@ -283,7 +289,9 @@ import ServiceManagement
             frameCache = frameCache.mapValues(refreshed)
             if let current = selected,current.imagePath == source || current.meetingImagePath == source { selected = refreshed(current) }
             if frames.contains(where:{$0.imagePath == source || $0.meetingImagePath == source}) { frames = frames.map(refreshed) }
-            if archiveFrames.contains(where:{$0.imagePath == source || $0.meetingImagePath == source}) { archiveFrames = archiveFrames.map(refreshed) }
+            let changed=archiveWindow.frames.contains {$0.imagePath == source || $0.meetingImagePath == source} || archiveDestinationWindow?.frames.contains {$0.imagePath == source || $0.meetingImagePath == source} == true
+            if changed {updateArchiveMetadata(refreshed)}
+            if changed {refreshArchiveWindowAfterMaintenance()}
         }
         capture.onFrame = { [weak self] frame in self?.receiveCapturedFrame(frame) }
         capture.onFrameExtended = { [weak self] id,date in
@@ -294,7 +302,9 @@ import ServiceManagement
         }
         capture.onIndexed = { [weak self] frame in
             guard let self else { return }
-            if let index = archiveFrames.firstIndex(where: { $0.id == frame.id }) { archiveFrames[index] = frame }
+            let previous=archiveDestinationWindow?.frames.first {$0.id == frame.id} ?? archiveFrames.first {$0.id == frame.id}
+            if previous != nil {updateArchiveMetadata {$0.id == frame.id ? frame:$0}}
+            if let previous,previous.imagePath != frame.imagePath {refreshArchiveWindowAfterMaintenance()}
             if frameCache[frame.id] != nil { cache(frame) }
             if selected?.id == frame.id { selected = frame }
             if searchPresented { reloadSearch() }
@@ -302,7 +312,7 @@ import ServiceManagement
         capture.onArchived = { [weak self] archived in
             guard let self else {return}
             let updates=Dictionary(uniqueKeysWithValues:archived.map {($0.id,$0)})
-            archiveFrames=archiveFrames.map {updates[$0.id] ?? $0}
+            updateArchiveMetadata {updates[$0.id] ?? $0}
             frames=frames.map {updates[$0.id] ?? $0}
             for frame in archived where frameCache[frame.id] != nil {cache(frame)}
             if let id=selected?.id,let frame=updates[id] {selected=frame}
@@ -394,6 +404,7 @@ import ServiceManagement
     }
     func reload() {
         cancelArchiveRefresh()
+        if archiveNavigationIntent != nil {cancelArchiveExtraction(keepNavigation:true)} else {clearArchiveDestination()}
         navigationWorker.cancel(); requestedNavigationDate = nil
         frameCache.removeAll(); frameCacheOrder.removeAll()
         do {
@@ -407,7 +418,8 @@ import ServiceManagement
                 archiveDay = Calendar.current.startOfDay(for:latest);archiveDayInitialized = true
             }
             cancelArchiveWindowLoad();archiveEpoch += 1
-            applyArchiveWindow(try libraryReader.archiveWindow(ArchiveWindowQuery(day:archiveDay,row:archiveScrollRow,near:archiveTimelinePosition,anchors:archiveAnchors(near:archiveScrollRow),epoch:archiveEpoch,pins:archiveProtectedFrames)))
+            let window=try libraryReader.archiveWindow(ArchiveWindowQuery(day:archiveNavigationIntent.map {Calendar.current.startOfDay(for:$0)} ?? archiveDay,row:archiveScrollRow,near:archiveNavigationIntent,anchors:archiveAnchors(near:archiveScrollRow),epoch:archiveEpoch,pins:archiveProtectedFrames))
+            applyArchiveWindow(archiveNavigationIntent.map {prepareArchiveDestination(window,at:$0,generation:archiveNavigationGeneration)} ?? window)
             refreshTimelineActivity(force:true)
             if searchPresented { reloadSearch() }
             if let selected,!timeline.contains(where:{$0.id == selected.id}) { loadTimeline(around:selected.timestamp) }
@@ -443,6 +455,7 @@ import ServiceManagement
         }
     }
     private func reloadAfterCleanup() async {
+        clearArchiveDestination()
         navigationWorker.cancel();cancelArchiveWindowLoad();requestedNavigationDate = nil
         frameCache.removeAll();frameCacheOrder.removeAll()
         let root = store.root,trash = trash,since = since,day = archiveDay,near = archiveTimelinePosition
@@ -481,33 +494,17 @@ import ServiceManagement
     private func submitArchiveWindow(_ request:ArchiveWindowQuery,navigating:Bool = false,refreshing:Bool = false) {
         var query=request;query.pins=archiveProtectedFrames;archivePendingQuery=query
         archiveWindowRefreshing = archiveWindowRefreshing || refreshing
-        let captureRevision=archiveCaptureRevision,navigationGeneration=archiveNavigationGeneration
+        let captureRevision=archiveCaptureRevision,navigationGeneration=archiveNavigationGeneration,destinationRevision=archiveDestinationRevision
         archiveWindowLoading=true;archiveRequestedRow=query.row;archiveNavigating=navigating;archiveRequestedDay=query.day
         archiveWindowRequestCount += 1
         archiveNavigationWorker.submit(query,apply:{ [weak self] window in
-            guard let self,self.archiveEpoch == query.epoch else {return}
+            guard let self,self.archiveEpoch == query.epoch,
+                  query.near == nil || self.archiveDestinationRevision == destinationRevision else {return}
             var current=window
             if !navigating,query.near == nil {current.focusRow=self.archiveScrollRow}
-            if navigating,let date=query.near,self.archiveTimelinePosition == date,
-               self.archiveNavigationGeneration == navigationGeneration {
-                // Resolving a far destination must not evict the screenshots
-                // still on screen. Reuse at most one bounded page per day;
-                // motion requests replace these pages as the viewport travels.
-                current.columns=window.columns.map {column in
-                    guard let old=self.archiveWindow.columns.first(where:{$0.day == column.day}) else {return column}
-                    let local=self.archiveScrollRow-Double(old.origin)
-                    let keepOld=local < Double(column.startIndex+24) || local > Double(column.startIndex+column.records.count-24)
-                    return ArchiveDayColumn(day:column.day,lane:column.lane,records:keepOld ? old.records:column.records,
-                        startIndex:keepOld ? old.startIndex:column.startIndex,totalCount:column.totalCount,origin:old.origin)
-                }
-                var destinationWindow=window
-                destinationWindow.columns=window.columns.map {column in
-                    ArchiveDayColumn(day:column.day,lane:column.lane,records:column.records,startIndex:column.startIndex,totalCount:column.totalCount,
-                        origin:self.archiveWindow.columns.first(where:{$0.day == column.day})?.origin ?? 0)
-                }
-                self.archiveNavigationTarget=destinationWindow.navigationTarget(at:date,generation:navigationGeneration)
-                    ?? ArchiveNavigationTarget(generation:navigationGeneration,date:date,row:window.focusRow ?? 0,recordID:nil)
-                current.focusRow=self.archiveScrollRow
+            if navigating,let date=query.near,self.archiveNavigationIntent == date,
+               self.archiveNavigationGeneration == navigationGeneration,self.archiveDestinationRevision == destinationRevision {
+                current=self.prepareArchiveDestination(window,at:date,generation:navigationGeneration)
             }
             self.applyArchiveWindow(current)
             if navigating {
@@ -515,10 +512,54 @@ import ServiceManagement
                 if query.near == nil,self.archiveHasNewFrames,self.archiveScrollRow <= Double(self.archiveWindow.minimumRow)+1 {self.requestArchiveWindow(at:self.archiveScrollRow)}
             }
         },fail:{ [weak self] error in
-            guard let self,self.archiveEpoch == query.epoch else {return}
+            guard let self,self.archiveEpoch == query.epoch,
+                  query.near == nil || self.archiveDestinationRevision == destinationRevision else {return}
             self.archiveWindowLoading=false;self.archiveWindowRefreshing=false;self.archiveRequestedRow=nil;self.archiveNavigating=false;self.error=error.localizedDescription
             if navigating {self.cancelArchiveExtraction()}
         })
+    }
+    private func prepareArchiveDestination(_ window:ArchiveWindow,at date:Date,generation:Int)->ArchiveWindow {
+        // Resolving a far destination must not evict the screenshots
+        // still on screen. Reuse at most one bounded page per day;
+        // motion requests replace these pages as the viewport travels.
+        var current=window
+        current.columns=window.columns.map {column in
+            guard let old=archiveWindow.columns.first(where:{$0.day == column.day}) else {return column}
+            let center=max(0,min(column.totalCount-1,Int(archiveScrollRow)-old.origin))
+            let first=max(0,center-ArchiveDayLayout.renderedRows/2)
+            let last=min(column.totalCount,center+ArchiveDayLayout.renderedRows/2+1)
+            let keepOld=column.startIndex > first || column.startIndex+column.records.count < last
+            return ArchiveDayColumn(day:column.day,lane:column.lane,records:keepOld ? old.records:column.records,
+                startIndex:keepOld ? old.startIndex:column.startIndex,totalCount:column.totalCount,origin:old.origin)
+        }
+        var destinationWindow=window
+        destinationWindow.columns=window.columns.map {column in
+            ArchiveDayColumn(day:column.day,lane:column.lane,records:column.records,startIndex:column.startIndex,totalCount:column.totalCount,
+                origin:archiveWindow.columns.first(where:{$0.day == column.day})?.origin ?? 0)
+        }
+        archiveNavigationTarget=destinationWindow.navigationTarget(at:date,generation:generation)
+            ?? ArchiveNavigationTarget(generation:generation,date:date,row:window.focusRow ?? 0,recordID:nil)
+        archiveDestinationWindow=destinationWindow
+        if let target=archiveNavigationTarget {archiveImagePreparation=destinationWindow.imagePreparation(for:target)}
+        current.focusRow=archiveScrollRow
+        return current
+    }
+    /// Patch both bounded pages together. Path merges also schedule a fresh
+    /// rank/uniqueness query; text-only OCR updates need no database round trip.
+    private func updateArchiveMetadata(_ transform:(MemoryFrame)->MemoryFrame) {
+        func updated(_ window:ArchiveWindow)->ArchiveWindow {
+            var result=window
+            result.columns=window.columns.map {column in
+                ArchiveDayColumn(day:column.day,lane:column.lane,records:column.records.map(transform),startIndex:column.startIndex,totalCount:column.totalCount,origin:column.origin)
+            }
+            result.pins=window.pins.map {pin in var pin=pin;pin.frame=transform(pin.frame);return pin}
+            return result
+        }
+        archiveWindow=updated(archiveWindow);archiveFrames=archiveWindow.frames;archiveProtectedFrames=archiveWindow.pins
+        if let destination=archiveDestinationWindow {archiveDestinationWindow=updated(destination)}
+        if let target=archiveNavigationTarget,archiveImagePreparation != nil {
+            archiveImagePreparation=(archiveDestinationWindow ?? archiveWindow).imagePreparation(for:target)
+        }
     }
     /// Called with world coordinates even when no record metadata is loaded at
     /// a fast scroll's destination. A missing card can never suppress demand.
@@ -541,13 +582,27 @@ import ServiceManagement
     }
     func requestArchiveNavigationWindow(at row:Double,target:ArchiveNavigationTarget) {
         guard archiveNavigationTarget == target,target.generation == archiveNavigationGeneration else {return}
+        if !archiveWindow.covers(row),let destination=archiveDestinationWindow,
+           destination.epoch == archiveEpoch,destination.covers(row) {
+            // The near-time read already paid for this page. Arrival replaces
+            // an obsolete intermediate request without a second database read.
+            cancelArchiveWindowLoad()
+            var ready=destination;ready.focusRow=row;ready.pins=archiveProtectedFrames
+            applyArchiveWindow(ready);return
+        }
         requestArchiveWindow(at:row,navigation:true)
+    }
+
+    private func clearArchiveDestination() {
+        archiveDestinationRevision += 1;archiveDestinationWindow=nil;archiveImagePreparation=nil
     }
 
     /// Archive batches may merge source paths and therefore change daily
     /// uniqueness. Coalesce maintenance notifications into one background read.
     func refreshArchiveWindowAfterMaintenance() {
         guard !archiveWindow.columns.isEmpty else {return}
+        if archiveNavigationIntent != nil {cancelArchiveExtraction(keepNavigation:true);cancelArchiveWindowLoad()}
+        else {clearArchiveDestination()}
         cancelArchiveRefresh()
         let revision=archiveRefreshRevision,delay=archiveRefreshDelay
         archiveRefreshTask=Task { [weak self] in
@@ -556,8 +611,12 @@ import ServiceManagement
             guard let self,!Task.isCancelled else {return}
             if self.archiveNavigating {await self.archiveNavigationWorker.waitUntilIdle()}
             guard !Task.isCancelled,!self.storageClearing else {return}
+            let near=self.archiveNavigationIntent
+            // Read the latest intent after the debounce, not the date that
+            // triggered maintenance. A changed rank gets a new motion identity.
+            if near != nil {self.cancelArchiveExtraction(keepNavigation:true)}
             self.archiveEpoch += 1
-            self.submitArchiveWindow(ArchiveWindowQuery(day:self.archiveDay,row:self.archiveScrollRow,near:self.archiveTimelinePosition,anchors:self.archiveAnchors(near:self.archiveScrollRow),epoch:self.archiveEpoch),refreshing:true)
+            self.submitArchiveWindow(ArchiveWindowQuery(day:near.map {Calendar.current.startOfDay(for:$0)} ?? self.archiveDay,row:self.archiveScrollRow,near:near,anchors:self.archiveAnchors(near:self.archiveScrollRow),epoch:self.archiveEpoch),navigating:near != nil,refreshing:true)
         }
     }
     private func cancelArchiveRefresh() {
@@ -657,20 +716,21 @@ import ServiceManagement
         stopVideo()
         transcriptWorker.cancel();transcriptSessionID = nil;lines = [];recordingDetail = nil
         cancelArchiveExtraction(keepNavigation:true)
-        archiveTimelinePosition = time
+        archiveTimelinePosition = time;archiveNavigationIntent=time
         archiveEpoch += 1
         // Scrubbing within the current bounded page does not need another SQL
         // round trip. Keep the previous motion alive while distant data loads.
         if let target=archiveWindow.navigationTarget(at:time,generation:archiveNavigationGeneration,requireCovered:true) {
-            cancelArchiveWindowLoad();archiveNavigationTarget=target;return
+            cancelArchiveWindowLoad();archiveNavigationTarget=target;archiveImagePreparation=archiveWindow.imagePreparation(for:target);return
         }
         submitArchiveWindow(ArchiveWindowQuery(day:Calendar.current.startOfDay(for:time),near:time,epoch:archiveEpoch),navigating:true)
     }
 
     func cancelArchiveExtraction(keepNavigation:Bool = false) {
+        clearArchiveDestination()
         archiveNavigationGeneration += 1;archiveSettledGeneration=nil
         if !keepNavigation {
-            archiveNavigationTarget=nil
+            archiveNavigationIntent=nil;archiveNavigationTarget=nil
             if archiveNavigating {cancelArchiveWindowLoad()}
         }
         archiveExtractionID = nil
@@ -860,8 +920,10 @@ import ServiceManagement
         else { returnToDesktop(); hideOverlay() }
     }
     func interfaceVisibilityChanged(_ visible:Bool) {
-        // Visibility controls capture, never processing of already saved media.
+        // Visibility stops capture; a short interaction budget also lets the
+        // interface settle before starting another saved-media OCR job.
         interfaceVisible = visible
+        foregroundWork.setVisible(visible)
         if !visible {stopVideo();cancelArchiveExtraction()}
         capture.setInterfaceVisible(visible)
         storageOptimizer.setInterfaceVisible(visible)
@@ -876,7 +938,7 @@ import ServiceManagement
     func stopRecording() async { recordingCoordinator.request(false);await recordingCoordinator.waitUntilSettled() }
     func shutDownRecording() async { await recordingCoordinator.shutdown();transcriptionTask?.cancel() }
     // Prevent a pending animation completion from restarting capture during quit.
-    func prepareToQuit() { stopVideo();cancelArchiveRefresh();cancelArchiveWindowLoad();cancelArchiveExtraction();recordingCoordinator.request(false) }
+    func prepareToQuit() { foregroundWork.stop();stopVideo();cancelArchiveRefresh();cancelArchiveWindowLoad();cancelArchiveExtraction();recordingCoordinator.request(false) }
     private func beginCapture() async throws {
         error = nil;capturePermissionRequired = false
         try await capture.start(settings:settings,allowed:{ [weak self] in self?.recordingCoordinator.state.shouldCapture == true })

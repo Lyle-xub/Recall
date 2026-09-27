@@ -23,6 +23,14 @@ final class ArchiveInteractionPerformanceTests:XCTestCase {
         guard ProcessInfo.processInfo.environment["RECALL_ARCHIVE_INTERACTION_BENCHMARK"] == "1" else {
             throw XCTSkip("Opt-in native synthetic interaction benchmark")
         }
+        let app=NSApplication.shared,activationPolicy=NSApplication.shared.activationPolicy()
+        app.setActivationPolicy(.accessory);app.finishLaunching();app.activate()
+        defer {app.setActivationPolicy(activationPolicy)}
+        // xctest runs the main run loop, not NSApplication.run(). Dispatch
+        // AppKit's window-state events too, as the real application does.
+        func pumpWindowEvents() {
+            while let event=app.nextEvent(matching:[.appKitDefined,.systemDefined,.applicationDefined],until:Date(),inMode:.default,dequeue:true) {app.sendEvent(event)}
+        }
         let root=FileManager.default.temporaryDirectory.appendingPathComponent("archive-interaction-"+UUID().uuidString)
         defer {try? FileManager.default.removeItem(at:root)}
         let store=try MemoryStore(root:root),day=Calendar.current.startOfDay(for:Date())
@@ -45,19 +53,29 @@ final class ArchiveInteractionPerformanceTests:XCTestCase {
         let host=NSHostingView(rootView:RootView(model:model).frame(width:1440,height:900))
         let window=NSWindow(contentRect:NSRect(x:0,y:0,width:1440,height:900),styleMask:.borderless,backing:.buffered,defer:false)
         window.isReleasedWhenClosed=false;window.contentView=host
+        // Match the real overlay. A normal-level test window can sit behind
+        // Recall's status-bar-level panel; Metal then throttles its drawables
+        // and the interval samples measure occlusion instead of interaction.
+        window.level = .statusBar;window.collectionBehavior=RecallWindowBehavior.collection
+        window.center()
         defer {window.orderOut(nil);model.interfaceVisibilityChanged(false);model.prepareToQuit()}
         model.interfaceVisibilityChanged(true);model.requestArchiveWindow(at:300)
-        await model.waitForPendingLoads();window.orderFront(nil);host.layoutSubtreeIfNeeded()
+        await model.waitForPendingLoads();window.orderFrontRegardless();host.layoutSubtreeIfNeeded()
         func archiveView(_ view:NSView)->ArchiveSceneView? {
             if let archive=view as? ArchiveSceneView {return archive}
             return view.subviews.lazy.compactMap {archiveView($0)}.first
         }
         // Warmup is deliberate benchmark pacing, never a semantic test wait.
         try await Task.sleep(for:.seconds(1))
+        pumpWindowEvents()
         let view=try XCTUnwrap(archiveView(host)),scene=try XCTUnwrap(view.archive),render=ArchiveRenderIntervals()
         scene.scroll(by:(300-scene.scrollOffset)/0.42,precise:false)
         await model.waitForPendingLoads()
         try await Task.sleep(for:.seconds(1))
+        pumpWindowEvents()
+        func visiblyPresented()->Bool {window.isVisible && window.isOnActiveSpace && window.occlusionState.contains(.visible)}
+        print("ARCHIVE_NATIVE_INTERACTION window level=\(window.level.rawValue) visible=\(window.isVisible) onActiveSpace=\(window.isOnActiveSpace) occlusion=\(window.occlusionState.rawValue) points=\(window.contentLayoutRect.size) backingScale=\(window.backingScaleFactor)")
+        guard visiblyPresented() else {XCTFail("The native benchmark window must be visibly presented; occluded drawable intervals are not valid performance evidence");return}
         view.delegate=render
         defer {view.delegate=nil;scene.onWorkMeasured=nil;view.cancelPendingInteraction();scene.stopMotion()}
         var stages:[String:[Double]]=[:]
@@ -73,10 +91,11 @@ final class ArchiveInteractionPerformanceTests:XCTestCase {
             stages=[:];render.reset()
             var inputs:[Double]=[]
             let clock=ContinuousClock(),start=clock.now,startRow=scene.scrollOffset
-            var readiness:[Double]=[]
+            var readiness:[Double]=[],remainedVisible=visiblyPresented()
             for sample in 0..<480 {
                 let deadline=start.advanced(by:.seconds(Double(sample)/120))
                 try await clock.sleep(until:deadline)
+                pumpWindowEvents()
                 let began=ContinuousClock.now
                 if phase == "wheel" {
                     let event=try XCTUnwrap(CGEvent(scrollWheelEvent2Source:nil,units:.pixel,wheelCount:1,wheel1:sample < 240 ? -22:22,wheel2:0,wheel3:0))
@@ -94,6 +113,7 @@ final class ArchiveInteractionPerformanceTests:XCTestCase {
                 let elapsed=began.duration(to:.now).components
                 inputs.append(Double(elapsed.seconds)*1000+Double(elapsed.attoseconds)/1e15)
                 if sample % 120 == 0 {
+                    remainedVisible = remainedVisible && visiblyPresented()
                     let visible=scene.viewportRecords(in:view).visible
                     let ready=visible.filter {scene.scene.rootNode.childNode(withName:$0,recursively:true)?.childNode(withName:"artwork",recursively:false)?.isHidden == false}.count
                     readiness.append(Double(ready)/Double(max(1,visible.count)))
@@ -106,6 +126,8 @@ final class ArchiveInteractionPerformanceTests:XCTestCase {
             let ready=visible.filter {scene.scene.rootNode.childNode(withName:$0,recursively:true)?.childNode(withName:"artwork",recursively:false)?.isHidden == false}.count
             print("ARCHIVE_NATIVE_INTERACTION \(phase) start=\(startRow) elapsed=\(start.duration(to:.now)) visible=\(visible.count) ready=\(ready) row=\(scene.scrollOffset) requests=\(model.archiveWindowRequestCount) textures=\(scene.textureUpdateCount) nodes=\(scene.residentNodeCount)")
             print("ARCHIVE_NATIVE_INTERACTION \(phase) ready-fractions=\(readiness)")
+            print("ARCHIVE_NATIVE_INTERACTION \(phase) window-visible=\(remainedVisible && visiblyPresented()) occlusion=\(window.occlusionState.rawValue)")
+            XCTAssertTrue(remainedVisible && visiblyPresented(),"Discard performance numbers if the benchmark window becomes occluded")
             XCTAssertLessThanOrEqual(scene.residentNodeCount,262)
             XCTAssertGreaterThan(render.samples().count,20,"Exercise the actual renderer, not only scene mutations")
             let stopped=ContinuousClock.now
