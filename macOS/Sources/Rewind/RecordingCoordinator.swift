@@ -17,12 +17,14 @@ import Foundation
     var failed:((Error)->Void)?
     private let start:() async throws -> Void
     private let stop:() async -> Void
+    typealias ResumeWait = @Sendable (Duration) async throws -> Void
     private let resumeDelay:Duration
+    private let waitForResume:ResumeWait
     private var task:Task<Void,Never>?
     private var rotate = false
     private var revision = 0
-    init(resumeDelay:Duration = .milliseconds(300),start:@escaping() async throws -> Void,stop:@escaping() async -> Void) {
-        self.resumeDelay = resumeDelay;self.start = start;self.stop = stop
+    init(resumeDelay:Duration = .milliseconds(300),waitForResume:@escaping ResumeWait = {try await Task.sleep(for:$0)},start:@escaping() async throws -> Void,stop:@escaping() async -> Void) {
+        self.resumeDelay = resumeDelay;self.waitForResume=waitForResume;self.start = start;self.stop = stop
     }
     func request(_ enabled:Bool) {
         guard !state.terminated else { return }
@@ -51,7 +53,7 @@ import Foundation
                     let token = revision
                     // Let the overlay finish disappearing and coalesce rapid
                     // toggles without making tiny recordings between them.
-                    try? await Task.sleep(for:resumeDelay)
+                    try? await waitForResume(resumeDelay)
                     guard state.shouldCapture,token == revision else { continue }
                     state.transitioning = true;changed?(state)
                     do { try await start();state.active = true }
