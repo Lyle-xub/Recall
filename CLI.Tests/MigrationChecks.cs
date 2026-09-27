@@ -7,6 +7,17 @@ static class MigrationChecks
 {
     public static async Task Run(string temporary,Action<bool,string> assert)
     {
+        var deployed=new DefaultLibrary(Path.Combine(temporary,"windows-deployed"),windowsLayout:true);
+        using(var store=new MemoryStore(deployed.Nested))store.Save(new MemoryFrame {Id="deployed",ImagePath="frames/test.png",Text="Existing Windows library"});
+        var sharedRoot=deployed.ResolveDefault(()=>{});
+        var nestedResult=await new LibraryClient(sharedRoot).Call("get",new {id="deployed"},default);
+        assert(sharedRoot==deployed.Nested && nestedResult.Text("id")=="deployed" && !File.Exists(Path.Combine(deployed.Current,"memory.sqlite")),"CLI consumes the same existing Windows Recall/Data library without creating a parallel flat database");
+        using(var lease=LibraryLocationLease.Access(deployed.Nested,deployed))
+            try {using var migration=new LibraryLocationLease(deployed.Parent,true);throw new Exception("Nested CLI root bypassed location lock");}
+            catch(RecallException e){assert(e.Code=="busy","Nested CLI root participates in the shared migration lock");}
+        using(var flat=new MemoryStore(deployed.Current))flat.Save(new MemoryFrame {Id="flat"});
+        try {deployed.ResolveDefault(()=>{});throw new Exception("Selected one of two deployed libraries");}
+        catch(RecallException e){assert(e.Code=="conflict","Shared CLI resolver refuses flat/nested ambiguity");}
         var parent=Path.Combine(temporary,"migration");var paths=new DefaultLibrary(parent);
         assert(paths.ResolveDefault(()=>{})==paths.Current && !Directory.Exists(parent),"Missing default resolves without creating an empty library");
         Directory.CreateDirectory(paths.Legacy);

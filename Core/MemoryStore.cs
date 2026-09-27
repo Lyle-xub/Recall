@@ -4,6 +4,11 @@ using System.Text;
 using System.Text.Json;
 namespace Rewind;
 
+// One row in the archive's virtualized wall. Text, OCR regions, and recording
+// details stay on disk until Frame(id) is requested for a selected card.
+public sealed record ArchiveFrame(string Id, DateTimeOffset Timestamp, string AppName,
+    string Title, string ImagePath, bool Starred);
+
 public sealed class MemoryStore : IDisposable
 {
     public string Root
@@ -14,6 +19,12 @@ public sealed class MemoryStore : IDisposable
     private readonly LibraryLocationLease? location;
     private readonly object gate = new();
     private readonly object mediaGate = new();
+    private long archiveRevision;
+    // This is a process-local generation, not a persisted SQLite change token.
+    // Save covers Star/Trash/Restore/Recognition/ReplaceImage; Retain and
+    // Cleanup are the direct frame writes. End-time and OCR-only writes do
+    // not change ArchiveFrame's projection. Reading never scans the database.
+    public long ArchiveRevision => Interlocked.Read(ref archiveRevision);
     public void WithMediaLock(Action action)
     {
         lock (mediaGate)
@@ -43,6 +54,7 @@ public sealed class MemoryStore : IDisposable
         Execute("PRAGMA busy_timeout=15000");
         Execute("CREATE TABLE IF NOT EXISTS frames(id TEXT PRIMARY KEY,time REAL,app TEXT,text TEXT,starred INTEGER,deleted REAL,demo INTEGER,json TEXT)");
         Execute("CREATE INDEX IF NOT EXISTS frames_time ON frames(time DESC)");
+        Execute("CREATE INDEX IF NOT EXISTS frames_archive_time ON frames(time DESC,id) WHERE demo=0 AND deleted IS NULL");
         Execute("CREATE INDEX IF NOT EXISTS frames_app ON frames(app,time DESC)");
         Execute("CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,json TEXT)");
         Execute("CREATE TABLE IF NOT EXISTS transcripts(id TEXT PRIMARY KEY,session TEXT,time REAL,text TEXT,json TEXT)");
@@ -89,6 +101,33 @@ public sealed class MemoryStore : IDisposable
             cmd.ExecuteNonQuery();
         }
     }
+    private int ExecuteAffected(string sql, params object?[] values)
+    {
+        lock (gate)
+        {
+            using var cmd = Command(sql, values);
+            return cmd.ExecuteNonQuery();
+        }
+    }
+    private readonly record struct ArchiveProjection(double Time, string App, string Title,
+        string ImagePath, bool Starred, bool Visible);
+    private ArchiveProjection? CurrentArchiveProjection(string id)
+    {
+        using var cmd = Command("SELECT time,app,starred,deleted,demo,json_extract(json,'$.Title')," +
+            "json_extract(json,'$.ImagePath') FROM frames WHERE id=$p0", id);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        return new ArchiveProjection(reader.GetDouble(0), reader.IsDBNull(1) ? "Desktop" : reader.GetString(1),
+            reader.IsDBNull(5) ? "" : reader.GetString(5), reader.IsDBNull(6) ? "" : reader.GetString(6),
+            !reader.IsDBNull(2) && reader.GetInt64(2) != 0,
+            reader.IsDBNull(3) && !reader.IsDBNull(4) && reader.GetInt64(4) == 0);
+    }
+    private static ArchiveProjection Projection(MemoryFrame frame) =>
+        new(Seconds(frame.Timestamp), frame.AppName, frame.Title, frame.ImagePath,
+            frame.Starred, !frame.Demo && frame.DeletedAt == null);
+    private static bool ArchiveChanged(ArchiveProjection? before, ArchiveProjection after) =>
+        before is null ? after.Visible :
+        (before.Value.Visible || after.Visible) && before.Value != after;
     private List<T> Rows<T>(string sql, params object?[] values)
     {
         lock (gate)
@@ -128,6 +167,8 @@ public sealed class MemoryStore : IDisposable
     {
         lock (gate)
         {
+            var before = CurrentArchiveProjection(frame.Id);
+            var after = Projection(frame);
             var regions = JsonSerializer.Serialize(frame.Regions);
             var meeting = JsonSerializer.Serialize(frame.MeetingRegions);
             var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new[] { frame.Text, regions, meeting }))));
@@ -140,6 +181,7 @@ public sealed class MemoryStore : IDisposable
                 MeetingRegions = []
             };
             Execute("INSERT OR REPLACE INTO frames(id,time,app,text,starred,deleted,demo,json,ocr_id) VALUES($p0,$p1,$p2,$p3,$p4,$p5,$p6,$p7,$p8)", frame.Id, Seconds(frame.Timestamp), frame.AppName, MemorySearch.Normalize(frame.AppName + "\n" + frame.Title), frame.Starred ? 1 : 0, frame.DeletedAt is { } d ? Seconds(d) : null, frame.Demo ? 1 : 0, JsonSerializer.Serialize(compact), hash);
+            if (ArchiveChanged(before, after)) Interlocked.Increment(ref archiveRevision);
         }
     }
     public MemoryFrame? ExactImage(string hash) => ReadFrames(SelectFrame + "WHERE json_extract(f.json,'$.PixelHash')=$p0 AND json_extract(f.json,'$.TextState') IN (2,3) ORDER BY f.time DESC LIMIT 1", hash).FirstOrDefault();
@@ -233,6 +275,82 @@ public sealed class MemoryStore : IDisposable
         if (until != null)
             conditions.Add("f.time<" + Arg(Seconds(until.Value)));
         return ReadFrames(SelectFrame + $"WHERE {string.Join(" AND ", conditions)} ORDER BY f.time {(ascending ? "ASC" : "DESC")},f.id LIMIT {Arg(Math.Clamp(limit, 1, 10000))} OFFSET {Arg(Math.Max(0, offset))}", args.ToArray());
+    }
+    // The archive wall needs image paths and labels, not the OCR payload of
+    // thousands of screenshots. Hydrate a selected frame with Frame(id) only
+    // when opening it or performing a text-related action.
+    public DateTime? LatestArchiveDay()
+    {
+        lock (gate)
+        {
+            using var command = Command("SELECT time FROM frames WHERE demo=0 AND deleted IS NULL ORDER BY time DESC LIMIT 1");
+            var value = command.ExecuteScalar();
+            return value == null || value == DBNull.Value ? null
+                : DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(Convert.ToDouble(value) * 1000)).LocalDateTime.Date;
+        }
+    }
+    public List<MemoryFrame> ArchiveFrames(DateTime day, int daysEachSide = 2, int perDayLimit = 2000)
+    {
+        var radius = Math.Clamp(daysEachSide, 0, 7);
+        var limit = Math.Clamp(perDayLimit, 1, 10000);
+        var frames = new List<MemoryFrame>();
+        for (var lane = -radius; lane <= radius; lane++)
+        {
+            var date = DateTime.SpecifyKind(day.Date.AddDays(lane), DateTimeKind.Unspecified);
+            // Convert each local midnight independently: a DST day can be
+            // shorter or longer than 24 hours.
+            var since = new DateTimeOffset(date);
+            var until = new DateTimeOffset(date.AddDays(1));
+            frames.AddRange(Rows<MemoryFrame>("SELECT json FROM frames WHERE demo=0 AND deleted IS NULL AND time>=$p0 AND time<$p1 ORDER BY time DESC,id LIMIT $p2",
+                Seconds(since), Seconds(until), limit));
+        }
+        return frames.OrderByDescending(frame => frame.Timestamp).ThenBy(frame => frame.Id, StringComparer.Ordinal).ToList();
+    }
+
+    // Every matching row is represented once, so a busy day has its true row
+    // count and both its newest and oldest cards remain reachable. The query
+    // projects only wall fields; it never loads compact frame JSON or OCR.
+    public List<ArchiveFrame> ArchiveIndex(DateTime day, int daysEachSide = 2,
+        CancellationToken cancellation = default) =>
+        ArchiveIndex(day, daysEachSide, cancellation, TimeZoneInfo.Local);
+
+    internal List<ArchiveFrame> ArchiveIndex(DateTime day, int daysEachSide,
+        CancellationToken cancellation, TimeZoneInfo zone, Action<int>? rowRead = null)
+    {
+        cancellation.ThrowIfCancellationRequested();
+        var radius = Math.Clamp(daysEachSide, 0, 7);
+        var since = ArchiveDayBounds(day.Date.AddDays(-radius), zone).Since;
+        var until = ArchiveDayBounds(day.Date.AddDays(radius), zone).Until;
+        lock (gate)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            using var command = Command("SELECT id,time,app,starred,json_extract(json,'$.Title'),json_extract(json,'$.ImagePath') " +
+                "FROM frames WHERE demo=0 AND deleted IS NULL AND time>=$p0 AND time<$p1 " +
+                "ORDER BY time DESC,id COLLATE BINARY ASC", Seconds(since), Seconds(until));
+            using var reader = command.ExecuteReader();
+            var result = new List<ArchiveFrame>();
+            while (reader.Read())
+            {
+                cancellation.ThrowIfCancellationRequested();
+                result.Add(new ArchiveFrame(reader.GetString(0),
+                    DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(reader.GetDouble(1) * 1000)).ToLocalTime(),
+                    reader.IsDBNull(2) ? "Desktop" : reader.GetString(2),
+                    reader.IsDBNull(4) ? "" : reader.GetString(4),
+                    reader.IsDBNull(5) ? "" : reader.GetString(5), reader.GetInt64(3) != 0));
+                rowRead?.Invoke(result.Count);
+            }
+            return result;
+        }
+    }
+
+    internal static (DateTimeOffset Since, DateTimeOffset Until) ArchiveDayBounds(DateTime day, TimeZoneInfo zone)
+    {
+        var start = DateTime.SpecifyKind(day.Date, DateTimeKind.Unspecified);
+        var end = start.AddDays(1);
+        // Both offsets must be resolved at their own midnight. A local day at
+        // a DST transition can contain 23 or 25 hours, not a fixed 24.
+        return (new DateTimeOffset(start, zone.GetUtcOffset(start)),
+            new DateTimeOffset(end, zone.GetUtcOffset(end)));
     }
     public MemoryFrame? At(DateTimeOffset date)
     {
@@ -353,7 +471,9 @@ public sealed class MemoryStore : IDisposable
         if (days <= 0)
             return;
         var now = DateTimeOffset.Now;
-        Execute("UPDATE frames SET deleted=$p0,json=json_set(json,'$.DeletedAt',$p1) WHERE deleted IS NULL AND starred=0 AND demo=0 AND time<$p2 AND (json_extract(json,'$.SessionId') IS NULL OR json_extract(json,'$.SessionId') NOT IN (SELECT id FROM sessions WHERE json_extract(json,'$.EndedAt') IS NULL))", Seconds(now), now.ToString("O"), Seconds(now.AddDays(-days)));
+        lock (gate)
+            if (ExecuteAffected("UPDATE frames SET deleted=$p0,json=json_set(json,'$.DeletedAt',$p1) WHERE deleted IS NULL AND starred=0 AND demo=0 AND time<$p2 AND (json_extract(json,'$.SessionId') IS NULL OR json_extract(json,'$.SessionId') NOT IN (SELECT id FROM sessions WHERE json_extract(json,'$.EndedAt') IS NULL))", Seconds(now), now.ToString("O"), Seconds(now.AddDays(-days))) > 0)
+                Interlocked.Increment(ref archiveRevision);
     }
     public List<MemoryFrame> MetadataFrames() => Rows<MemoryFrame>("SELECT json FROM frames");
     public List<MemoryFrame> PendingFrames() => Rows<MemoryFrame>("SELECT json FROM frames WHERE json_extract(json,'$.TextState') IN (0,1)");
@@ -397,10 +517,11 @@ public sealed class MemoryStore : IDisposable
                 var receipt=Path.Combine(control,"cleanup-"+Guid.NewGuid().ToString("N")+".json");
                 Wire.Atomic(receipt,new CleanupRecovery(removed.Select(f=>f.Id).ToArray(),removedSessions.Select(s=>s.Id).ToArray(),paths.ToArray()));
                 Execute("BEGIN IMMEDIATE");
+                var deletedFrames = 0;
                 try
                 {
                     foreach (var f in removed)
-                        Execute("DELETE FROM frames WHERE id=$p0", f.Id);
+                        deletedFrames += ExecuteAffected("DELETE FROM frames WHERE id=$p0", f.Id);
                     foreach (var s in removedSessions)
                     {
                         Execute("DELETE FROM sessions WHERE id=$p0", s.Id);
@@ -408,6 +529,7 @@ public sealed class MemoryStore : IDisposable
                     }
                     Execute("DELETE FROM ocr_payloads WHERE id NOT IN (SELECT ocr_id FROM frames WHERE ocr_id IS NOT NULL)");
                     Execute("COMMIT");
+                    if (deletedFrames > 0) Interlocked.Increment(ref archiveRevision);
                 }
                 catch { Execute("ROLLBACK");File.Delete(receipt);throw; }
                 RecoverPendingCleanups();

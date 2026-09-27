@@ -7,6 +7,8 @@ python "$PSScriptRoot/prepare-native-runtimes.py"
 if ($LASTEXITCODE -ne 0) { throw 'Native inference engine preparation failed.' }
 dotnet run --project "$projectRoot/Windows/Rewind.Tests/Rewind.Tests.csproj" -c Release
 if ($LASTEXITCODE -ne 0) { throw 'Core regression checks failed.' }
+dotnet run --project "$projectRoot/Windows/Rewind.ImageTests/Rewind.ImageTests.csproj" -c Release
+if ($LASTEXITCODE -ne 0) { throw 'Image archive regression checks failed.' }
 $output = "$projectRoot/release/recall-windows-x64"
 dotnet publish "$projectRoot/Windows/Recall.WinUI/Recall.WinUI.csproj" -c Release -r win-x64 --self-contained true -p:Platform=x64 -o $output
 if ($LASTEXITCODE -ne 0) { throw 'WinUI release build failed.' }

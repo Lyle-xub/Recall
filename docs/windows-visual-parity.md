@@ -3,6 +3,10 @@
 Work branch: `feat/windows-visual-parity`, based on macOS release `bb3d587`.
 This is an unsigned Windows development build, not a main-branch release.
 
+The subsequent liquid-glass implementation and native evidence are documented
+in [the 2026-09-27 validation](windows-glass-validation-2026-09-27.md). Measurements
+later in this document refer to the earlier checkpoint unless explicitly stated.
+
 ## Reference and isolation
 
 The reference uses 60 generated screenshots, five days and three fictional

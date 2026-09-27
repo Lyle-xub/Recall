@@ -1,7 +1,7 @@
 name: Shared library CLI
 on:
   push:
-    branches: [feat/cross-platform-cli]
+    branches: [main, feat/cross-platform-cli, integration/windows-cli]
     paths: ['Core/**', 'CLI/**', 'CLI.Tests/**', 'macOS/**', 'Windows/**', 'scripts/build-cli.py', 'scripts/*cli*capture*', 'scripts/test-cli-terminal.py', 'docs/cli.md', '.github/workflows/cli.yml']
   pull_request:
     paths: ['Core/**', 'CLI/**', 'CLI.Tests/**', 'macOS/**', 'Windows/**', 'scripts/build-cli.py', 'scripts/*cli*capture*', 'scripts/test-cli-terminal.py', '.github/workflows/cli.yml']

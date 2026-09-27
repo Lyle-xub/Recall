@@ -85,24 +85,43 @@ public static class ImageArchive
         if (Path.GetExtension(path) != ".recallframe")
             return new Bitmap(path);
         var manifest = ScreenManifest.Read(path);
-        double scale = maxEdge > 0 ? Math.Min(1, (double)maxEdge / Math.Max(manifest.Width, manifest.Height)) : 1;
-        var result = new Bitmap(Math.Max(1, (int)(manifest.Width * scale)), Math.Max(1, (int)(manifest.Height * scale)), PixelFormat.Format32bppArgb);
+        // Assemble at native resolution. Scaling each 384px tile independently
+        // makes bicubic interpolation sample its own edge instead of the next
+        // tile, which draws a visible grid across otherwise continuous images.
+        var result = new Bitmap(manifest.Width, manifest.Height, PixelFormat.Format32bppArgb);
         try
         {
-            using var g = Graphics.FromImage(result);
-            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-            foreach (var tile in manifest.Tiles)
+            using (var g = Graphics.FromImage(result))
             {
-                using var part = new Bitmap(Path.Combine(root, tile.Path));
-                if (part.Width != tile.Width || part.Height != tile.Height)
-                    throw new InvalidDataException("Screenshot tile dimensions differ.");
-                var left = (int)(tile.X * scale);
-                var top = (int)(tile.Y * scale);
-                var right = (int)((tile.X + tile.Width) * scale);
-                var bottom = (int)((tile.Y + tile.Height) * scale);
-                g.DrawImage(part, new System.Drawing.Rectangle(left, top, right - left, bottom - top));
+                g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                foreach (var tile in manifest.Tiles)
+                {
+                    using var part = new Bitmap(Path.Combine(root, tile.Path));
+                    if (part.Width != tile.Width || part.Height != tile.Height)
+                        throw new InvalidDataException("Screenshot tile dimensions differ.");
+                    g.DrawImageUnscaled(part, tile.X, tile.Y);
+                }
             }
-            return result;
+            if (maxEdge <= 0 || Math.Max(manifest.Width, manifest.Height) <= maxEdge)
+                return result;
+            var scale = (double)maxEdge / Math.Max(manifest.Width, manifest.Height);
+            var thumbnail = new Bitmap(Math.Max(1, (int)(manifest.Width * scale)), Math.Max(1, (int)(manifest.Height * scale)), PixelFormat.Format32bppArgb);
+            try
+            {
+                using (var resized = Graphics.FromImage(thumbnail))
+                {
+                    using var attributes = new ImageAttributes();
+                    attributes.SetWrapMode(System.Drawing.Drawing2D.WrapMode.TileFlipXY);
+                    resized.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                    resized.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                    resized.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+                    resized.DrawImage(result, new System.Drawing.Rectangle(0, 0, thumbnail.Width, thumbnail.Height), 0, 0, result.Width, result.Height, GraphicsUnit.Pixel, attributes);
+                }
+            }
+            catch { thumbnail.Dispose(); throw; }
+            result.Dispose();
+            return thumbnail;
         }
         catch { result.Dispose(); throw; }
     }
@@ -117,9 +136,12 @@ public static class ImageArchive
             using var thumbnail = new Bitmap(Math.Max(1, (int)(image.Width * scale)), Math.Max(1, (int)(image.Height * scale)), PixelFormat.Format32bppArgb);
             using (var graphics = Graphics.FromImage(thumbnail))
             {
+                using var attributes = new ImageAttributes();
+                attributes.SetWrapMode(System.Drawing.Drawing2D.WrapMode.TileFlipXY);
                 graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
                 graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
-                graphics.DrawImage(image, new System.Drawing.Rectangle(0, 0, thumbnail.Width, thumbnail.Height));
+                graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+                graphics.DrawImage(image, new System.Drawing.Rectangle(0, 0, thumbnail.Width, thumbnail.Height), 0, 0, image.Width, image.Height, GraphicsUnit.Pixel, attributes);
             }
             return Encode(thumbnail, ImageFormat.Png);
         }

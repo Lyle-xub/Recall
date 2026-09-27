@@ -31,12 +31,16 @@ Windows 安装器尚未配置代码签名证书。`-SkipSmoke` 仅供诊断，�
 
 旧版默认目录 `%LOCALAPPDATA%\RewindReplica` 会在未被占用、且新目录不存在时整体迁移到 `Recall`。升级前退出旧版应用和 CLI；如果两个目录都存在，会提示冲突并保留两者。通过 `--data-dir` 或 `RECALL_DATA_DIR` 指定的自定义目录不自动迁移。
 
+已使用 `%LOCALAPPDATA%\Recall\Data` 的 Windows 版本会由同一个 Core 解析器识别：仅有该数据库时，桌面和 CLI 原地复用它；如果它与 `Recall\memory.sqlite` 同时存在，则报告冲突，不创建空库或混合数据。
+
 ## 工程
 
 - `Windows/Recall.WinUI`：界面、窗口、设置、回看、Usage、引导与应用协调。
-- `Windows/Rewind`：由新项目链接的存储、搜索、采集、使用时段和模型服务。完整仓库另有旧 WPF 文件，新入口不引用它们。
+- `Core`：桌面和 CLI 共用的数据库、目录解析、搜索、使用时段、录制协调与模型服务。
+- `Windows/Rewind`：由新项目链接的 Windows 采集、图片解码和凭据服务，以及旧 WPF 入口。
 - `Windows/Recall.Ocr`：隔离进程中的 PP-OCRv6 / Tesseract 识别。
 - `Windows/Rewind.Tests`：可在 macOS 执行的核心回归检查。
+- `Windows/Rewind.ImageTests`：在 Windows 执行的原生图片拼接与缩放回归检查。
 - `Windows/Installer`：Windows 安装器。
 
 macOS 上可运行下面的源码检查；它会跳过 Windows manifest/PRI 工具，输出**不能用于发布**：

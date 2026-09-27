@@ -2,7 +2,8 @@
 
 The CLI opens the desktop application's library directly. It uses the same records,
 OCR, transcripts, model settings and credentials; there is no separate CLI database
-or import step for existing app data. The glass UI work remains on its own branch.
+or import step for existing app data. The Windows glass UI and CLI use the same
+shared Core and library ownership protocol.
 
 ## Build and run
 
@@ -106,6 +107,13 @@ CLI commands and model workers before this move. If both folders exist, Recall
 reports a conflict and leaves both intact. Explicit `--data-dir` and
 `RECALL_DATA_DIR` paths are used as supplied and are not automatically relocated.
 `--help` and `--version` do not relocate data.
+
+An earlier Windows build used `%LOCALAPPDATA%\Recall\Data`. If that is the only
+existing Recall database, both the Windows desktop and CLI keep using it in place.
+They do not create a parallel database at the parent directory or move the nested
+library again. If both flat and nested databases exist, startup reports a conflict;
+select the intended library explicitly. This compatibility rule applies only to
+Windows and does not change macOS/Linux defaults.
 
 Windows-format libraries work on all three platforms. macOS retains its native
 schema, compressed OCR and media through the Swift adapter and therefore requires

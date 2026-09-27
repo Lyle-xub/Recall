@@ -1,7 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
- <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings><NoWarn>CA1416</NoWarn></PropertyGroup>
- <ItemGroup>
-  <ProjectReference Include="../../Core/Recall.Core.csproj"/>
-  <Compile Include="../Recall.WinUI/RhineGeometry.cs" Link="RhineGeometry.cs"/>
- </ItemGroup>
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings><NoWarn>CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Core/Recall.Core.csproj" />
+    <Compile Include="../Recall.WinUI/RhineGeometry.cs" Link="RhineGeometry.cs" />
+    <Compile Include="../Recall.WinUI/LatestPreviewLoad.cs" Link="LatestPreviewLoad.cs" />
+    <Compile Include="../Recall.WinUI/GlassProfile.cs" Link="GlassProfile.cs" />
+    <Compile Include="../Recall.WinUI/VideoOrientation.cs" Link="VideoOrientation.cs" />
+    <Compile Include="../Recall.WinUI/AppDisplayName.cs" Link="AppDisplayName.cs" />
+    <Compile Include="../Recall.WinUI/RecordingControl.cs" Link="RecordingControl.cs" />
+    <Compile Include="../Rewind/AudioTrackPolicy.cs" Link="AudioTrackPolicy.cs" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
+  </ItemGroup>
 </Project>

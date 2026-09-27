@@ -1,4 +1,5 @@
 using Rewind;
+using Recall;
 using Microsoft.Data.Sqlite;
 internal static class ParityTests
 {
@@ -11,6 +12,11 @@ internal static class ParityTests
                 throw new Exception(label);
             count++;
         }
+        Check(AppDisplayName.For("MsEdge.EXE") == "Microsoft Edge", "Process alias accepts mixed case and .exe");
+        Check(AppDisplayName.For("EXPLORER") == "File Explorer", "Process alias ignores case");
+        Check(AppDisplayName.For("notepad.exe") == "Notepad", "Notepad executable has a friendly label");
+        Check(AppDisplayName.For("Microsoft Edge") == "Microsoft Edge", "Already friendly names stay unchanged");
+        Check(AppDisplayName.For("Research") == "Research" && AppDisplayName.For("Design") == "Design", "Fixture labels are not remapped to applications");
         using (var store = new MemoryStore(Path.Combine(root, "parity")))
         {
             var now = DateTimeOffset.Now;
@@ -138,6 +144,115 @@ internal static class ParityTests
         await simple.Settled();
         Check(!simple.State.Active, "Explicit pause persists after hiding UI");
         await simple.Shutdown();
+        RecordingCoordinator? plannedStop = null;
+        var plannedStarts = 0;
+        plannedStop = new RecordingCoordinator(
+            () => { plannedStarts++; return Task.CompletedTask; },
+            () => { plannedStop!.Interrupted(); return Task.CompletedTask; }, TimeSpan.Zero);
+        plannedStop.Request(true);
+        await plannedStop.Settled().WaitAsync(TimeSpan.FromSeconds(5));
+        plannedStop.SetVisible(true);
+        await plannedStop.Settled().WaitAsync(TimeSpan.FromSeconds(5));
+        Check(plannedStop.State.Requested && plannedStop.State.AutomaticallyPaused && !plannedStop.State.CaptureFaulted,
+            "A stop callback during an intentional UI pause keeps the recording request");
+        plannedStop.SetVisible(false);
+        await plannedStop.Settled().WaitAsync(TimeSpan.FromSeconds(5));
+        Check(plannedStarts == 2 && plannedStop.State.Active, "Closing the UI resumes after its intentional stop");
+        await plannedStop.Shutdown();
+
+        var recoveryStarts = 0;
+        var recoveryStops = 0;
+        var recovery = new RecordingCoordinator(
+            () => { if (++recoveryStarts == 1) throw new InvalidOperationException("Fake capture startup failure"); return Task.CompletedTask; },
+            () => { recoveryStops++; return Task.CompletedTask; }, TimeSpan.Zero);
+        recovery.Request(true);
+        await recovery.Settled().WaitAsync(TimeSpan.FromSeconds(5));
+        Check(recovery.State.Requested && recovery.State.CaptureFaulted && !recovery.State.Active && recoveryStarts == 1,
+            "Startup failure preserves user intent without retrying in a loop");
+        recovery.SetVisible(true);
+        recovery.SetVisible(false);
+        await recovery.Settled().WaitAsync(TimeSpan.FromSeconds(5));
+        Check(recovery.State.Requested && recovery.State.Active && !recovery.State.CaptureFaulted && recoveryStarts == 2,
+            "Closing the UI retries one failed capture");
+        recovery.Interrupted();
+        await recovery.Settled().WaitAsync(TimeSpan.FromSeconds(5));
+        Check(recovery.State.Requested && recovery.State.CaptureFaulted && !recovery.State.Active && recoveryStops == 1,
+            "Unexpected capture interruption stops capture but retains user intent");
+        recovery.SetVisible(true);
+        recovery.SetVisible(false);
+        await recovery.Settled().WaitAsync(TimeSpan.FromSeconds(5));
+        Check(recovery.State.Active && recoveryStarts == 3, "Closing again resumes after an interruption");
+        recovery.Request(false);
+        await recovery.Settled().WaitAsync(TimeSpan.FromSeconds(5));
+        recovery.SetVisible(true);
+        recovery.SetVisible(false);
+        await recovery.Settled().WaitAsync(TimeSpan.FromSeconds(5));
+        Check(!recovery.State.Requested && !recovery.State.Active && recoveryStarts == 3,
+            "An explicit manual stop is never undone by a later window close");
+        await recovery.Shutdown();
+
+        var racedStarts = 0;
+        var startupEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var startupRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var raced = new RecordingCoordinator(async () =>
+        {
+            if (++racedStarts == 1)
+            {
+                startupEntered.SetResult();
+                await startupRelease.Task;
+                throw new InvalidOperationException("Fake obsolete startup failure");
+            }
+        }, () => Task.CompletedTask, TimeSpan.Zero);
+        raced.Request(true);
+        await startupEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        raced.SetVisible(true);
+        raced.SetVisible(false);
+        startupRelease.SetResult();
+        await raced.Settled().WaitAsync(TimeSpan.FromSeconds(5));
+        Check(raced.State.Requested && raced.State.Active && !raced.State.CaptureFaulted && racedStarts == 2,
+            "A failed in-flight startup cannot overwrite a newer quick show/hide request");
+        await raced.Shutdown();
+        var stopEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stopRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stopRaceStarts = 0;
+        var stopRaceStops = 0;
+        var stopRace = new RecordingCoordinator(
+            () => { stopRaceStarts++; return Task.CompletedTask; },
+            async () =>
+            {
+                if (++stopRaceStops == 1)
+                {
+                    stopEntered.SetResult();
+                    await stopRelease.Task;
+                    throw new InvalidOperationException("Fake obsolete stop failure");
+                }
+            }, TimeSpan.Zero);
+        stopRace.Request(true);
+        await stopRace.Settled().WaitAsync(TimeSpan.FromSeconds(5));
+        stopRace.SetVisible(true);
+        await stopEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        stopRace.SetVisible(false);
+        stopRelease.SetResult();
+        await stopRace.Settled().WaitAsync(TimeSpan.FromSeconds(5));
+        Check(stopRace.State.Requested && stopRace.State.Active && !stopRace.State.CaptureFaulted && stopRaceStarts == 2,
+            "A failed in-flight stop cannot strand a newer hidden request");
+        await stopRace.Shutdown();
+        var stableStarts = 0;
+        var stableStops = 0;
+        var stableStopFailure = new RecordingCoordinator(
+            () => { stableStarts++; return Task.CompletedTask; },
+            () =>
+            {
+                if (++stableStops == 1) throw new InvalidOperationException("Fake stable stop failure");
+                return Task.CompletedTask;
+            }, TimeSpan.Zero);
+        stableStopFailure.Request(true);
+        await stableStopFailure.Settled().WaitAsync(TimeSpan.FromSeconds(5));
+        stableStopFailure.Rotate();
+        await stableStopFailure.Settled().WaitAsync(TimeSpan.FromSeconds(5));
+        Check(stableStopFailure.State.Requested && stableStopFailure.State.CaptureFaulted && !stableStopFailure.State.Active && stableStarts == 1,
+            "A stop failure without a newer request remains faulted instead of retrying forever");
+        await stableStopFailure.Shutdown();
         var time = DateTimeOffset.Now;
         var lines = TranscriptPresentation.Visible([new("a", "s", time, "You", "This is a long enough spoken sentence"), new("b", "s", time.AddSeconds(1), "Meeting", "This is a long enough spoken sentence"), new("c", "s", time, "Audio", "[BLANK_AUDIO]")]);
         Check(lines.Count == 1 && !TranscriptPresentation.HasDistinctSpeakers(lines), "One speaker and track echo render on one side");

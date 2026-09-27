@@ -5,10 +5,12 @@ using Microsoft.Data.Sqlite;
 namespace Rewind;
 
 /// Location migration only: the original schema and every WAL, media file and receipt move together.
-public sealed class DefaultLibrary(string parent)
+public sealed class DefaultLibrary(string parent, bool? windowsLayout = null)
 {
     public string Parent { get; } = Path.GetFullPath(parent);
     public string Current => Path.Combine(Parent, "Recall");
+    public bool WindowsLayout { get; } = windowsLayout ?? OperatingSystem.IsWindows();
+    public string Nested => Path.Combine(Current, "Data");
     public string Legacy => Path.Combine(Parent, "RewindReplica");
     public static DefaultLibrary Platform => new(OperatingSystem.IsMacOS()
         ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Library", "Application Support")
@@ -17,7 +19,7 @@ public sealed class DefaultLibrary(string parent)
         : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share"));
     public static string Resolve(string? explicitRoot = null) => !string.IsNullOrWhiteSpace(explicitRoot ?? Environment.GetEnvironmentVariable("RECALL_DATA_DIR"))
         ? Path.GetFullPath(explicitRoot ?? Environment.GetEnvironmentVariable("RECALL_DATA_DIR")!) : Platform.ResolveDefault();
-    public bool Contains(string root) => Equal(root, Current) || Equal(root, Legacy);
+    public bool Contains(string root) => Equal(root, Current) || Equal(root, Legacy) || WindowsLayout && Equal(root, Nested);
     static bool Equal(string a, string b) => Canonical(a).Equals(Canonical(b), OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
     internal static string Canonical(string path)
     {
@@ -34,9 +36,9 @@ public sealed class DefaultLibrary(string parent)
     public string ResolveDefault(Action? checkProcesses = null) => ResolveDefault(checkProcesses, MoveExclusive);
     internal string ResolveDefault(Action? checkProcesses, Action<string,string> move)
     {
-        if (!Exists(Legacy)) return Current;
+        if (!Exists(Legacy)) return ExistingCurrent();
         using var access = new LibraryLocationLease(Parent, exclusive: true);
-        if (!Exists(Legacy)) return Current;
+        if (!Exists(Legacy)) return ExistingCurrent();
         if (Exists(Current)) throw new RecallException("conflict", $"Both library directories exist: {Legacy} and {Current}. Neither was changed. Select one with --data-dir; do not merge them automatically.");
         if (!Directory.Exists(Legacy) || (File.GetAttributes(Legacy) & FileAttributes.ReparsePoint) != 0)
             throw new RecallException("invalid_path", "The old default library must be a real directory, not a symbolic link.");
@@ -69,6 +71,20 @@ public sealed class DefaultLibrary(string parent)
             return Current;
         }
         finally { foreach (var engine in engines) engine.Dispose(); }
+    }
+    string ExistingCurrent()
+    {
+        if (!WindowsLayout) return Current;
+        // One Windows desktop release used Recall/Data. Reuse that exact
+        // library rather than moving it again or initializing a parallel one.
+        // A database file is occupied even when its schema is unreadable.
+        if (Exists(Nested) && (File.GetAttributes(Nested) & FileAttributes.ReparsePoint) != 0)
+            throw new RecallException("invalid_path", "The default Recall/Data location is a symbolic link. Select an explicit --data-dir instead; no library was opened.");
+        var flat = Exists(Path.Combine(Current, "memory.sqlite"));
+        var nested = Exists(Path.Combine(Nested, "memory.sqlite"));
+        if (flat && nested)
+            throw new RecallException("conflict", $"Both library directories exist: {Current} and {Nested}. Neither was changed. Select one with --data-dir; automatic merging is unsafe.");
+        return nested ? Nested : Current;
     }
     [DllImport("libc", SetLastError=true, EntryPoint="renamex_np")] static extern int RenameMac(string source,string destination,uint flags);
     [DllImport("libc", SetLastError=true, EntryPoint="renameat2")] static extern int RenameLinux(int sourceDirectory,string source,int destinationDirectory,string destination,uint flags);

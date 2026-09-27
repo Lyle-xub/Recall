@@ -4,17 +4,24 @@ namespace Recall;
 
 internal sealed class TimelineView : Grid
 {
-    readonly AppRuntime runtime; readonly Action<MemoryFrame?> preview; readonly Canvas track = new(); readonly TextBlock label = Design.Text("Now", 14, true); readonly Border timePill; readonly Microsoft.UI.Dispatching.DispatcherQueueTimer timer;
+    readonly AppRuntime runtime; readonly Action<MemoryFrame?> preview; readonly Canvas track = new(); readonly TextBlock label = Design.Text("Now", 14, true), rangeLabel = Design.Text(TimelineMath.Duration(300), 14, true); readonly Border timePill; readonly Button zoomOut, zoomIn, rangeButton; readonly Microsoft.UI.Dispatching.DispatcherQueueTimer timer, settle;
+    public event Action<MemoryFrame?>? Committed;
     DateTimeOffset center = DateTimeOffset.Now; double span = 300; bool live = true, dragging, active; double startX; DateTimeOffset startTime; long revision; bool refreshing, refreshAgain, previewAgain;
+    readonly LinearGradientBrush tint = new() { StartPoint = new(0, 0), EndPoint = new(0, 1), GradientStops = { new() { Color = Microsoft.UI.Colors.Transparent, Offset = 0 }, new() { Color = Color.FromArgb(20, 255, 255, 255), Offset = 1 } } };
     public TimelineView(AppRuntime runtime, Action<MemoryFrame?> preview)
     {
         this.runtime = runtime;
         this.preview = preview;
-        Height = 234;
+        settle = DispatcherQueue.CreateTimer(); settle.Interval = TimeSpan.FromMilliseconds(250); settle.IsRepeating = false;
+        settle.Tick += async (_, _) =>
+        {
+            var date = center; var frame = await Task.Run(() => runtime.Store.At(date));
+            if (active && !live && date == center) Committed?.Invoke(frame);
+        };
+        Height = 234; Visibility = Visibility.Collapsed;
         VerticalAlignment = VerticalAlignment.Bottom;
         Children.Add(new DesktopBlur(true));
-        var tint = new Border { Background = new LinearGradientBrush { StartPoint = new(0, 0), EndPoint = new(0, 1), GradientStops = { new() { Color = Microsoft.UI.Colors.Transparent, Offset = 0 }, new() { Color = Color.FromArgb(145, 245, 245, 251), Offset = 1 } } }, IsHitTestVisible = false };
-        Children.Add(tint);
+        Children.Add(new Border { Background = tint, IsHitTestVisible = false });
         track.Height = 116;
         track.VerticalAlignment = VerticalAlignment.Bottom;
         track.Margin = new(74, 0, 74, 8);
@@ -27,10 +34,27 @@ internal sealed class TimelineView : Grid
         Children.Add(timePill);
         timePill.Tapped += (_, e) => { JumpToDate(); e.Handled = true; };
         Children.Add(new Border { Width = 4, Height = 128, CornerRadius = new(2), Background = Design.Brush(Microsoft.UI.Colors.White), VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Center, IsHitTestVisible = false });
-        var controls = Design.Row(4, Design.Icon("\uE71F", "Zoom out", () => Zoom(2), 44), Design.Icon("\uE8A3", "Zoom in", () => Zoom(.5), 44));
-        var ranges = new ComboBox { ItemsSource = TimelineMath.Presets.Select(TimelineMath.Duration).ToArray(), SelectedIndex = 1, MinHeight = 44, CornerRadius = new(20), MinWidth = 110 };
-        ranges.SelectionChanged += (_, _) => { if (ranges.SelectedIndex >= 0) { span = TimelineMath.Presets[ranges.SelectedIndex]; _ = Refresh(true); } };
-        controls.Children.Add(ranges);
+        rangeButton = Design.Button("", () => { });
+        rangeButton.Content = rangeLabel; rangeButton.Width = 100; rangeButton.Height = 44; rangeButton.Padding = new(0);
+        rangeLabel.HorizontalAlignment = HorizontalAlignment.Center;
+        rangeLabel.TextAlignment = TextAlignment.Center;
+        var rangeMenu = Design.Menu();
+        var presets = TimelineMath.Presets.Select(seconds =>
+        {
+            var item = new RadioMenuFlyoutItem { Text = TimelineMath.Duration(seconds), GroupName = "Timeline range" };
+            item.Click += (_, _) => { span = seconds; UpdateRange(); _ = Refresh(true); };
+            rangeMenu.Items.Add(item);
+            return item;
+        }).ToArray();
+        rangeMenu.Opening += (_, _) =>
+        {
+            for (var i = 0; i < presets.Length; i++) presets[i].IsChecked = Math.Abs(span - TimelineMath.Presets[i]) < .01;
+        };
+        rangeButton.Flyout = rangeMenu;
+        zoomOut = Design.Icon("\uE71F", "Zoom out · wider time range", () => Zoom(2), 44);
+        zoomIn = Design.Icon("\uE8A3", "Zoom in · narrower time range", () => Zoom(.5), 44);
+        var controls = Design.Row(6, zoomOut, rangeButton, zoomIn);
+        UpdateRange();
         controls.Margin = new(22, 0, 0, 128);
         controls.HorizontalAlignment = HorizontalAlignment.Left;
         controls.VerticalAlignment = VerticalAlignment.Bottom;
@@ -42,7 +66,7 @@ internal sealed class TimelineView : Grid
         Children.Add(now);
         track.PointerPressed += (_, e) => { if (e.Handled) return; dragging = true; live = false; startX = e.GetCurrentPoint(track).Position.X; startTime = center; track.CapturePointer(e.Pointer); e.Handled = true; };
         track.PointerMoved += (_, e) => { if (!dragging) return; center = startTime.AddSeconds(-(e.GetCurrentPoint(track).Position.X - startX) / Math.Max(1, track.ActualWidth) * span); if (center > DateTimeOffset.Now) center = DateTimeOffset.Now; _ = Refresh(true); e.Handled = true; };
-        track.PointerReleased += (_, e) => { dragging = false; track.ReleasePointerCaptures(); e.Handled = true; };
+        track.PointerReleased += (_, e) => { dragging = false; track.ReleasePointerCaptures(); _ = Refresh(true); e.Handled = true; };
         track.PointerCaptureLost += (_, _) => dragging = false;
         PointerWheelChanged += (_, e) => { var delta = e.GetCurrentPoint(this).Properties.MouseWheelDelta; if ((InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0) Zoom(delta > 0 ? .8 : 1.25); else { live = false; center = center.AddSeconds(-delta / 120.0 * span / 18); if (center > DateTimeOffset.Now) center = DateTimeOffset.Now; _ = Refresh(true); } e.Handled = true; };
         PointerPressed += (_, e) => e.Handled = true;
@@ -55,12 +79,33 @@ internal sealed class TimelineView : Grid
         Unloaded += (_, _) => timer.Stop();
     }
     public bool IsLive => live;
+    internal object Diagnostics => new { spanSeconds = span, rangeText = rangeLabel.Text, zoomOutEnabled = zoomOut.IsEnabled, zoomInEnabled = zoomIn.IsEnabled };
+    internal void ValidationZoom(bool zoomIn) => Zoom(zoomIn ? .5 : 2);
+    internal void ValidationSelect(MemoryFrame frame) { span = 1800; UpdateRange(); Select(frame); }
+    int visibilityRevision;
     public void SetActive(bool value)
     {
-        active = value; Visibility = value ? Visibility.Visible : Visibility.Collapsed;
-        if (value) { timer.Start(); _ = Refresh(); }
-        else { timer.Stop(); Interlocked.Increment(ref revision); refreshAgain = previewAgain = false; }
+        tint.GradientStops[1].Color = Design.Dark ? Color.FromArgb(20, 0, 0, 0) : Color.FromArgb(20, 255, 255, 255);
+        if (active == value) return;
+        active = value; var token = ++visibilityRevision;
+        if (value)
+        {
+            Visibility = Visibility.Visible; Design.Spring(this, 55, 1, response: .38);
+            timer.Start(); _ = Refresh();
+        }
+        else
+        {
+            timer.Stop(); settle.Stop(); Interlocked.Increment(ref revision); refreshAgain = previewAgain = false;
+            if (!Design.Motion || !IsLoaded) { Visibility = Visibility.Collapsed; return; }
+            _ = HideAfterFade(token);
+        }
     }
+    async Task HideAfterFade(int token)
+    {
+        await LiquidMotion.Disappear(this, 55, .24, .9, 180);
+        if (token == visibilityRevision && !active) Visibility = Visibility.Collapsed;
+    }
+
     public void Select(MemoryFrame f)
     {
         live = false;
@@ -73,14 +118,22 @@ internal sealed class TimelineView : Grid
         calendar.SetDisplayDate(center);
         calendar.SelectedDates.Add(center);
         var time = new TimePicker { Time = center.LocalDateTime.TimeOfDay, ClockIdentifier = "24HourClock" };
-        var popup = new Flyout();
+        var popup = Design.Flyout();
         popup.Content = Design.Stack(10, calendar, time, Design.Button("Go to moment", () => { if (calendar.SelectedDates.Count == 0) return; center = new DateTimeOffset(calendar.SelectedDates[0].Date + time.Time); if (center > DateTimeOffset.Now) center = DateTimeOffset.Now; live = false; popup.Hide(); _ = Refresh(true); }, true));
         popup.ShowAt(timePill);
     }
     void Zoom(double factor)
     {
         span = TimelineMath.Clamp(span * factor);
+        UpdateRange();
         _ = Refresh(true);
+    }
+    void UpdateRange()
+    {
+        rangeLabel.Text = TimelineMath.Duration(span);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(rangeButton, "Time range: " + rangeLabel.Text + ". Choose preset");
+        zoomOut.IsEnabled = span < 86400;
+        zoomIn.IsEnabled = span > 60;
     }
     async Task Refresh(bool updatePreview = false)
     {
@@ -88,6 +141,9 @@ internal sealed class TimelineView : Grid
         previewAgain |= updatePreview;
         if (refreshing)
         {
+            // Invalidate the in-flight database/icon lookup immediately. The
+            // queued refresh must be the only one allowed to paint the track.
+            Interlocked.Increment(ref revision);
             refreshAgain = true;
             return;
         }
@@ -100,6 +156,9 @@ internal sealed class TimelineView : Grid
                 var update = previewAgain;
                 previewAgain = false;
                 await RefreshCore(update);
+                // A timer/layout refresh may invalidate a scrubbing request
+                // while it awaits icons. Carry its preview intent forward.
+                if (refreshAgain) previewAgain |= update;
                 await Task.Delay(30);
             } while (refreshAgain && IsLoaded && active);
         }
@@ -110,13 +169,15 @@ internal sealed class TimelineView : Grid
         var token = Interlocked.Increment(ref revision);
         var date = center;
         var window = span;
+        var wasLive = live;
+        bool Current() => active && token == revision && center == date && span == window && live == wasLive;
         var start = date.AddSeconds(-window / 2);
         var end = date.AddSeconds(window / 2);
         var intervals = await Task.Run(() => runtime.Store.Usage(start, end));
-        if (token != revision)
+        if (!Current())
             return;
         var entries = await Task.WhenAll(intervals.Select(x => AppIcons.Load(x.App)));
-        if (token != revision)
+        if (!Current())
             return;
         var colors = intervals.Select((x, i) => (x.Id, entries[i].Color)).ToDictionary(x => x.Id, x => x.Color);
         track.Children.Clear();
@@ -148,7 +209,7 @@ internal sealed class TimelineView : Grid
         foreach (var group in clusters)
         {
             var item = group.Items[0];
-            var button = new Button { Content = AppIcons.View(item.App), Width = 44, Height = 44, Padding = new(7), BorderThickness = new(0), CornerRadius = new(14), Background = Design.Brush(Color.FromArgb(36, 255, 255, 255)) };
+            var button = Design.Button("", () => { }); button.Content = AppIcons.View(item.App); button.Width = button.Height = 44; button.Padding = new(7); button.CornerRadius = new(14);
             Canvas.SetLeft(button, group.X - 22);
             Canvas.SetTop(button, 48);
             track.Children.Add(button);
@@ -169,14 +230,13 @@ internal sealed class TimelineView : Grid
         if (updatePreview)
         {
             var frame = await Task.Run(() => runtime.Store.At(date));
-            if (token == revision)
-                preview(frame);
+            if (Current()) { preview(frame); settle.Stop(); settle.Start(); }
         }
     }
     void OpenCluster(FrameworkElement target, List<AppInterval> items)
     {
         var content = new StackPanel { Spacing = 2, Width = 230 };
-        var flyout = new Flyout();
+        var flyout = Design.Flyout();
         foreach (var item in items)
         {
             var row = Design.Row(12, AppIcons.View(item.App, 24), Design.Text($"{item.Start.ToLocalTime():HH:mm:ss} – {item.End.ToLocalTime():HH:mm:ss}", 12));
@@ -192,7 +252,6 @@ internal sealed class TimelineView : Grid
         var scroller = Design.Scroll(content);
         scroller.MaxHeight = 280;
         flyout.Content = scroller;
-        flyout.FlyoutPresenterStyle = new Style(typeof(FlyoutPresenter)) { Setters = { new Setter(Control.CornerRadiusProperty, new CornerRadius(20)), new Setter(Control.PaddingProperty, new Thickness(8)), new Setter(Control.BackgroundProperty, Design.Brush(Color.FromArgb(246, 255, 255, 255))) } };
         flyout.ShowAt(target);
     }
 }

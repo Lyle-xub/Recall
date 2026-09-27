@@ -1,16 +1,24 @@
-using LiquidGlassWinUI;
 using System.Security.Cryptography;
 namespace Recall;
 
-/// Material parameters are local to each surface; the library pools GPU factories.
+/// Material parameters are local to each surface; RecallGlassBrush pools GPU factories.
 internal static class GlassMaterial
 {
     static readonly List<WeakReference<Surface>> surfaces = [];
     static readonly Windows.UI.ViewManagement.UISettings settings = new();
     static readonly Lazy<bool> compatibleRuntime = new(CheckRuntime);
     static string? compatibilityError;
+    static string? connectionError;
+    internal static void ReportError(string error) { connectionError = error; RefreshPolicy(); }
     static Microsoft.UI.Dispatching.DispatcherQueue? dispatcher;
     internal static bool ValidationFallback;
+    internal static event Action? PolicyChanged;
+    internal static bool TransparencyAvailable => !ValidationFallback &&
+        !System.Windows.Forms.SystemInformation.HighContrast && settings.AdvancedEffectsEnabled;
+    internal static Color FallbackColor => System.Windows.Forms.SystemInformation.HighContrast
+        ? settings.GetColorValue(Windows.UI.ViewManagement.UIColorType.Background)
+        : Design.Dark ? Color.FromArgb(255, 45, 48, 54) : Color.FromArgb(255, 235, 237, 240);
+    internal static Color ContrastForeground => settings.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground);
     static GlassMaterial()
     {
         try { settings.AdvancedEffectsEnabledChanged += (_, _) => RefreshPolicy(); }
@@ -24,7 +32,7 @@ internal static class GlassMaterial
         try
         {
             using var file = File.OpenRead(Path.Combine(AppContext.BaseDirectory, "wuceffectsi.dll"));
-            if (Environment.Is64BitProcess && Convert.ToHexString(SHA256.HashData(file)) ==
+            if (System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.X64 && Convert.ToHexString(SHA256.HashData(file)) ==
                 "DBEA457AC1C6D5C4CDE5B9CFB09E65CD54B11596406CE50565DDD946468B1454") return true;
             compatibilityError = "The bundled Composition runtime does not match the tested glass ABI.";
         }
@@ -32,12 +40,11 @@ internal static class GlassMaterial
         catch (UnauthorizedAccessException) { compatibilityError = "The Composition runtime could not be verified."; }
         return false;
     }
-    static bool EffectsAvailable => !ValidationFallback && !System.Windows.Forms.SystemInformation.HighContrast &&
-        settings.AdvancedEffectsEnabled && compatibleRuntime.Value && string.IsNullOrEmpty(LiquidGlassBrush.LastError);
+    internal static bool EffectsAvailable => TransparencyAvailable && compatibleRuntime.Value && string.IsNullOrEmpty(Error);
     static void RefreshPolicy()
     {
         // System settings notifications arrive off the XAML thread.
-        dispatcher?.TryEnqueue(() => SetDark(Design.Dark));
+        dispatcher?.TryEnqueue(() => Design.SetDark(Design.Dark));
     }
     internal static Dictionary<string, double> ValidationParameters = [];
     internal static void Configure(System.Text.Json.JsonElement values)
@@ -47,32 +54,31 @@ internal static class GlassMaterial
             if (value.Value.TryGetDouble(out var number) && double.IsFinite(number)) ValidationParameters[value.Name] = number;
         SetDark(Design.Dark);
     }
-    static void Override(LiquidGlassBrush brush)
+    static void Override(RecallGlassBrush brush)
     {
         // Only this fixed effect's numeric properties can be adjusted by the opt-in harness.
         foreach (var (name, value) in ValidationParameters)
         {
-            var property = typeof(LiquidGlassBrush).GetProperty(name);
+            var property = typeof(RecallGlassBrush).GetProperty(name);
             if (property?.PropertyType == typeof(double) && property.CanWrite) property.SetValue(brush, value);
         }
     }
-    static LiquidGlassBrush Create()
+    static RecallGlassBrush Create()
     {
-        var brush = new LiquidGlassBrush
+        var brush = new RecallGlassBrush
         {
-            BlurAmount = 1.25, BloomAmount = 0, RefThickness = 12, RefFactor = 1.5,
-            RefDispersion = .8, DispersionRange = .3, RefFresnelRange = 20,
-            RefFresnelHardness = 30, RefFresnelFactor = 10,
+            BlurAmount = 10, RefThickness = 1, RefFactor = 1.002,
+            RefDispersion = .05, DispersionRange = .3, RefFresnelRange = 20,
+            RefFresnelHardness = 30, RefFresnelFactor = 1,
             GlareAngle = -65, GlareRange = 18, GlareHardness = 25,
-            GlareFactor = 22, GlareOppositeFactor = 14, GlareConvergence = 35,
+            GlareFactor = .2, GlareOppositeFactor = .2, GlareConvergence = 35,
             ShapeRadius = 1, ShapeRoundness = 2, Magnification = 1,
-            Saturation = 1.1, Contrast = 1, Exposure = 1, TintA = .18,
         };
         Apply(brush, Design.Dark); Override(brush); return brush;
     }
-    public static void Attach(FrameworkElement owner, double radius)
+    public static void Attach(FrameworkElement owner, double radius, Color? accent = null, bool desktopOnly = false, bool desktopSurface = true, double glassOpacity = 1)
     {
-        var surface = new Surface(owner, radius);
+        var surface = new Surface(owner, radius, accent, desktopOnly, desktopSurface, glassOpacity);
         dispatcher ??= owner.DispatcherQueue;
         surfaces.RemoveAll(reference => !reference.TryGetTarget(out _));
         surfaces.Add(new(surface));
@@ -83,52 +89,142 @@ internal static class GlassMaterial
             // The upstream brush reports shader connection failures rather than
             // throwing them. Replace its diagnostic fill before presenting it.
             owner.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
-            { if (!string.IsNullOrEmpty(LiquidGlassBrush.LastError)) SetDark(Design.Dark); });
+            { if (!string.IsNullOrEmpty(Error)) SetDark(Design.Dark); });
         };
+        owner.Unloaded += (_, _) => surface.Disconnect();
         // Defer GPU graph creation for cards that are never brought on screen.
         surface.Update();
     }
-    static void Apply(LiquidGlassBrush brush, bool dark)
+    internal static List<ControlBackdrop.Surface> DesktopSurfaces(FrameworkElement root)
     {
-        brush.Brightness = dark ? -.13 : .08;
-        brush.TintR = brush.TintG = brush.TintB = dark ? 68 : 255;
-        brush.TintA = dark ? .48 : .16;
+        var result = new List<ControlBackdrop.Surface>();
+        foreach (var reference in surfaces)
+        {
+            if (!reference.TryGetTarget(out var surface) || !surface.DesktopSurface) continue;
+            var owner = surface.Owner;
+            if (!owner.IsLoaded || owner.ActualWidth < 1 || owner.ActualHeight < 1) continue;
+            bool visible = true; double opacity = 1;
+            for (DependencyObject? parent = owner; parent != null && parent != root; parent = VisualTreeHelper.GetParent(parent))
+                if (parent is FrameworkElement element)
+                {
+                    opacity *= element.Opacity;
+                    if (element.Visibility != Visibility.Visible || opacity < .01 || element.ActualWidth < 1 || element.ActualHeight < 1) { visible = false; break; }
+                }
+            if (!visible) continue;
+            try
+            {
+                var r = owner.TransformToVisual(root).TransformBounds(new(0, 0, owner.ActualWidth, owner.ActualHeight));
+                if (r.Right < 0 || r.Bottom < 0 || r.X > root.ActualWidth || r.Y > root.ActualHeight) continue;
+                // Keep scroll-view clipping in the shared desktop mask.
+                for (var parent = VisualTreeHelper.GetParent(owner); parent != null && parent != root; parent = VisualTreeHelper.GetParent(parent))
+                    if (parent is ScrollViewer scroll) r.Intersect(scroll.TransformToVisual(root).TransformBounds(new(0, 0, scroll.ActualWidth, scroll.ActualHeight)));
+                if (r.Width > 0 && r.Height > 0)
+                {
+                    // Subpixel spring tails must not rebuild the OS graph forever.
+                    double Snap(double value) => Math.Round(value * 2) / 2;
+                    result.Add(new(new Rect(Snap(r.X), Snap(r.Y), Snap(r.Width), Snap(r.Height)), surface.Radius, Math.Round(opacity*255)/255));
+                }
+            }
+            catch (ArgumentException) { /* A popup belongs to a separate XAML root. */ }
+        }
+        return result;
+    }
+    static void Apply(RecallGlassBrush brush, bool dark, bool compact = false)
+    {
+        // Reset all tuning values before applying a command's overrides, including
+        // retained toolbar brushes that survive page navigation in validation.
+        brush.BlurAmount = 10; brush.RefThickness = 3; brush.RefFactor = 1.12;
+        brush.RefDispersion = .05; brush.DispersionRange = .3;
+        brush.RefFresnelRange = 20; brush.RefFresnelHardness = 30; brush.RefFresnelFactor = 1;
+        brush.GlareAngle = -65; brush.GlareRange = 18; brush.GlareHardness = 25;
+        brush.GlareFactor = .8; brush.GlareOppositeFactor = .35; brush.GlareConvergence = 35;
+        brush.ShapeRoundness = 2; brush.Magnification = 1;
+        brush.TintR = brush.TintG = brush.TintB = dark ? 55 : 255;
+        brush.TintA = dark ? compact ? .36 : .62 : compact ? .34 : .46;
+        brush.LumaCompression = dark ? compact ? .6 : .4 : .5;
+        brush.ColorSaturation = dark ? 1.35 : 1.18;
+        brush.LumaOffset = (dark ? compact ? 69 : 72 : compact ? 110 : 107) / 255.0;
         brush.FallbackColor = dark ? Color.FromArgb(255, 45, 48, 54) : Color.FromArgb(255, 235, 237, 240);
+    }
+    internal static void SetAccent(FrameworkElement owner, Color? accent)
+    {
+        foreach (var reference in surfaces) if (reference.TryGetTarget(out var surface) && surface.Owner == owner && surface.Accent != accent) { surface.Accent = accent; surface.Update(); }
+    }
+    internal static void SetEnabled(FrameworkElement owner, bool enabled)
+    {
+        foreach (var reference in surfaces) if (reference.TryGetTarget(out var surface) && surface.Owner == owner) { surface.Enabled = enabled; surface.Update(); }
     }
     public static void SetDark(bool dark)
     {
         surfaces.RemoveAll(reference => !reference.TryGetTarget(out _));
         foreach (var reference in surfaces) if (reference.TryGetTarget(out var surface)) surface.Update();
+        PolicyChanged?.Invoke();
     }
-    public static string? Error => compatibilityError ?? LiquidGlassBrush.LastError;
-    sealed class Surface(FrameworkElement owner, double radius)
+    public static string? Error => compatibilityError ?? connectionError;
+    internal static object Diagnostics => new
+    {
+        advancedEffects = settings.AdvancedEffectsEnabled,
+        highContrast = System.Windows.Forms.SystemInformation.HighContrast,
+        runtimeCompatible = compatibleRuntime.Value,
+        validationFallback = ValidationFallback,
+        effectsAvailable = EffectsAvailable,
+        error = Error,
+        surfaces = surfaces.Count(reference => reference.TryGetTarget(out _))
+    };
+    sealed class Surface(FrameworkElement owner, double radius, Color? accent, bool desktopOnly, bool desktopSurface, double glassOpacity)
     {
         public FrameworkElement Owner { get; } = owner;
-        LiquidGlassBrush? glass;
+        public bool DesktopSurface { get; } = desktopSurface;
+        public double Radius => Owner is Control control ? control.CornerRadius.TopLeft : Owner is Border border ? border.CornerRadius.TopLeft : radius;
+        internal bool Enabled = true;
+        internal Color? Accent = accent;
+        RecallGlassBrush? glass;
         readonly SolidColorBrush fallback = new();
         void Assign(Brush brush)
         {
+            brush.Opacity = brush is RecallGlassBrush && !System.Windows.Forms.SystemInformation.HighContrast ? glassOpacity : 1;
             if (Owner is Border border) border.Background = brush;
             else if (Owner is Control control) control.Background = brush;
             else if (Owner is Panel panel) panel.Background = brush;
         }
         public void Update()
         {
-            if (!EffectsAvailable)
+            if (!Enabled || !Owner.IsLoaded || !EffectsAvailable)
             {
-                fallback.Color = System.Windows.Forms.SystemInformation.HighContrast
-                    ? settings.GetColorValue(Windows.UI.ViewManagement.UIColorType.Background)
-                    : Design.Dark ? Color.FromArgb(255, 45, 48, 54) : Color.FromArgb(255, 235, 237, 240);
-                Assign(fallback); glass = null; return;
+                Disconnect(); return;
             }
-            glass ??= Create(); Apply(glass, Design.Dark); Override(glass);
+            if (desktopOnly)
+            {
+                // Native text editing creates an intermediate composition surface
+                // while focused. Sampling that surface as an in-window backdrop
+                // feeds its rectangular editor fill back into the glass. Keep
+                // desktop blur in ControlBackdrop and use only a clear highlight here.
+                Assign(new LinearGradientBrush
+                {
+                    StartPoint = new(0, 0), EndPoint = new(1, 1),
+                    GradientStops = { new() { Color = Color.FromArgb(22,255,255,255), Offset = 0 }, new() { Color = Color.FromArgb(3,255,255,255), Offset = .55 }, new() { Color = Color.FromArgb(12,255,255,255), Offset = 1 } }
+                });
+                return;
+            }
+            var scale = (float)(Owner.XamlRoot?.RasterizationScale ?? 1);
+            if (glass != null && glass.DpiScale != scale) Disconnect();
+            glass ??= Create(); glass.DpiScale = scale; Apply(glass, Design.Dark, Owner.ActualHeight <= 100); Override(glass);
+            glass.AccentTint = Accent;
+            if (Accent is Color tint) { glass.TintR = tint.R; glass.TintG = tint.G; glass.TintB = tint.B; glass.TintA = .6; }
+            glass.RefreshSource();
             Assign(glass); Resize();
+        }
+        public void Disconnect()
+        {
+            fallback.Color = System.Windows.Forms.SystemInformation.HighContrast ? FallbackColor : Accent ?? FallbackColor;
+            Assign(Enabled ? fallback : Design.ArchiveBrush); glass = null;
         }
         public void Resize()
         {
-            var corner = Owner is Control control ? control.CornerRadius.TopLeft : radius;
+            if (glass != null && glass.DpiScale != (float)(Owner.XamlRoot?.RasterizationScale ?? 1)) { Update(); return; }
+            var corner = Radius;
             var side = Math.Min(Owner.ActualWidth, Owner.ActualHeight);
-            if (glass != null && side > 0) glass.ShapeRadius = Math.Clamp(corner * 2 / side, 0, 1);
+            if (glass != null && side > 0) { glass.ShapeRadius = Math.Clamp(corner * 2 / side, 0, 1); glass.RefreshSource(); }
         }
     }
 }

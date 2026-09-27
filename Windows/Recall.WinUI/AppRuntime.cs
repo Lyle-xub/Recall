@@ -34,16 +34,25 @@ internal sealed class AppRuntime
     private readonly Channel<RecordingSession> speech = Channel.CreateUnbounded<RecordingSession>(new() { SingleReader = true });
     private readonly UsageRecorder usage;
     private readonly Task usageWorker, speechWorker;
-    private bool suspended;
+    private volatile bool sessionLocked, powerSuspended;
+    private bool Suspended => sessionLocked || powerSuspended;
+    private readonly bool visualParity, validationFakeCapture;
+    private int validationCaptureStarts, validationCaptureStops, validationCaptureActive, validationFailNextStart;
     private readonly object settingsGate = new();
     private readonly LibraryControlHost cliControl;
     private Task? cliOptimization;
     private string? cliTaskError;
-    private string? captureError;
+    private readonly RecordingControl recordingControl;
+    private readonly object recordingDiagnosticsGate = new();
+    private Task? recordingDiagnosticsWorker;
+    private bool recordingDiagnosticsQueued, recordingDiagnosticsStopped;
     public AppRuntime()
     {
         LocalInference.ShareWithCLI = true;
         var ownership = new LibraryLease(AppPaths.DataRoot);
+        var arguments = Environment.GetCommandLineArgs();
+        visualParity = arguments.Contains("--visual-parity");
+        validationFakeCapture = visualParity && arguments.Contains("--validation-fake-capture");
         Directory.CreateDirectory(AppPaths.DataRoot);
         var path = Path.Combine(AppPaths.DataRoot, "settings.json");
         try
@@ -51,15 +60,40 @@ internal sealed class AppRuntime
             Settings = File.Exists(path) ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path)) ?? new() : new();
         }
         catch { Settings = new(); }
+        // Validation libraries can persist a fake request. Never let a later
+        // visual-parity launch start the production capture backend from it.
+        if (visualParity) Settings.RecordingRequested = false;
         Store = new(AppPaths.DataRoot);
         HasMemories = Store.Count > 0;
         usage = new(Store);
         Capture = new(Store);
-        Recording = new(async () => await Capture.Start(Settings), async () => { var segment = await Capture.Stop(); if (segment != null) QueueSpeech(segment); });
-        Recording.Changed += state => { if (!state.Terminated && Settings.RecordingRequested != state.Requested) { Settings.RecordingRequested = state.Requested; _ = Task.Run(() => { try { PersistSettings(); } catch (Exception ex) { Error?.Invoke(ex.Message); } }); } Changed?.Invoke(); };
-        Recording.Failed += ex => { captureError = ex.Message; Error?.Invoke(ex.Message); };
-        Capture.Error += message => Error?.Invoke(message);
-        Capture.Interrupted += _ => Recording.Request(false);
+        Recording = new(async () =>
+        {
+            if (validationFakeCapture)
+            {
+                Interlocked.Increment(ref validationCaptureStarts);
+                if (Interlocked.Exchange(ref validationFailNextStart, 0) != 0)
+                    throw new InvalidOperationException("Validation fake capture start failed.");
+                Interlocked.Exchange(ref validationCaptureActive, 1);
+                return;
+            }
+            await Capture.Start(Settings);
+        }, async () =>
+        {
+            if (validationFakeCapture)
+            {
+                Interlocked.Increment(ref validationCaptureStops);
+                Interlocked.Exchange(ref validationCaptureActive, 0);
+                return;
+            }
+            var segment = await Capture.Stop();
+            if (segment != null) QueueSpeech(segment);
+        });
+        recordingControl = new(Recording);
+        Recording.Changed += state => { if (!state.Terminated && Settings.RecordingRequested != state.Requested) { Settings.RecordingRequested = state.Requested; _ = Task.Run(() => { try { PersistSettings(); } catch (Exception ex) { Error?.Invoke(ex.Message); } }); } QueueRecordingDiagnostics(); Changed?.Invoke(); };
+        Recording.Failed += ex => { QueueRecordingDiagnostics(); Error?.Invoke(ex.Message); };
+        Capture.Error += ReportRecordingError;
+        Capture.Interrupted += message => { recordingControl.ReportError(message); Recording.Interrupted(); };
         Capture.FrameAdded += _ => { HasMemories = true; Changed?.Invoke(); };
         Capture.SegmentFinished += QueueSpeech;
         SystemEvents.SessionSwitch += SessionSwitch;
@@ -72,15 +106,102 @@ internal sealed class AppRuntime
         cliControl = new(Store.Root, "windows", Control, ownership);
         if (Settings.RecordingRequested)
             Recording.Request(true);
+        QueueRecordingDiagnostics();
+    }
+    private void ReportRecordingError(string message)
+    {
+        recordingControl.ReportError(message);
+        QueueRecordingDiagnostics();
+        Error?.Invoke(message);
+    }
+    internal object ValidationCaptureDiagnostics => new
+    {
+        enabled = validationFakeCapture,
+        starts = Volatile.Read(ref validationCaptureStarts),
+        stops = Volatile.Read(ref validationCaptureStops),
+        active = Volatile.Read(ref validationCaptureActive),
+        failNextStart = Volatile.Read(ref validationFailNextStart) != 0
+    };
+    internal void ValidationRequestRecording(bool requested)
+    {
+        if (!validationFakeCapture) throw new InvalidOperationException("Fake capture is not enabled.");
+        Recording.Request(requested);
+    }
+    internal void ValidationFailNextCaptureStart()
+    {
+        if (!validationFakeCapture) throw new InvalidOperationException("Fake capture is not enabled.");
+        Interlocked.Exchange(ref validationFailNextStart, 1);
+    }
+    internal void ValidationInterruptCapture()
+    {
+        if (!validationFakeCapture) throw new InvalidOperationException("Fake capture is not enabled.");
+        recordingControl.ReportError("Validation fake capture interrupted.");
+        Recording.Interrupted();
+    }
+    private void QueueRecordingDiagnostics()
+    {
+        lock (recordingDiagnosticsGate)
+        {
+            if (recordingDiagnosticsStopped) return;
+            recordingDiagnosticsQueued = true;
+            recordingDiagnosticsWorker ??= Task.Run(WriteRecordingDiagnostics);
+        }
+    }
+    private async Task WriteRecordingDiagnostics()
+    {
+        while (true)
+        {
+            await Task.Delay(200).ConfigureAwait(false);
+            lock (recordingDiagnosticsGate) recordingDiagnosticsQueued = false;
+            try
+            {
+                var state = Recording.State;
+                var report = new
+                {
+                    capturedAt = DateTimeOffset.UtcNow,
+                    state.Requested,
+                    state.InterfaceVisible,
+                    state.Active,
+                    state.Transitioning,
+                    state.CaptureFaulted,
+                    state.AutomaticallyPaused,
+                    state.Terminated,
+                    captureIsRecording = Capture.IsRecording,
+                    capturePrivacyPaused = Capture.IsPrivacyPaused,
+                    validationFakeCapture,
+                    validationCaptureActive = Volatile.Read(ref validationCaptureActive) != 0,
+                    suspended = Suspended,
+                    lastError = recordingControl.LastError
+                };
+                var file = Path.Combine(Store.Root, "recording-diagnostics.json");
+                File.WriteAllText(file + ".tmp", JsonSerializer.Serialize(report));
+                File.Move(file + ".tmp", file, true);
+            }
+            catch { /* Diagnostics must never change capture state. */ }
+            lock (recordingDiagnosticsGate)
+            {
+                if (recordingDiagnosticsQueued) continue;
+                recordingDiagnosticsWorker = null;
+                return;
+            }
+        }
+    }
+    private Task StopRecordingDiagnostics()
+    {
+        lock (recordingDiagnosticsGate)
+        {
+            // Drain the final snapshot and reject late callbacks before the
+            // library ownership is released to another process or migration.
+            recordingDiagnosticsStopped = true;
+            return recordingDiagnosticsWorker ?? Task.CompletedTask;
+        }
     }
     private async Task<object> Control(string operation, JsonElement args)
     {
         switch (operation)
         {
             case "recording-start": case "recording-stop": case "recording-status":
-                if (operation != "recording-status") { captureError = null; Recording.Request(operation == "recording-start"); await Recording.Settled(); }
-                if (operation == "recording-start" && !Recording.State.Requested) throw new RecallException("capture_failed", captureError ?? "Capture did not start.");
-                return new { available = true, requested = Recording.State.Requested, active = Recording.State.Active, automaticallyPaused = Recording.State.Requested && Recording.State.InterfaceVisible, owner = "desktop" };
+                return await recordingControl.Execute(operation);
             case "tasks-status": return new { optimizing = StorageService.IsOptimizing, indexing = Store.PendingFrames().Count, error = cliTaskError };
             case "index":
             {
@@ -140,18 +261,26 @@ internal sealed class AppRuntime
             Settings.OnboardingComplete = true;
         Save(Settings);
     }
+    public void SetInterfaceVisible(bool visible) => Recording.SetVisible(Suspended || visible);
     private void SessionSwitch(object sender, SessionSwitchEventArgs e)
     {
         if (e.Reason == SessionSwitchReason.SessionLock)
-            suspended = true;
+            sessionLocked = true;
         else if (e.Reason == SessionSwitchReason.SessionUnlock)
-            suspended = false;
-        Recording.SetVisible(suspended || App.CurrentWindow?.IsShown == true);
+            sessionLocked = false;
+        else
+            return;
+        SetInterfaceVisible(App.CurrentWindow?.IsShown == true);
     }
     private void PowerChange(object sender, PowerModeChangedEventArgs e)
     {
-        suspended = e.Mode == PowerModes.Suspend;
-        Recording.SetVisible(suspended || App.CurrentWindow?.IsShown == true);
+        if (e.Mode == PowerModes.Suspend)
+            powerSuspended = true;
+        else if (e.Mode == PowerModes.Resume)
+            powerSuspended = false;
+        else
+            return;
+        SetInterfaceVisible(App.CurrentWindow?.IsShown == true);
     }
     private async Task UsageLoop()
     {
@@ -165,7 +294,7 @@ internal sealed class AppRuntime
                 if (now - last > TimeSpan.FromSeconds(4))
                     usage.Stop(last);
                 last = now;
-                if (suspended || !Recording.State.Requested)
+                if (visualParity || Suspended || !Recording.State.Requested)
                 {
                     usage.Stop(now);
                     await Task.Delay(300, lifetime.Token);
@@ -264,6 +393,7 @@ internal sealed class AppRuntime
         LocalInference.Stop();
         SystemEvents.SessionSwitch -= SessionSwitch;
         SystemEvents.PowerModeChanged -= PowerChange;
+        await StopRecordingDiagnostics();
         Store.Dispose();
         cliControl.ReleaseOwnership();
         lifetime.Dispose();

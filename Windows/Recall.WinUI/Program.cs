@@ -98,6 +98,8 @@ internal sealed class App : Application, Microsoft.UI.Xaml.Markup.IXamlMetadataP
         // Resource lookup requires the fully constructed Application and its
         // metadata provider. Loading here avoids the native constructor fail-fast.
         Resources.MergedDictionaries.Add(new XamlControlsResources());
+        Resources["ContentControlThemeFontFamily"] = Design.BodyFont;
+        foreach (var key in new[] { "ComboBoxDropDownBackground", "ContentDialogBackground", "ToolTipBackground" }) Resources[key] = Design.PopupBrush;
         Program.TraceStartup("XAML resources initialized");
         AppRuntime runtime;
         try { runtime = await Task.Run(() => new AppRuntime()); }
