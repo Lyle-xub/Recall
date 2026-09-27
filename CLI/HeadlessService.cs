@@ -54,8 +54,8 @@ public sealed class HeadlessService
         if(LibraryFormats.Detect(client.Root)==LibraryFormat.Unknown)throw new RecallException("unsupported_schema","Unrecognized library schema.");
         var native=LibraryFormats.Detect(client.Root)==LibraryFormat.MacOS;
         var executable=native ? LibraryClient.MacHelper??throw new RecallException("engine_missing","The native Mac helper is missing.") : Environment.ProcessPath!;
-        // Give the service its own pipes so no inherited caller pipe keeps
-        // shell/Python command substitution open for the service lifetime.
+        // Unix gets separate pipes; Windows must disable *all* inherited
+        // handles, not just replace its standard handles (see the launcher).
         var info=new ProcessStartInfo(executable) {UseShellExecute=false,CreateNoWindow=true,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true};
         if(native) {info.ArgumentList.Add("--headless-service");info.ArgumentList.Add("--data-dir");info.ArgumentList.Add(client.Root);}
         else
@@ -65,8 +65,10 @@ public sealed class HeadlessService
         }
         var errorPath=Path.Combine(client.Root,".recall-control","startup-error.json");
         if(File.Exists(errorPath)) File.Delete(errorPath);
-        using var process=Process.Start(info)??throw new RecallException("service_failed","Could not start the headless service.");
-        process.StandardInput.Close();
+        using var process=OperatingSystem.IsWindows()
+            ? WindowsDetachedProcess.Start(executable,info.ArgumentList)
+            : Process.Start(info)??throw new RecallException("service_failed","Could not start the headless service.");
+        if(!OperatingSystem.IsWindows())process.StandardInput.Close();
         for(int i=0;i<200;i++)
         {
             ct.ThrowIfCancellationRequested();
@@ -74,11 +76,11 @@ public sealed class HeadlessService
             if(process.HasExited)
             {
                 if(File.Exists(errorPath)) {using var error=JsonDocument.Parse(File.ReadAllText(errorPath));throw new RecallException(error.RootElement.Text("code")??"service_failed",error.RootElement.Text("message")??"Service exited.");}
-                throw new RecallException("service_failed","The headless service exited before publishing readiness.");
+                throw new RecallException("service_failed","The headless service exited before publishing readiness.",new {phase="waiting_for_owner",processId=process.Id,exitCode=process.ExitCode});
             }
             await Task.Delay(100,ct);
         }
-        throw new RecallException("timeout","Service startup has not completed. Inspect recording status before retrying.");
+        throw new RecallException("timeout","Service startup has not completed. Inspect recording status before retrying.",new {phase="waiting_for_owner",processId=process.Id,childExited=process.HasExited});
     }
     async Task<object> Control(string command,JsonElement args)
     {

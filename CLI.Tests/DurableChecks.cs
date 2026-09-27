@@ -7,7 +7,7 @@ static class DurableChecks
 {
     public static async Task Run(string root,Action<bool,string> assert,Func<string,int,string[],Task<JsonElement>> command)
     {
-        var library=Path.Combine(root,"durable");
+        var library=Path.Combine(root,"durable 库 with spaces");
         using var store=new MemoryStore(library);
         var client=new LibraryClient(library);
         store.Save(new MemoryFrame {Id="pending",TextState=RecognitionState.Pending,ImagePath="frames/missing.png"});
@@ -117,11 +117,21 @@ static class DurableChecks
             finally {release.TrySetResult();}
         }
         // A real subprocess must close its caller's pipes while its idle service
-        // continues. No screen capture occurs: default privacy exclusions reject it.
+        // continues. An extra inheritable file handle also proves that the
+        // Windows launcher excludes unrelated handles, not just standard IO.
+        // No screen capture occurs: default privacy exclusions reject it.
+        var sentinelPath=Path.Combine(root,"inherited-handle-sentinel");
+        using var sentinel=OperatingSystem.IsWindows()?WindowsDetachedChecks.InheritableFile(sentinelPath):null;
         try
         {
             var owners=await Task.WhenAll(command(library,0,["service","start"]),command(library,0,["service","start"]));
             assert(owners[0].Number("pid",0)==owners[1].Number("pid",-1),"Concurrent service starts publish one detached owner and close caller pipes");
+            if(OperatingSystem.IsWindows())
+            {
+                sentinel!.Dispose();File.Delete(sentinelPath);
+                assert(!File.Exists(sentinelPath),"Windows service does not retain an unrelated inheritable file handle after its CLI parent exits");
+                await WindowsDetachedChecks.Arguments(root,assert);
+            }
             assert(store.Session("active")!.EndedAt!=null,"Service startup closes a crashed owner's active session");
             var count=store.Count;
             await command(library,4,["recording","start"]);
@@ -157,8 +167,10 @@ static class DurableChecks
             }
             finally {Environment.SetEnvironmentVariable("REWIND_MODEL_ROOT",previousRoot);Environment.SetEnvironmentVariable("REWIND_CATALOG_PATH",previousCatalog);}
             assert(!InferenceOwnership.Matches(Environment.ProcessId,InferenceOwnership.Started(Environment.ProcessId)+5000),"Process identity rejects reused or incorrect birth timestamps");
-            var info=new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH")??Environment.ProcessPath!) {UseShellExecute=false};
-            info.ArgumentList.Add(typeof(DurableChecks).Assembly.Location);info.ArgumentList.Add("--inference-test-child");
+            var testExecutable=Environment.ProcessPath!;
+            var info=new ProcessStartInfo(testExecutable) {UseShellExecute=false};
+            if(Path.GetFileNameWithoutExtension(testExecutable).Equals("dotnet",StringComparison.OrdinalIgnoreCase))info.ArgumentList.Add(typeof(DurableChecks).Assembly.Location);
+            info.ArgumentList.Add("--inference-test-child");
             using var child=Process.Start(info)!;
             try
             {

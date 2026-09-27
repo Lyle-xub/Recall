@@ -6,6 +6,8 @@ using System.Text.Json;
 using Recall.Cli;
 using Rewind;
 
+if(args.Length>=2 && args[0]=="--detached-argument-probe") {await File.WriteAllTextAsync(args[1],JsonSerializer.Serialize(args.Skip(2)));return;}
+
 if(args is ["--inference-test-child"]) {await Task.Delay(TimeSpan.FromSeconds(60));return;}
 
 var root = Path.Combine(Path.GetTempPath(), "recall-cli-tests-" + Guid.NewGuid());

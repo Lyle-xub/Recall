@@ -12,18 +12,23 @@ public static class ChildProcess
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); if (timeoutSeconds > 0) deadline.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
         var output = process.StandardOutput.ReadToEndAsync(deadline.Token);
         var error = process.StandardError.ReadToEndAsync(deadline.Token);
+        var phase="writing_input";
         try
         {
             if (input != null) await process.StandardInput.WriteAsync(input.AsMemory(), deadline.Token);
             process.StandardInput.Close();
+            phase="waiting_for_exit";
             await process.WaitForExitAsync(deadline.Token);
+            phase="draining_output";
             return (process.ExitCode, await output, await error);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            if (!process.HasExited) process.Kill(true);
+            var childExited=process.HasExited;
+            if (!childExited) process.Kill(true);
             await process.WaitForExitAsync();
-            throw new RecallException("timeout", $"The engine exceeded its {timeoutSeconds}-second limit.");
+            throw new RecallException("timeout", $"The engine exceeded its {timeoutSeconds}-second limit (phase={phase}, pid={process.Id}, childExited={childExited}).",
+                new {phase,processId=process.Id,childExited,stdoutCompleted=output.IsCompletedSuccessfully,stderrCompleted=error.IsCompletedSuccessfully});
         }
         catch { if (!process.HasExited) process.Kill(true); await process.WaitForExitAsync(); throw; }
     }
