@@ -206,3 +206,19 @@ and final extraction assertions remain. Three navigation tests and three further
 mounted repetitions passed after this test-only correction. Product sources and
 the installed executable are unchanged. The Mac/Linux/Windows CLI matrix for
 `ed691c8` passed in run `36334229414`.
+
+Final CI at `aba2287cdd6947892dd3a6e01b26431ff8a0bfab` completed successfully:
+
+- [Native desktop builds](https://github.com/Lyle-xub/Recall/actions/runs/36335071679)
+  passed on Mac and Windows, including Release packaging and artifact upload.
+  The Mac suite reported **285 tests, 29 skips, zero failures**, in 74.2 seconds.
+  Skips are opt-in checks or require local fixtures/runtime preparation; the
+  bundled OCR test is the additional skip compared with the local run.
+  The unchanged Live Text selection test passed in 1.546 seconds on this runner.
+- [CLI matrix](https://github.com/Lyle-xub/Recall/actions/runs/36335071686)
+  passed on macOS, Linux and Windows.
+
+The installed `ed691c8` build and validated `aba2287` have identical
+`macOS/Sources` contents. The latter changes only the motion test fixture and
+this validation record, so another installation is unnecessary. The local
+Live Text service failure remains documented above despite its CI success.
