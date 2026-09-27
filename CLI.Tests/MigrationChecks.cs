@@ -42,9 +42,50 @@ static class MigrationChecks
         var unsafePaths=new DefaultLibrary(Path.Combine(temporary,"unsafe-migration"));
         using(var store=new MemoryStore(unsafePaths.Legacy))store.Save(new MemoryFrame {Id="absolute",ImagePath=Path.Combine(unsafePaths.Legacy,"frames","source.png")});
         try {unsafePaths.ResolveDefault(()=>{});throw new Exception("Moved absolute media path");}catch(RecallException e){assert(e.Code=="invalid_path" && Directory.Exists(unsafePaths.Legacy) && !Directory.Exists(unsafePaths.Current),"Absolute media reference preserves the original directory");}
-        // Both runtimes hold the source lease during rename, including on Windows.
+        // Unix retains its source lease; Windows hands off to the external EX lease.
         var rename=new DefaultLibrary(Path.Combine(temporary,"source-handle"));Directory.CreateDirectory(rename.Legacy);
-        assert(rename.ResolveDefault(()=>{})==rename.Current,"Source writer handle permits atomic directory rename on this platform");
+        assert(rename.ResolveDefault(()=>{})==rename.Current,"Empty library migrates under the platform-specific lease handoff");
+        // Older writers do not know about the external location lease. They must
+        // still block migration at the source writer lease, before any handoff.
+        var older=new DefaultLibrary(Path.Combine(temporary,"legacy-writer"));Directory.CreateDirectory(older.Legacy);
+        using(var legacyWriter=new LibraryLease(older.Legacy,coordinate:false))
+            try {older.ResolveDefault(()=>{});throw new Exception("Moved a legacy writer");}
+            catch(RecallException e){assert(e.Code=="busy" && Directory.Exists(older.Legacy) && !Directory.Exists(older.Current),"Pre-protocol writer lease prevents migration");}
+        if(OperatingSystem.IsWindows())
+        {
+            var handoff=new DefaultLibrary(Path.Combine(temporary,"windows-handoff"));
+            using(var store=new MemoryStore(handoff.Legacy))store.Save(new MemoryFrame {Id="handoff",ImagePath="frames/test.png"});
+            var before=File.ReadAllBytes(Path.Combine(handoff.Legacy,"memory.sqlite"));
+            try
+            {
+                handoff.ResolveDefault(()=>{},(source,destination)=>
+                {
+                    // This runs at the real production move boundary. Exclusive
+                    // opening proves the migrator released its internal handle.
+                    using(var probe=new FileStream(Path.Combine(source,".recall-control","lease"),FileMode.Open,FileAccess.ReadWrite,FileShare.None))
+                        assert(probe.Length>=0,"Windows releases the internal lease before rename");
+                    try {using var reader=new MemoryStore(source,readOnly:true,initialize:false,locationPair:handoff);throw new Exception("Reader entered during handoff");}
+                    catch(RecallException e){assert(e.Code=="busy","External exclusive lease excludes readers during Windows handoff");}
+                    try {using var writer=new LibraryLease(source,locationPair:handoff);throw new Exception("Writer entered during handoff");}
+                    catch(RecallException e){assert(e.Code=="busy","External exclusive lease excludes writers during Windows handoff");}
+                    // Simulate an old reader arriving after source-lease release.
+                    // It bypasses the new protocol, but its SQLite handle must
+                    // make Windows refuse the rename, without moving any data.
+                    using var legacyReader=new SqliteConnection(new SqliteConnectionStringBuilder {DataSource=Path.Combine(source,"memory.sqlite"),Mode=SqliteOpenMode.ReadOnly,Pooling=false}.ToString());
+                    legacyReader.Open();
+                    Directory.Move(source,destination);
+                });
+                throw new Exception("Moved a library while a legacy SQLite reader was open");
+            }
+            catch(RecallException e){assert(e.Code=="conflict" && Directory.Exists(handoff.Legacy) && !Directory.Exists(handoff.Current) && before.SequenceEqual(File.ReadAllBytes(Path.Combine(handoff.Legacy,"memory.sqlite"))),"Legacy reader at Windows handoff fails closed and preserves the database");}
+            assert(handoff.ResolveDefault(()=>{})==handoff.Current,"Windows migration retries successfully after legacy SQLite reader closes");
+            var blocked=new DefaultLibrary(Path.Combine(temporary,"windows-child-handle"));Directory.CreateDirectory(blocked.Legacy);
+            var heldPath=Path.Combine(blocked.Legacy,"old-reader.bin");File.WriteAllText(heldPath,"preserved");
+            using(var held=new FileStream(heldPath,FileMode.Open,FileAccess.Read,FileShare.Read))
+                try {blocked.ResolveDefault(()=>{});throw new Exception("Moved a library with an incompatible legacy handle");}
+                catch(RecallException e){assert(e.Code=="conflict" && File.Exists(heldPath) && !Directory.Exists(blocked.Current),"Legacy non-delete-share child handle keeps Windows source in place");}
+            assert(blocked.ResolveDefault(()=>{})==blocked.Current,"Releasing the incompatible handle permits a clean retry");
+        }
         var raced=new DefaultLibrary(Path.Combine(temporary,"destination-race"));Directory.CreateDirectory(raced.Legacy);
         File.WriteAllText(Path.Combine(raced.Legacy,"source"),"unchanged");
         try {raced.ResolveDefault(()=>Directory.CreateDirectory(raced.Current));throw new Exception("Overwrote raced destination");}

@@ -31,7 +31,8 @@ public sealed class DefaultLibrary(string parent)
     }
     internal bool Owns(string path) => Equal(path,Legacy) || Canonical(path).StartsWith(Canonical(Legacy) + Path.DirectorySeparatorChar, OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
     internal static bool Exists(string path) => Path.Exists(path);
-    public string ResolveDefault(Action? checkProcesses = null)
+    public string ResolveDefault(Action? checkProcesses = null) => ResolveDefault(checkProcesses, MoveExclusive);
+    internal string ResolveDefault(Action? checkProcesses, Action<string,string> move)
     {
         if (!Exists(Legacy)) return Current;
         using var access = new LibraryLocationLease(Parent, exclusive: true);
@@ -57,9 +58,14 @@ public sealed class DefaultLibrary(string parent)
             if (modelRoot != null && Owns(modelRoot))
                 throw new RecallException("conflict", "REWIND_MODEL_ROOT points inside the old default library. Update or remove that override before migration.");
             ValidateMedia(Legacy);
-            // Directory.Move never falls back to a recursive copy. Keep the source writer lease held.
-            try { MoveExclusive(Legacy, Current); }
-            catch (IOException e) { throw new RecallException("conflict", "Could not atomically rename the default library. The original was retained; close all Recall processes and check that both paths are on the same volume. " + e.Message); }
+            // Windows cannot rename an ancestor while our child lease file is open,
+            // even with FileShare.Delete. All SQLite audit handles have closed here.
+            // The external location EX lease still excludes current readers/writers;
+            // a legacy process opening a child handle makes Windows refuse the move.
+            // Unix keeps its source flock through the atomic rename.
+            if (OperatingSystem.IsWindows()) writer.Dispose();
+            try { move(Legacy, Current); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { throw new RecallException("conflict", "Could not atomically rename the default library. The original was retained; close all Recall processes and check that both paths are on the same volume. " + e.Message); }
             return Current;
         }
         finally { foreach (var engine in engines) engine.Dispose(); }
