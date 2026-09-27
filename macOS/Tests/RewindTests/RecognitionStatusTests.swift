@@ -4,36 +4,52 @@ import Combine
 
 final class RecognitionStatusTests:XCTestCase {
     @MainActor func testTransientQueueAndIdleNeverReachVisibleStatus() async throws {
-        let presenter = RecognitionStatusPresentation(delay:.milliseconds(35))
+        let clock=RecognitionTransitionClock(count:5)
+        let presenter = RecognitionStatusPresentation(delay:.milliseconds(35),waitForTransition:{await clock.wait($0)})
         let running = RecognitionStatusSnapshot(contextID:"image-A",text:.processing)
         var seen:[RecognitionStatusSnapshot] = []
         let observer = presenter.$snapshot.compactMap { $0 }.sink { seen.append($0) }
+        defer {observer.cancel();presenter.cancel()}
         presenter.receive(running)
-        presenter.receive(RecognitionStatusSnapshot(contextID:"image-A",text:.queued))
-        try await Task.sleep(for:.milliseconds(5));presenter.receive(running)
-        presenter.receive(RecognitionStatusSnapshot(contextID:"image-A",text:.complete))
-        try await Task.sleep(for:.milliseconds(5));presenter.receive(running)
-        try await Task.sleep(for:.milliseconds(60))
+        let transient:[MediaRecognitionState]=[.queued,.processing,.complete,.processing]
+        var pending:[Task<Void,Never>]=[]
+        for (index,state) in transient.enumerated() {
+            presenter.receive(RecognitionStatusSnapshot(contextID:"image-A",text:state))
+            pending.append(try XCTUnwrap(presenter.pendingTransition))
+            await fulfillment(of:[clock.started[index]],timeout:2)
+        }
+        // Release even cancelled waits: obsolete callbacks must be harmless,
+        // regardless of execution order or the host's wall-clock scheduling.
+        for (index,task) in pending.enumerated() {await clock.release(index);await task.value}
         XCTAssertTrue(seen.allSatisfy { $0.text == .processing })
         presenter.receive(RecognitionStatusSnapshot(contextID:"image-A",text:.complete))
-        try await Task.sleep(for:.milliseconds(60))
+        let completion=try XCTUnwrap(presenter.pendingTransition)
+        await fulfillment(of:[clock.started[4]],timeout:2)
+        await clock.release(4);await completion.value
         XCTAssertEqual(presenter.snapshot?.text,.complete,"Completion must not stay stuck on processing")
-        observer.cancel();presenter.cancel()
     }
     @MainActor func testErrorsImmediateButNeverFollowAnotherSelection() async throws {
-        let presenter = RecognitionStatusPresentation(delay:.milliseconds(35))
+        let clock=RecognitionTransitionClock(count:2)
+        let presenter = RecognitionStatusPresentation(delay:.milliseconds(35),waitForTransition:{await clock.wait($0)})
+        defer {presenter.cancel()}
         let running = RecognitionStatusSnapshot(contextID:"image-A",speech:.processing)
         presenter.receive(running)
         let failure = RecognitionStatusSnapshot(contextID:"image-A",speech:.failed("Audio needs attention"))
         presenter.receive(failure)
         XCTAssertEqual(presenter.snapshot,failure)
-        presenter.receive(RecognitionStatusSnapshot(contextID:"image-A",speech:.complete));presenter.cancel()
-        try await Task.sleep(for:.milliseconds(60))
+        let complete=RecognitionStatusSnapshot(contextID:"image-A",speech:.complete)
+        presenter.receive(complete)
+        let dismissed=try XCTUnwrap(presenter.pendingTransition)
+        await fulfillment(of:[clock.started[0]],timeout:2)
+        presenter.cancel();await clock.release(0);await dismissed.value
         XCTAssertEqual(presenter.snapshot,failure,"A dismissed view must not apply a delayed transition")
+        presenter.receive(complete)
+        let obsolete=try XCTUnwrap(presenter.pendingTransition)
+        await fulfillment(of:[clock.started[1]],timeout:2)
         let other = RecognitionStatusSnapshot(contextID:"image-B",text:.queued)
         presenter.receive(other)
         XCTAssertEqual(presenter.snapshot,other,"Selection changes must bypass debounce immediately")
-        try await Task.sleep(for:.milliseconds(60))
+        await clock.release(1);await obsolete.value
         XCTAssertEqual(presenter.snapshot,other,"An old completion must not overwrite the new selection")
     }
     @MainActor func testActivityBelongsOnlyToDisplayedImageAndRecording() {
@@ -77,4 +93,16 @@ final class RecognitionStatusTests:XCTestCase {
         try store.saveRecognitionOutcome("deleted-session",state:.complete)
         XCTAssertNil(try store.recognitionOutcome("deleted-session"),"Late recognition cannot recreate deleted metadata")
     }
+}
+
+private actor RecognitionTransitionClock {
+    let started:[XCTestExpectation]
+    private var pending:[Int:CheckedContinuation<Void,Never>]=[:]
+    private var next=0
+    init(count:Int) {started=(0..<count).map {XCTestExpectation(description:"Transition \($0) is waiting")}}
+    func wait(_ delay:Duration)async {
+        let index=next;next += 1
+        await withCheckedContinuation {pending[index]=$0;started[index].fulfill()}
+    }
+    func release(_ index:Int) {pending.removeValue(forKey:index)?.resume()}
 }

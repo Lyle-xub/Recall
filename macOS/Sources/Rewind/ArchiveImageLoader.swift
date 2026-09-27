@@ -17,6 +17,7 @@ private struct ArchivePixelCache:@unchecked Sendable {
 /// together; a moving viewport schedules partial publication every 150 ms.
 @MainActor final class ArchiveImageLoader:ObservableObject {
     typealias Decode = @Sendable (URL) async -> CGImage?
+    typealias PublicationWait = @Sendable (ContinuousClock.Instant) async throws -> Void
     @Published private(set) var images:[String:NSImage] = [:]
     private var thumbnails:[String:NSImage] = [:]
     private var thumbnailPixels:[String:CGImage] = [:]
@@ -40,6 +41,7 @@ private struct ArchivePixelCache:@unchecked Sendable {
     private var cacheRevision=0
     private var active = true
     private let decode:Decode
+    private let waitForPublication:PublicationWait
     private(set) var publicationCount = 0
     private(set) var decodeCount = 0
     static let memoryBudget = 96*1024*1024
@@ -47,7 +49,8 @@ private struct ArchivePixelCache:@unchecked Sendable {
     var cachedBytes:Int {costs.values.reduce(0,+)+detailCosts.values.reduce(0,+)}
     var cachedImageCount:Int {thumbnails.count+detailCosts.count}
 
-    init(decode:Decode? = nil) {
+    init(decode:Decode? = nil,waitForPublication:@escaping PublicationWait = {try await Task.sleep(until:$0,clock:.continuous)}) {
+        self.waitForPublication=waitForPublication
         self.decode = decode ?? { url in
             await Task.detached(priority:.utility) { StoredImage.load(url,maxPixels:560) }.value
         }
@@ -140,9 +143,9 @@ private struct ArchivePixelCache:@unchecked Sendable {
     }
     private func schedulePublication() {
         guard publicationTask == nil else {return}
-        let deadline=ContinuousClock.now.advanced(by:.milliseconds(150))
+        let deadline=ContinuousClock.now.advanced(by:.milliseconds(150)),waitForPublication=waitForPublication
         publicationTask=Task { @MainActor [weak self] in
-            do {try await Task.sleep(until:deadline,clock:.continuous)} catch {return}
+            do {try await waitForPublication(deadline)} catch {return}
             guard let self,!Task.isCancelled else {return}
             self.publicationTask=nil;self.publishViewportIfReady(allowPartial:true)
         }

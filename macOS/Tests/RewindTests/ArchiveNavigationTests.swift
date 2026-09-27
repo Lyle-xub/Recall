@@ -80,11 +80,18 @@ final class ArchiveNavigationTests:XCTestCase {
 
     @MainActor func testVisibleCohortPublishesTogetherAndNearbyCardsAreWarm() async throws {
         let probe = ArchiveDecodeProbe(),items = records(count:12)
-        let loader = ArchiveImageLoader(decode:{ await probe.decode($0) })
+        // Hold the partial-publication deadline explicitly. Batch completion
+        // and the separate slow-image test own these two distinct policies.
+        let publication=AsyncStream<Void>.makeStream(bufferingPolicy:.bufferingNewest(1))
+        let loader = ArchiveImageLoader(decode:{ await probe.decode($0) },waitForPublication:{_ in
+            for await _ in publication.stream {break}
+        })
+        defer {loader.stop();publication.continuation.finish()}
         let viewport = ArchiveViewportRecords(visible:Set(items.prefix(8).map(\.id)),nearby:Set(items.suffix(4).map(\.id)))
         loader.request(items,viewport:viewport,root:URL(fileURLWithPath:"/"))
-        try await Task.sleep(for:.milliseconds(20))
-        XCTAssertTrue(loader.images.isEmpty,"Do not reveal the first decoded card before the visible cohort is ready")
+        await fulfillment(of:[probe.firstBatch],timeout:2)
+        XCTAssertTrue(loader.images.isEmpty,"The visible cohort has not completed")
+        await probe.release()
         await loader.waitUntilIdle()
         XCTAssertEqual(loader.publicationCount,1,"Eight visible screenshots should arrive in one UI update")
         XCTAssertEqual(Set(loader.images.keys),Set(items.prefix(8).map(\.imagePath)))
@@ -108,10 +115,17 @@ final class ArchiveNavigationTests:XCTestCase {
     }
     @MainActor func testMovingViewportReprioritizesWithoutPublishingStalePartialBatch() async throws {
         let probe = ArchiveDecodeProbe(),items = records(count:12)
-        let loader = ArchiveImageLoader(decode:{ await probe.decode($0) })
+        // Hold the partial-publication deadline explicitly. Batch completion
+        // and the separate slow-image test own these two distinct policies.
+        let publication=AsyncStream<Void>.makeStream(bufferingPolicy:.bufferingNewest(1))
+        let loader = ArchiveImageLoader(decode:{ await probe.decode($0) },waitForPublication:{_ in
+            for await _ in publication.stream {break}
+        })
+        defer {loader.stop();publication.continuation.finish()}
         loader.request(items,viewport:.init(visible:Set(items.prefix(8).map(\.id))),root:URL(fileURLWithPath:"/"))
-        while await probe.started < 4 { await Task.yield() }
+        await fulfillment(of:[probe.firstBatch],timeout:2)
         loader.request(items,viewport:.init(visible:Set(items.suffix(4).map(\.id))),root:URL(fileURLWithPath:"/"))
+        await probe.release()
         await loader.waitUntilIdle()
         XCTAssertEqual(Set(loader.images.keys),Set(items.suffix(4).map(\.imagePath)))
         XCTAssertEqual(loader.publicationCount,1)
@@ -175,14 +189,27 @@ final class ArchiveNavigationTests:XCTestCase {
 }
 
 private actor ArchiveDecodeProbe {
+    let firstBatch:XCTestExpectation
     private var active = 0
     private(set) var maximumActive = 0
-    private(set) var started = 0
+    private var pending:[CheckedContinuation<Void,Never>]=[]
+    private var released=false
+    init() {
+        firstBatch=XCTestExpectation(description:"Four initial reads are held")
+        firstBatch.expectedFulfillmentCount=4
+    }
     func decode(_ url:URL) async -> CGImage? {
-        active += 1;started += 1;maximumActive = max(maximumActive,active)
-        try? await Task.sleep(for:.milliseconds(60))
-        active -= 1
+        active += 1;maximumActive = max(maximumActive,active)
+        defer {active -= 1}
+        if !released {
+            await withCheckedContinuation {pending.append($0);firstBatch.fulfill()}
+        }
         return CGContext(data:nil,width:80,height:50,bitsPerComponent:8,bytesPerRow:0,
             space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage()
+    }
+    func release() {
+        released=true
+        let batch=pending;pending=[]
+        batch.forEach {$0.resume()}
     }
 }
