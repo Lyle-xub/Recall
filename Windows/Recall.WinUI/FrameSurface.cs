@@ -6,58 +6,125 @@ namespace Recall;
 
 internal sealed class FrameSurface : Grid
 {
-    MemoryFrame frame; readonly Image image = new() { Stretch = Stretch.Uniform }; readonly Canvas selection = new() { IsHitTestVisible = false }; BitmapImage? bitmap;
+    MemoryFrame frame; readonly MemoryStore store; readonly Image image = new() { Stretch = Stretch.Uniform }; readonly Canvas selection = new() { IsHitTestVisible = false }; BitmapImage? bitmap;
+    readonly LatestPreviewLoad<(MemoryFrame Frame, BitmapImage Bitmap)> imageRequests = new();
+    MemoryFrame? requested;
     (int Line, int Character)? anchor, focus; bool dragging; readonly bool meeting;
+    public event Action<MemoryFrame>? Presented;
+    public event Action<MemoryFrame, Exception>? Failed;
+    public event Action? ImageSizeChanged;
+    public MemoryFrame? DisplayedFrame => bitmap == null ? null : frame;
+    public MemoryFrame? RequestedFrame => requested;
+    public bool HasImage => bitmap != null;
+    public string? LoadError { get; private set; }
+    public double ImageAspect => bitmap?.PixelHeight > 0 ? (double)bitmap.PixelWidth / bitmap.PixelHeight : 16.0 / 10;
     public FrameSurface(MemoryStore store, MemoryFrame frame, bool meeting = false)
     {
+        this.store = store;
         this.meeting = meeting;
         frame = Display(frame);
         this.frame = frame;
-        Background = Design.Brush(Color.FromArgb(245, 252, 252, 253));
-        CornerRadius = new(26);
-        Padding = new(8);
+        Background = Design.Brush(Design.Dark ? Color.FromArgb(255, 37, 40, 47) : Color.FromArgb(255, 225, 229, 235));
+        CornerRadius = new(12);
         IsTabStop = true;
-        Design.Rounded(this, 26);
+        Design.Rounded(this, 12);
         image.Opacity = Design.Dark ? .78 : 1;
-        Children.Add(new Border { Background = Design.Brush(Microsoft.UI.Colors.Black), IsHitTestVisible = false });
         Children.Add(image);
         Children.Add(selection);
         ProtectedCursor = InputSystemCursor.Create(InputSystemCursorShape.IBeam);
         image.ImageOpened += (_, _) => Paint();
         SizeChanged += (_, _) => Paint();
-        Loaded += async (_, _) => { try { bitmap = await MemoryImages.Load(store, frame.ImagePath, 0); image.Source = bitmap; } catch (Exception ex) { if (store.Frame(frame.Id) is { } latest && latest.ImagePath != frame.ImagePath) { this.frame = latest; try { bitmap = await MemoryImages.Load(store, latest.ImagePath, 0); image.Source = bitmap; } catch { } } else Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(this, ex.Message); } };
+        Loaded += (_, _) => { if (requested != null || bitmap == null) RequestImage(requested ?? this.frame); };
+        Unloaded += (_, _) => imageRequests.Cancel();
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(this, "Recorded image. Drag across text to select; press Control C to copy.");
         PointerPressed += (_, e) => { var point = e.GetCurrentPoint(selection); if (!point.Properties.IsLeftButtonPressed) return; Focus(FocusState.Pointer); anchor = focus = Hit(point.Position); dragging = true; CapturePointer(e.Pointer); Paint(); e.Handled = true; };
         PointerMoved += (_, e) => { if (dragging) { focus = Hit(e.GetCurrentPoint(selection).Position); Paint(); e.Handled = true; } };
         PointerReleased += (_, e) => { dragging = false; ReleasePointerCaptures(); e.Handled = true; };
         PointerCaptureLost += (_, _) => dragging = false;
-        DoubleTapped += (_, e) => { var hit = Hit(e.GetPosition(selection)); if (hit != null) { anchor = (hit.Value.Line, 0); focus = (hit.Value.Line, frame.Regions[hit.Value.Line].Text.Length); Paint(); } e.Handled = true; };
-        KeyDown += (_, e) => { if ((InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) & Windows.UI.Core.CoreVirtualKeyStates.Down) == 0) return; if (e.Key == VirtualKey.C) { Copy(); e.Handled = true; } if (e.Key == VirtualKey.A && frame.Regions.Count > 0) { anchor = (0, 0); focus = (frame.Regions.Count - 1, frame.Regions[^1].Text.Length); Paint(); e.Handled = true; } };
-        var menu = new MenuFlyout();
+        DoubleTapped += (_, e) => { var hit = Hit(e.GetPosition(selection)); if (hit != null) { anchor = (hit.Value.Line, 0); focus = (hit.Value.Line, this.frame.Regions[hit.Value.Line].Text.Length); Paint(); } e.Handled = true; };
+        KeyDown += (_, e) => { if ((InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) & Windows.UI.Core.CoreVirtualKeyStates.Down) == 0) return; if (e.Key == VirtualKey.C) { Copy(); e.Handled = true; } if (e.Key == VirtualKey.A && this.frame.Regions.Count > 0) { anchor = (0, 0); focus = (this.frame.Regions.Count - 1, this.frame.Regions[^1].Text.Length); Paint(); e.Handled = true; } };
+        var menu = Design.Menu();
         var copy = new MenuFlyoutItem { Text = "Copy selected text" };
         copy.Click += (_, _) => Copy();
         menu.Items.Add(copy);
         var all = new MenuFlyoutItem { Text = "Copy all text" };
-        all.Click += (_, _) => ClipboardText(frame.Text);
+        all.Click += (_, _) => ClipboardText(this.frame.Text);
         menu.Items.Add(all);
         ContextFlyout = menu;
     }
     MemoryFrame Display(MemoryFrame value) => meeting && value.MeetingImagePath != null ? value with { ImagePath = value.MeetingImagePath, Regions = value.MeetingRegions, Text = string.Join("\n", value.MeetingRegions.Select(r => r.Text)) } : value;
     public void Update(MemoryFrame value)
     {
+        ShowFrame(value);
+    }
+    public void ShowFrame(MemoryFrame value)
+    {
         value = Display(value);
-        if (frame.Text != value.Text)
+        if (requested?.Id == value.Id && requested.ImagePath == value.ImagePath)
         {
-            anchor = focus = null;
+            requested = value;
+            return;
         }
+        if (bitmap == null || frame.Id != value.Id || frame.ImagePath != value.ImagePath)
+        {
+            requested = value;
+            if (IsLoaded) RequestImage(value);
+            return;
+        }
+        if (requested != null)
+        {
+            imageRequests.Cancel();
+            requested = null;
+        }
+        if (frame.Text != value.Text)
+            anchor = focus = null;
         frame = value;
+        LoadError = null;
         Paint();
+        Presented?.Invoke(frame);
+    }
+    void RequestImage(MemoryFrame target)
+    {
+        requested = target;
+        LoadError = null;
+        _ = imageRequests.Request(async cancellation =>
+        {
+            try { return (target, await MemoryImages.Load(store, target.ImagePath, 0, cancellation)); }
+            catch (Exception) when (!cancellation.IsCancellationRequested)
+            {
+                // Capture may finish writing a newer image path while this one is decoding.
+                var latest = await Task.Run(() => store.Frame(target.Id), cancellation);
+                if (latest == null || latest.ImagePath == target.ImagePath) throw;
+                latest = Display(latest);
+                return (latest, await MemoryImages.Load(store, latest.ImagePath, 0, cancellation));
+            }
+        }, loaded =>
+        {
+            var current = requested;
+            frame = current?.Id == loaded.Frame.Id && current.ImagePath == loaded.Frame.ImagePath ? current : loaded.Frame;
+            requested = null;
+            bitmap = loaded.Bitmap;
+            anchor = focus = null;
+            image.Source = bitmap;
+            LoadError = null;
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(this, "");
+            Presented?.Invoke(frame);
+            ImageSizeChanged?.Invoke();
+            Paint();
+        }, error =>
+        {
+            var failed = requested ?? target;
+            requested = null;
+            LoadError = error.Message;
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(this, error.Message);
+            Failed?.Invoke(failed, error);
+        });
     }
     Rect ImageRect()
     {
-        var width = Math.Max(1, ActualWidth - 16);
-        var height = Math.Max(1, ActualHeight - 16);
-        var aspect = bitmap?.PixelHeight > 0 ? (double)bitmap.PixelWidth / bitmap.PixelHeight : 16.0 / 10;
+        var width = Math.Max(1, ActualWidth);
+        var height = Math.Max(1, ActualHeight);
+        var aspect = ImageAspect;
         var w = Math.Min(width, height * aspect);
         var h = w / aspect;
         return new((width - w) / 2, (height - h) / 2, w, h);
@@ -101,13 +168,6 @@ internal sealed class FrameSurface : Grid
     }
     void Paint()
     {
-        var imageRect = ImageRect();
-        var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(image);
-        var shape = visual.Compositor.CreateRoundedRectangleGeometry();
-        shape.Size = new((float)imageRect.Width, (float)imageRect.Height);
-        shape.Offset = new((float)imageRect.X, (float)imageRect.Y);
-        shape.CornerRadius = new(20);
-        visual.Clip = visual.Compositor.CreateGeometricClip(shape);
         selection.Children.Clear();
         var range = Range();
         if (range == null)

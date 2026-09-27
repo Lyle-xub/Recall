@@ -1,0 +1,9 @@
+[
+ {"name":"desktop-old-light","material":true,"desktop":true,"desktopScene":true,"sceneVariant":0,"dark":false,"parameters":{"DesktopSource":0.10,"DesktopTint":226,"DesktopBlur":24},"settleMs":2000},
+ {"name":"desktop-fixed-light","material":true,"desktop":true,"desktopScene":true,"sceneVariant":0,"dark":false,"settleMs":2000},
+ {"name":"desktop-live-change","backdropOnly":true,"sceneVariant":1,"settleMs":2000},
+ {"name":"desktop-fixed-dark","material":true,"desktop":true,"desktopScene":true,"sceneVariant":0,"dark":true,"settleMs":2000},
+ {"name":"desktop-rhine-light","page":"home","rhine":true,"day":"2026-09-26","desktopScene":true,"dark":false,"settleMs":2000},
+ {"name":"desktop-search-light","page":"search","rhine":true,"day":"2026-09-26","query":"Aurora","desktopScene":true,"dark":false,"settleMs":2000},
+ {"name":"desktop-classic-light","page":"home","rhine":false,"query":"","desktopScene":true,"dark":false,"settleMs":2000}
+]

@@ -31,6 +31,9 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Recall.Ocr/Recall.Ocr.csproj"/>
+    <EmbeddedResource Include="Materials/Effects/Shaders/LiquidGlass.hlsl" />
+    <None Update="Materials/LICENSE" Link="licenses/RecallGlass/LICENSE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Update="Materials/NOTICE.md" Link="licenses/RecallGlass/NOTICE.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <!-- LiquidGlassWinUI’s native effect ABI is tied to this self-contained runtime. -->
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="[2.2.0]" />
     <PackageReference Include="LiquidGlassWinUI" Version="[1.0.3]" />
@@ -42,7 +45,7 @@
     <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="../Rewind/ScreenManifest.cs;../Rewind/ImageArchive.cs;../Rewind/NeuralOcrClient.cs;../Rewind/Models.cs;../Rewind/AppPaths.cs;../Rewind/MemoryStore.cs;../Rewind/MemorySearch.cs;../Rewind/AppUsage.cs;../Rewind/RecordingCoordinator.cs;../Rewind/TranscriptPresentation.cs;../Rewind/CaptureService.cs;../Rewind/ModelClient.cs;../Rewind/BuiltinModels.cs" Link="Core/%(Filename).cs" />
+    <Compile Include="../Rewind/ScreenManifest.cs;../Rewind/ImageArchive.cs;../Rewind/NeuralOcrClient.cs;../Rewind/Models.cs;../Rewind/AppPaths.cs;../Rewind/DataDirectoryMigration.cs;../Rewind/MemoryStore.cs;../Rewind/MemorySearch.cs;../Rewind/AppUsage.cs;../Rewind/RecordingCoordinator.cs;../Rewind/AudioTrackPolicy.cs;../Rewind/TranscriptPresentation.cs;../Rewind/CaptureService.cs;../Rewind/ModelClient.cs;../Rewind/BuiltinModels.cs" Link="Core/%(Filename).cs" />
     <Content Include="Assets/**" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../Rewind/tessdata/**" Link="tessdata/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../shared/models/**" Link="models/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />

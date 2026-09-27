@@ -2,10 +2,16 @@
  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings><NoWarn>CA1416</NoWarn></PropertyGroup>
  <ItemGroup>
   <Compile Include="../Recall.WinUI/RhineGeometry.cs" Link="RhineGeometry.cs"/>
+  <Compile Include="../Recall.WinUI/LatestPreviewLoad.cs" Link="LatestPreviewLoad.cs"/>
+  <Compile Include="../Recall.WinUI/GlassProfile.cs" Link="GlassProfile.cs"/>
+  <Compile Include="../Recall.WinUI/VideoOrientation.cs" Link="VideoOrientation.cs"/>
+  <Compile Include="../Recall.WinUI/AppDisplayName.cs" Link="AppDisplayName.cs"/>
   <Compile Include="../Rewind/AppPaths.cs" Link="AppPaths.cs"/>
+  <Compile Include="../Rewind/DataDirectoryMigration.cs" Link="DataDirectoryMigration.cs"/>
 <Compile Include="../Rewind/MemorySearch.cs" Link="MemorySearch.cs"/>
 <Compile Include="../Rewind/AppUsage.cs" Link="AppUsage.cs"/>
 <Compile Include="../Rewind/RecordingCoordinator.cs" Link="RecordingCoordinator.cs"/>
+<Compile Include="../Rewind/AudioTrackPolicy.cs" Link="AudioTrackPolicy.cs"/>
 <Compile Include="../Rewind/TranscriptPresentation.cs" Link="TranscriptPresentation.cs"/>
 <Compile Include="../Rewind/ScreenManifest.cs" Link="ScreenManifest.cs"/><Compile Include="../Rewind/Models.cs" Link="Models.cs"/>
   <Compile Include="../Rewind/MemoryStore.cs" Link="MemoryStore.cs"/>
@@ -13,5 +19,6 @@
   <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12"/>
   <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5"/>
   <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0"/>
+  <PackageReference Include="NAudio" Version="2.2.1"/>
  </ItemGroup>
 <ItemGroup><Compile Include="../Rewind/BuiltinModels.cs" Link="BuiltinModels.cs" /></ItemGroup></Project>

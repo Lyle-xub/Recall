@@ -7,7 +7,46 @@ var tests = 0;
 void Assert(bool condition, string message) { if (!condition) throw new Exception(message); tests++; }
 try
 {
+    if (args.Contains("--data-migration-only"))
+    {
+        DataDirectoryMigrationTests.Run(Assert, root);
+        Console.WriteLine($"PASS: {tests} targeted data directory migration checks.");
+        return;
+    }
+    if (args.Contains("--archive-only"))
+    {
+        ArchiveFramesTests.Run(Assert, root);
+        Console.WriteLine($"PASS: {tests} targeted archive metadata checks.");
+        return;
+    }
+    if (args.Contains("--rhine-only"))
+    {
+        RhineMotionTests.Run(Assert);
+        ArchiveFramesTests.Run(Assert, root);
+        Console.WriteLine($"PASS: {tests} targeted Rhine geometry, motion, and archive checks.");
+        return;
+    }
     RhineMotionTests.Run(Assert);
+    DataDirectoryMigrationTests.Run(Assert, root);
+    await PreviewLoadTests.Run(Assert);
+    AudioTrackEncodingTests.Run(Assert, root);
+    VideoOrientationTests.Run(Assert);
+    Assert(Recall.VideoOrientation.Correction(90, 16d/9, 9d/16) == 3, "Screen video tagged 90 degrees must align with the captured still");
+    Assert(Recall.VideoOrientation.Correction(270, 16d/9, 9d/16) == 1, "Screen video tagged 270 degrees must align with the captured still");
+    Assert(Recall.VideoOrientation.Correction(90, 9d/16, 9d/16) == 0, "Correct portrait recording must remain portrait");
+    Assert(Recall.VideoOrientation.Correction(0, 16d/9, 16d/9) == 0, "Normal landscape recording must not rotate");
+    Assert(Recall.VideoOrientation.Correction(0, 16d/9, 9d/16) == 0, "Do not guess clockwise direction when metadata is absent");
+    Assert(Recall.VideoOrientation.Correction(90, 3, 1) == 0, "Unrelated capture aspect must not trigger automatic correction");
+    Assert(Recall.VideoOrientation.Correction(90, 0, 9d/16) == 0, "Missing still must keep native orientation");
+    Assert(Recall.VideoOrientation.Correction(90, 16d/9, 0) == 0, "Unopened video must not trigger correction");
+    Assert(Recall.GlassProfile.TimelineOpacity(-1) == 0 && Recall.GlassProfile.TimelineOpacity(.18) == 0,
+        "Timeline material retains the Mac's transparent upper margin");
+    Assert(Math.Abs(Recall.GlassProfile.TimelineOpacity(.59) - .5) < 1e-10,
+        "Timeline material matches the Mac's midpoint");
+    Assert(Recall.GlassProfile.TimelineOpacity(1) == 1 && Recall.GlassProfile.TimelineOpacity(2) == 1,
+        "Timeline material is opaque at the bottom");
+    var opacity = Enumerable.Range(0, 101).Select(i => Recall.GlassProfile.TimelineOpacity(i / 100.0)).ToArray();
+    Assert(opacity.Zip(opacity.Skip(1)).All(pair => pair.First <= pair.Second), "Timeline material has no fading seams");
     using (var store = new MemoryStore(root))
     {
         var now = DateTimeOffset.Now;
@@ -98,7 +137,7 @@ try
     tests += await ParityTests.Run(root);
     Console.WriteLine($"PASS: {tests} database, retrieval, privacy, and model contract checks.");
 }
-finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); if (Directory.Exists(root)) Directory.Delete(root, true); }
 sealed class FakeHandler : HttpMessageHandler
 {
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)

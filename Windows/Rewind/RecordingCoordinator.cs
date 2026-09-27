@@ -1,9 +1,9 @@
 namespace Rewind;
 
-public record RecordingState(bool Requested = false, bool InterfaceVisible = false, bool Active = false, bool Transitioning = false, bool Terminated = false)
+public record RecordingState(bool Requested = false, bool InterfaceVisible = false, bool Active = false, bool Transitioning = false, bool Terminated = false, bool CaptureFaulted = false)
 {
-    public bool ShouldCapture => Requested && !InterfaceVisible && !Terminated;
-    public bool AutomaticallyPaused => Requested && InterfaceVisible && !Terminated;
+    public bool ShouldCapture => Requested && !InterfaceVisible && !Terminated && !CaptureFaulted;
+    public bool AutomaticallyPaused => Requested && InterfaceVisible && !Terminated && !CaptureFaulted;
 }
 /// One serialized reconciler separates capture state from the user's intent.
 public sealed class RecordingCoordinator
@@ -23,9 +23,14 @@ public sealed class RecordingCoordinator
         this.stop = stop;
         delay = resumeDelay ?? TimeSpan.FromMilliseconds(300);
     }
-    public void Request(bool value) => Change(s => s.Terminated ? s : s with { Requested = value });
-    public void SetVisible(bool value) => Change(s => s with { InterfaceVisible = value });
-    public void Interrupted() => Change(s => s with { Requested = false, Active = false });
+    public void Request(bool value) => Change(s => s.Terminated ? s : s with { Requested = value, CaptureFaulted = false });
+    public void SetVisible(bool value) => Change(s => s with
+    {
+        InterfaceVisible = value,
+        // A new hide is a bounded retry opportunity after a capture fault.
+        CaptureFaulted = s.CaptureFaulted && !(s.InterfaceVisible && !value)
+    });
+    public void Interrupted() => Change(s => s.ShouldCapture && !rotate ? s with { CaptureFaulted = true } : s);
     public void Rotate()
     {
         lock (gate)
@@ -76,7 +81,15 @@ public sealed class RecordingCoordinator
                 {
                     await stop().ConfigureAwait(false);
                 }
-                catch (Exception ex) { Failed?.Invoke(ex); }
+                catch (Exception ex)
+                {
+                    lock (gate)
+                    {
+                        var supersededAndReady = token != revision && State.ShouldCapture;
+                        State = State with { CaptureFaulted = State.Requested && !supersededAndReady };
+                    }
+                    Failed?.Invoke(ex);
+                }
                 lock (gate)
                 {
                     rotate = false;
@@ -105,7 +118,17 @@ public sealed class RecordingCoordinator
                         };
                     }
                 }
-                catch (Exception ex) { lock (gate) { State = State with { Active = false, Requested = false }; } Failed?.Invoke(ex); }
+                catch (Exception ex)
+                {
+                    lock (gate)
+                    {
+                        // If the UI changed while startup was in flight, retry the
+                        // newest visible/hidden intent instead of latching its error.
+                        var supersededAndReady = token != revision && State.ShouldCapture;
+                        State = State with { Active = false, CaptureFaulted = State.Requested && !supersededAndReady };
+                    }
+                    Failed?.Invoke(ex);
+                }
             }
             lock (gate)
             {

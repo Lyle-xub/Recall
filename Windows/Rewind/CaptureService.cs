@@ -17,6 +17,7 @@ public sealed class CaptureService : IDisposable
 {
     private readonly MemoryStore store;
     private Recorder? recorder;
+    private Recorder? stoppingRecorder;
     private AudioTrackCapture? systemTrack, microphoneTrack;
     private TesseractEngine? ocr;
     private readonly NeuralOcrClient neural = new();
@@ -154,6 +155,7 @@ public sealed class CaptureService : IDisposable
                 StartSegment(settings);
         }
         catch { cts.Dispose(); cts = null; recorder?.Dispose(); recorder = null; session = null; throw; }
+        var workerSource = cts!;
         loop = Task.Run(async () =>
         {
             var last = DateTimeOffset.MinValue;
@@ -162,7 +164,7 @@ public sealed class CaptureService : IDisposable
             CancellationTokenSource? snapshotCancellation = null;
             try
             {
-                while (!cts.IsCancellationRequested)
+                while (!workerSource.IsCancellationRequested)
                 {
                     var excluded = VisibleExcluded(settings.ExcludedApps);
                     if (excluded && !privacyPaused)
@@ -193,7 +195,7 @@ public sealed class CaptureService : IDisposable
                     if (!excluded && (snapshot == null || snapshot.IsCompleted) && (DateTimeOffset.Now - last >= TimeSpan.FromSeconds(settings.CaptureInterval) || NativeWindows.GetForegroundWindow() != lastWindow))
                     {
                         snapshotCancellation?.Dispose();
-                        snapshotCancellation = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+                        snapshotCancellation = CancellationTokenSource.CreateLinkedTokenSource(workerSource.Token);
                         last = DateTimeOffset.Now;
                         lastWindow = NativeWindows.GetForegroundWindow();
                         snapshot = Snapshot(settings, snapshotCancellation.Token);
@@ -213,11 +215,17 @@ public sealed class CaptureService : IDisposable
                             SegmentFinished?.Invoke(done);
                         StartSegment(settings);
                     }
-                    await Task.Delay(150, cts.Token);
+                    await Task.Delay(150, workerSource.Token);
                 }
             }
             catch (OperationCanceledException) { }
-            catch (Exception ex) { cts.Cancel(); Error?.Invoke(ex.Message); Interrupted?.Invoke(ex.Message); }
+            catch (Exception ex)
+            {
+                var expectedStop = workerSource.IsCancellationRequested;
+                if (!expectedStop) workerSource.Cancel();
+                Error?.Invoke(ex.Message);
+                if (!expectedStop) Interrupted?.Invoke(ex.Message);
+            }
             finally
             {
                 snapshotCancellation?.Cancel();
@@ -253,9 +261,22 @@ public sealed class CaptureService : IDisposable
         options.MouseOptions = new MouseOptions { IsMousePointerEnabled = true, IsMouseClicksDetected = false };
         var r = Recorder.CreateRecorder(options);
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var source = cts!;
         finished = completion;
         r.OnRecordingComplete += (_, _) => completion.TrySetResult();
-        r.OnRecordingFailed += (_, e) => { completion.TrySetException(new InvalidOperationException(e.Error)); cts?.Cancel(); Error?.Invoke(e.Error); Interrupted?.Invoke(e.Error); };
+        r.OnRecordingFailed += (_, e) =>
+        {
+            completion.TrySetException(new InvalidOperationException(e.Error));
+            // A recorder can report failure while an intentional stop is being
+            // finalized. A late callback from an old segment must not cancel
+            // the next one or change the user's recording preference.
+            if (!ReferenceEquals(recorder, r) || !ReferenceEquals(cts, source) ||
+                source.IsCancellationRequested || ReferenceEquals(Volatile.Read(ref stoppingRecorder), r))
+                return;
+            source.Cancel();
+            Error?.Invoke(e.Error);
+            Interrupted?.Invoke(e.Error);
+        };
         recorder = r;
         session = s;
         privacyPaused = false;
@@ -283,6 +304,7 @@ public sealed class CaptureService : IDisposable
         }
         try
         {
+            Volatile.Write(ref stoppingRecorder, r);
             r.Stop();
             if (finished != null)
                 await finished.Task.WaitAsync(TimeSpan.FromSeconds(20));
@@ -292,6 +314,7 @@ public sealed class CaptureService : IDisposable
             r.Dispose();
             recorder = null;
             session = null;
+            Volatile.Write(ref stoppingRecorder, null);
             try
             {
                 if (systemTrack != null && await systemTrack.Stop())
@@ -537,7 +560,7 @@ internal sealed class AudioTrackCapture
     private readonly DateTimeOffset start;
     private readonly object gate = new();
     private readonly TaskCompletionSource stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private bool received;
+    private long writtenBytes;
     public double Offset
     {
         get; private set;
@@ -554,7 +577,16 @@ internal sealed class AudioTrackCapture
         temporary = target + ".wav";
         capture = microphone ? new WasapiCapture() : new WasapiLoopbackCapture();
         writer = new WaveFileWriter(temporary, capture.WaveFormat);
-        capture.DataAvailable += (_, e) => { lock (gate) { if (!received) { Offset = Math.Max(0, (DateTimeOffset.Now - start).TotalSeconds); received = true; } writer.Write(e.Buffer, 0, e.BytesRecorded); } };
+        capture.DataAvailable += (_, e) =>
+        {
+            if (e.BytesRecorded <= 0) return;
+            lock (gate)
+            {
+                if (writtenBytes == 0) Offset = Math.Max(0, (DateTimeOffset.Now - start).TotalSeconds);
+                writer.Write(e.Buffer, 0, e.BytesRecorded);
+                writtenBytes += e.BytesRecorded;
+            }
+        };
         capture.RecordingStopped += (_, e) => { lock (gate) { writer.Dispose(); } if (e.Exception != null) stopped.TrySetException(e.Exception); else stopped.TrySetResult(); };
         try
         {
@@ -568,7 +600,9 @@ internal sealed class AudioTrackCapture
         {
             capture.StopRecording();
             await stopped.Task.WaitAsync(TimeSpan.FromSeconds(10));
-            if (!received)
+            long bytes;
+            lock (gate) bytes = writtenBytes;
+            if (!AudioTrackPolicy.HasEncodableSamples(bytes, capture.WaveFormat.SampleRate, capture.WaveFormat.BlockAlign))
                 return false;
             await Task.Run(() => { using var reader = new WaveFileReader(temporary); MediaFoundationEncoder.EncodeToAac(reader, target, 96000); });
             return true;
