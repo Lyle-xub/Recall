@@ -30,7 +30,7 @@ final class ArchiveNavigationTests:XCTestCase {
         XCTAssertNil(model.selected)
         XCTAssertFalse(model.searchPresented)
         XCTAssertEqual(model.archiveTimelinePosition,items[0].timestamp)
-        XCTAssertTrue(model.archiveFrames.contains { $0.id == items[0].id })
+        XCTAssertEqual(model.archiveNavigationTarget?.recordID,items[0].id)
         model.reload();await model.waitForPendingLoads()
         XCTAssertNil(model.selected,"Activity reload must not replace the archive with a classic preview")
         XCTAssertTrue(model.archiveFrames.contains { $0.id == items[0].id })
@@ -59,22 +59,77 @@ final class ArchiveNavigationTests:XCTestCase {
         model.settings.glassArchiveEnabled = true;model.reload()
         model.beginTimelineDrag()
         for frame in items.reversed() { model.scrub(to:frame.timestamp) }
-        await model.waitForPendingLoads();await model.waitForArchiveSettlement()
+        await settle(model)
         XCTAssertNil(model.archiveExtractionID,"Holding the drag keeps the rack browsable")
-        model.endTimelineDrag();await model.waitForArchiveSettlement()
+        model.endTimelineDrag();await settle(model)
         XCTAssertEqual(model.archiveExtractionID,items[0].id)
         XCTAssertNil(model.selected,"Extraction must remain in the archive renderer")
         model.beginTimelineDrag()
         XCTAssertNil(model.archiveExtractionID)
         model.scrub(to:items[40].timestamp);model.endTimelineDrag()
         model.scrub(to:items[75].timestamp)
-        await model.waitForArchiveSettlement()
+        await settle(model)
         XCTAssertEqual(model.archiveExtractionID,items[75].id,"Only the final scroll position may open")
         model.scrub(to:items[10].timestamp);model.returnToDesktop()
-        await model.waitForArchiveSettlement()
+        await settle(model)
         XCTAssertNil(model.archiveExtractionID)
-        model.scrub(to:day.addingTimeInterval(86400+300));await model.waitForArchiveSettlement()
+        model.scrub(to:day.addingTimeInterval(86400+300));await settle(model)
         XCTAssertNil(model.archiveExtractionID,"A day without records must not open an adjacent day's card")
+        model.prepareToQuit();await model.shutDownRecording();await model.storageOptimizer.stop()
+    }
+
+    @MainActor private func settle(_ model:AppModel) async {
+        await model.waitForPendingLoads()
+        if let target=model.archiveNavigationTarget {
+            model.requestArchiveNavigationWindow(at:target.row,target:target);await model.waitForPendingLoads()
+            model.archiveNavigationDidSettle(target)
+        }
+        await model.waitForArchiveSettlement()
+    }
+
+    @MainActor func testExtractionRequiresCurrentRendererSettlementAndCancellationReleasesWaiter() async throws {
+        let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {try? FileManager.default.removeItem(at:root)}
+        let model=try AppModel(root:root),items=records()
+        for frame in items {try model.store.save(frame)}
+        model.settings.glassArchiveEnabled=true;model.reload()
+        model.scrub(to:items[5].timestamp);await model.waitForPendingLoads()
+        let obsolete=try XCTUnwrap(model.archiveNavigationTarget)
+        XCTAssertNil(model.archiveExtractionID,"Database completion must not open a card before camera arrival")
+        model.scrub(to:items[70].timestamp);await model.waitForPendingLoads()
+        let current=try XCTUnwrap(model.archiveNavigationTarget)
+        model.archiveNavigationDidSettle(obsolete)
+        XCTAssertNil(model.archiveExtractionID)
+        model.beginTimelineDrag();model.archiveNavigationDidSettle(current)
+        XCTAssertNil(model.archiveExtractionID,"A new drag invalidates even an already queued completion")
+        model.scrub(to:items[40].timestamp);await model.waitForPendingLoads()
+        let held=try XCTUnwrap(model.archiveNavigationTarget)
+        model.requestArchiveNavigationWindow(at:held.row,target:held);await model.waitForPendingLoads()
+        model.archiveNavigationDidSettle(held);XCTAssertNil(model.archiveExtractionID)
+        model.endTimelineDrag()
+        XCTAssertEqual(model.archiveExtractionID,items[40].id,"Release uses a real, already settled destination immediately")
+        model.scrub(to:items[10].timestamp);await model.waitForPendingLoads()
+        let waiting=Task {await model.waitForArchiveSettlement()}
+        await Task.yield();model.returnToDesktop();await waiting.value
+        model.requestArchiveNavigationWindow(at:held.row,target:held);await model.waitForPendingLoads()
+        model.archiveNavigationDidSettle(held);XCTAssertNil(model.archiveExtractionID)
+        model.prepareToQuit();await model.shutDownRecording();await model.storageOptimizer.stop()
+    }
+
+    @MainActor func testContinuousScrubWithinLoadedPageResolvesFractionalTargetsWithoutDatabaseQueue()async throws {
+        let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {try? FileManager.default.removeItem(at:root)}
+        let model=try AppModel(root:root),items=records()
+        for frame in items {try model.store.save(frame)}
+        model.settings.glassArchiveEnabled=true;model.archiveDay=day;model.reload();model.beginTimelineDrag()
+        let requests=model.archiveWindowRequestCount
+        for step in 0..<120 {model.scrub(to:items[40].timestamp.addingTimeInterval(Double(step)/4))}
+        XCTAssertEqual(model.archiveWindowRequestCount,requests)
+        let target=try XCTUnwrap(model.archiveNavigationTarget)
+        XCTAssertEqual(target.row,49-29.75/60,accuracy:0.0001)
+        XCTAssertNil(model.archiveExtractionID)
+        model.archiveNavigationDidSettle(target);model.endTimelineDrag()
+        XCTAssertEqual(model.archiveExtractionID,items[40].id)
         model.prepareToQuit();await model.shutDownRecording();await model.storageOptimizer.stop()
     }
 

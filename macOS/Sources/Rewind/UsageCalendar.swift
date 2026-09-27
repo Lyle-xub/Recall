@@ -2,14 +2,18 @@ import SwiftUI
 
 struct UsageCalendar:View {
     let selection:Date
+    let root:URL
     let choose:(Date)->Void
     @State private var month:Date
+    @State private var recorded:[Date:Set<Date>] = [:]
+    @State private var loading = true
+    @State private var error = false
     private let calendar:Calendar = {
         var value = Calendar.current; value.locale = RecallLanguage.locale; return value
     }()
     private var today:Date { calendar.startOfDay(for:Date()) }
-    init(selection:Date,choose:@escaping(Date)->Void) {
-        self.selection = selection; self.choose = choose
+    init(selection:Date,root:URL,choose:@escaping(Date)->Void) {
+        self.selection = selection; self.root = root; self.choose = choose
         _month = State(initialValue:Calendar.current.dateInterval(of:.month,for:selection)!.start)
     }
     private var days:[Date?] {
@@ -45,20 +49,49 @@ struct UsageCalendar:View {
                                     .foregroundStyle(selected ? .white:day > today ? Color.secondary.opacity(0.4):.primary)
                                     .frame(width:36,height:36).background(selected ? Color.blue:.clear,in:Circle())
                                     .overlay(Circle().strokeBorder(isToday && !selected ? Color.blue.opacity(0.45):.clear))
+                                    .overlay(alignment:.bottom) {
+                                        if recorded[month]?.contains(day) == true {
+                                            Circle().fill(selected ? .white:Color.blue).frame(width:4,height:4).padding(.bottom,3)
+                                        }
+                                    }
                                     .contentShape(Circle())
                             }.buttonStyle(.plain).disabled(day > today)
                                 .accessibilityLabel(day.recallFormatted(date:.complete,time:.omitted))
+                                .accessibilityValue(activityDescription(for:day))
+                                .help(activityDescription(for:day))
                                 .accessibilityAddTraits(selected ? .isSelected:[])
                         } else { Color.clear.frame(width:36,height:36).accessibilityHidden(true) }
                     }
                 }
             }
+            HStack(spacing:6) {
+                Circle().fill(Color.blue).frame(width:5,height:5).accessibilityHidden(true)
+                Text(error ? "Usage dates unavailable":"App usage recorded").font(.system(size:11)).foregroundStyle(.secondary)
+                Spacer()
+                if loading { ProgressView().controlSize(.mini).accessibilityLabel("Loading recorded usage dates") }
+            }.frame(height:16)
             Divider().opacity(0.45)
             HStack(spacing:8) {
                 quickDate("Today",date:today)
                 quickDate("Yesterday",date:calendar.date(byAdding:.day,value:-1,to:today)!)
             }
         }.padding(18).frame(width:300).background(.white)
+        .task(id:month) {
+            let requestedMonth = month
+            loading = true; error = false
+            do {
+                let days = try await UsageDataSource.shared.recordedDays(root:root,month:requestedMonth,calendar:calendar)
+                guard !Task.isCancelled,month == requestedMonth else { return }
+                recorded[requestedMonth] = days; loading = false
+            } catch {
+                guard !Task.isCancelled,month == requestedMonth else { return }
+                self.error = true; loading = false
+            }
+        }
+    }
+    private func activityDescription(for day:Date) -> String {
+        guard let days = recorded[month] else { return error ? "Usage activity status unavailable":"Loading usage activity status" }
+        return days.contains(day) ? "Usage activity recorded":"No usage activity recorded"
     }
     private func move(_ delta:Int) { month = calendar.date(byAdding:.month,value:delta,to:month)! }
     private func monthButton(_ symbol:String,label:String,action:@escaping()->Void)->some View {

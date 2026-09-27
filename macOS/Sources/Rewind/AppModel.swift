@@ -17,7 +17,10 @@ import ServiceManagement
     @Published var archiveFrames: [MemoryFrame] = []
     @Published var archiveTimelinePosition:Date?
     @Published private(set) var archiveExtractionID:String?
-    private var archiveSettleTask:Task<Void,Never>?
+    @Published private(set) var archiveNavigationTarget:ArchiveNavigationTarget?
+    private var archiveNavigationGeneration=0
+    private var archiveSettledGeneration:Int?
+    private var archiveSettlementWaiters:[CheckedContinuation<Void,Never>]=[]
     @Published private(set) var timelineDragging = false
     @Published private(set) var archiveWindow=ArchiveWindow()
     @Published private(set) var archiveWindowLoading=false
@@ -138,6 +141,7 @@ import ServiceManagement
     @Published var indexingStatus = "Everything stays on this device"
     @Published var indexingIssue:String?
     @Published var player: AVPlayer?
+    @Published private(set) var videoReady=false
     private var pendingMutations = Set<String>()
     private var searchTask: Task<Void,Never>?
     private var rotationTask: Task<Void,Never>?
@@ -472,34 +476,57 @@ import ServiceManagement
         if let day=window.columns.first(where:{$0.lane == 0})?.day {archiveDay=day}
         archiveWindowLoading=false;archiveWindowRefreshing=false;archiveRequestedRow=nil;archiveNavigating=false;archiveRequestedDay=nil
         if let row=window.focusRow {archiveScrollRow=row}
+        publishArchiveExtractionIfReady()
     }
     private func submitArchiveWindow(_ request:ArchiveWindowQuery,navigating:Bool = false,refreshing:Bool = false) {
         var query=request;query.pins=archiveProtectedFrames;archivePendingQuery=query
         archiveWindowRefreshing = archiveWindowRefreshing || refreshing
-        let captureRevision=archiveCaptureRevision
+        let captureRevision=archiveCaptureRevision,navigationGeneration=archiveNavigationGeneration
         archiveWindowLoading=true;archiveRequestedRow=query.row;archiveNavigating=navigating;archiveRequestedDay=query.day
         archiveWindowRequestCount += 1
         archiveNavigationWorker.submit(query,apply:{ [weak self] window in
             guard let self,self.archiveEpoch == query.epoch else {return}
             var current=window
             if !navigating,query.near == nil {current.focusRow=self.archiveScrollRow}
+            if navigating,let date=query.near,self.archiveTimelinePosition == date,
+               self.archiveNavigationGeneration == navigationGeneration {
+                // Resolving a far destination must not evict the screenshots
+                // still on screen. Reuse at most one bounded page per day;
+                // motion requests replace these pages as the viewport travels.
+                current.columns=window.columns.map {column in
+                    guard let old=self.archiveWindow.columns.first(where:{$0.day == column.day}) else {return column}
+                    let local=self.archiveScrollRow-Double(old.origin)
+                    let keepOld=local < Double(column.startIndex+24) || local > Double(column.startIndex+column.records.count-24)
+                    return ArchiveDayColumn(day:column.day,lane:column.lane,records:keepOld ? old.records:column.records,
+                        startIndex:keepOld ? old.startIndex:column.startIndex,totalCount:column.totalCount,origin:old.origin)
+                }
+                var destinationWindow=window
+                destinationWindow.columns=window.columns.map {column in
+                    ArchiveDayColumn(day:column.day,lane:column.lane,records:column.records,startIndex:column.startIndex,totalCount:column.totalCount,
+                        origin:self.archiveWindow.columns.first(where:{$0.day == column.day})?.origin ?? 0)
+                }
+                self.archiveNavigationTarget=destinationWindow.navigationTarget(at:date,generation:navigationGeneration)
+                    ?? ArchiveNavigationTarget(generation:navigationGeneration,date:date,row:window.focusRow ?? 0,recordID:nil)
+                current.focusRow=self.archiveScrollRow
+            }
             self.applyArchiveWindow(current)
             if navigating {
                 self.archiveHasNewFrames=self.archiveCaptureRevision != captureRevision
-                if self.archiveHasNewFrames,self.archiveScrollRow <= Double(self.archiveWindow.minimumRow)+1 {self.requestArchiveWindow(at:self.archiveScrollRow)}
+                if query.near == nil,self.archiveHasNewFrames,self.archiveScrollRow <= Double(self.archiveWindow.minimumRow)+1 {self.requestArchiveWindow(at:self.archiveScrollRow)}
             }
         },fail:{ [weak self] error in
             guard let self,self.archiveEpoch == query.epoch else {return}
             self.archiveWindowLoading=false;self.archiveWindowRefreshing=false;self.archiveRequestedRow=nil;self.archiveNavigating=false;self.error=error.localizedDescription
+            if navigating {self.cancelArchiveExtraction()}
         })
     }
     /// Called with world coordinates even when no record metadata is loaded at
     /// a fast scroll's destination. A missing card can never suppress demand.
-    func requestArchiveWindow(at row:Double) {
+    func requestArchiveWindow(at row:Double,navigation:Bool = false) {
         guard !archiveNavigating else {return}
         archiveScrollRow=row
-        if archiveTimelinePosition != nil {archiveTimelinePosition=nil;cancelArchiveExtraction()}
-        if archiveHasNewFrames,row <= Double(archiveWindow.minimumRow)+1 {
+        if !navigation,archiveTimelinePosition != nil {archiveTimelinePosition=nil;cancelArchiveExtraction()}
+        if !navigation,archiveHasNewFrames,row <= Double(archiveWindow.minimumRow)+1 {
             archiveEpoch += 1
             submitArchiveWindow(ArchiveWindowQuery(day:archiveDay,epoch:archiveEpoch),navigating:true);return
         }
@@ -511,6 +538,10 @@ import ServiceManagement
         // continuous scrolling. A 96-row page safely covers this demand band.
         if let requested=archiveRequestedRow,abs(requested-row) <= 16 {return}
         submitArchiveWindow(ArchiveWindowQuery(day:archiveDay,row:row,anchors:archiveAnchors(near:row),epoch:archiveEpoch))
+    }
+    func requestArchiveNavigationWindow(at row:Double,target:ArchiveNavigationTarget) {
+        guard archiveNavigationTarget == target,target.generation == archiveNavigationGeneration else {return}
+        requestArchiveWindow(at:row,navigation:true)
     }
 
     /// Archive batches may merge source paths and therefore change daily
@@ -574,9 +605,9 @@ import ServiceManagement
         while frameCacheOrder.count > 24 { frameCache.removeValue(forKey:frameCacheOrder.removeFirst()) }
     }
     private func display(_ frame:MemoryFrame) {
-        videoLoadTask?.cancel()
+        stopVideo()
         let frame = canonicalImages(frame)
-        cache(frame); player?.pause(); player = nil
+        cache(frame)
         selected = frame; meetingView = frame.meetingImagePath != nil; transcriptQuery = query
         if transcriptSessionID != frame.sessionID {
             transcriptWorker.cancel(); transcriptSessionID = frame.sessionID; lines = []; originalTranscriptLines = [];recordingDetail = nil
@@ -608,7 +639,7 @@ import ServiceManagement
         },fail:{ [weak self] in self?.error = $0.localizedDescription })
     }
     func back() {
-        videoLoadTask?.cancel()
+        stopVideo()
         timelineDragging = false;cancelArchiveExtraction();cancelArchiveWindowLoad();archiveTimelinePosition = nil
         previewWorker.cancel(); navigationWorker.cancel(); transcriptWorker.cancel(); searchWorker.cancel()
         previewRequestedID = nil; requestedNavigationDate = nil; transcriptSessionID = nil
@@ -623,41 +654,61 @@ import ServiceManagement
     private func browseArchive(at time:Date) {
         previewWorker.cancel();previewRequestedID = nil
         selected = nil;inspectorOpen = false;askOpen = false
-        player?.pause();player = nil;videoLoadTask?.cancel()
+        stopVideo()
         transcriptWorker.cancel();transcriptSessionID = nil;lines = [];recordingDetail = nil
-        cancelArchiveExtraction()
+        cancelArchiveExtraction(keepNavigation:true)
         archiveTimelinePosition = time
-        if !timelineDragging { scheduleArchiveExtraction(delay:.milliseconds(220)) }
         archiveEpoch += 1
+        // Scrubbing within the current bounded page does not need another SQL
+        // round trip. Keep the previous motion alive while distant data loads.
+        if let target=archiveWindow.navigationTarget(at:time,generation:archiveNavigationGeneration,requireCovered:true) {
+            cancelArchiveWindowLoad();archiveNavigationTarget=target;return
+        }
         submitArchiveWindow(ArchiveWindowQuery(day:Calendar.current.startOfDay(for:time),near:time,epoch:archiveEpoch),navigating:true)
     }
 
-    func cancelArchiveExtraction() {
-        archiveSettleTask?.cancel();archiveSettleTask = nil
+    func cancelArchiveExtraction(keepNavigation:Bool = false) {
+        archiveNavigationGeneration += 1;archiveSettledGeneration=nil
+        if !keepNavigation {
+            archiveNavigationTarget=nil
+            if archiveNavigating {cancelArchiveWindowLoad()}
+        }
         archiveExtractionID = nil
+        finishArchiveSettlementWaiters()
     }
     func beginTimelineDrag() {
         timelineDragging = true;cancelArchiveExtraction()
     }
     func endTimelineDrag() {
         timelineDragging = false
-        scheduleArchiveExtraction(delay:.zero)
+        publishArchiveExtractionIfReady()
     }
-    private func scheduleArchiveExtraction(delay:Duration) {
-        guard settings.glassArchiveEnabled,let time = archiveTimelinePosition else { return }
-        archiveSettleTask?.cancel()
-        archiveSettleTask = Task { [weak self] in
-            do { try await Task.sleep(for:delay) } catch { return }
-            guard let self else { return }
-            await self.archiveNavigationWorker.waitUntilIdle()
-            guard !Task.isCancelled,self.settings.glassArchiveEnabled,!self.timelineDragging,
-                  self.archiveTimelinePosition == time else { return }
-            self.archiveExtractionID = self.archiveFrames
-                .filter { Calendar.current.isDate($0.timestamp,inSameDayAs:time) }
-                .min { abs($0.timestamp.timeIntervalSince(time)) < abs($1.timestamp.timeIntervalSince(time)) }?.id
+    func archiveNavigationDidSettle(_ target:ArchiveNavigationTarget) {
+        guard archiveNavigationTarget == target,target.generation == archiveNavigationGeneration,
+              archiveTimelinePosition == target.date else {return}
+        archiveSettledGeneration=target.generation
+        archiveScrollRow=target.row
+        publishArchiveExtractionIfReady()
+    }
+    private func publishArchiveExtractionIfReady() {
+        guard settings.glassArchiveEnabled,!timelineDragging,let target=archiveNavigationTarget,
+              target.generation == archiveSettledGeneration else {return}
+        if let id=target.recordID {
+            guard archiveFrames.contains(where:{$0.id == id}) else {return}
+            archiveExtractionID=id
         }
+        finishArchiveSettlementWaiters()
     }
-    func waitForArchiveSettlement() async { await archiveSettleTask?.value }
+    private func finishArchiveSettlementWaiters() {
+        let waiters=archiveSettlementWaiters;archiveSettlementWaiters=[]
+        for waiter in waiters {waiter.resume()}
+    }
+    func waitForArchiveSettlement() async {
+        await archiveNavigationWorker.waitUntilIdle()
+        guard !timelineDragging,let target=archiveNavigationTarget,target.recordID != nil,
+              archiveExtractionID == nil else {return}
+        await withCheckedContinuation {archiveSettlementWaiters.append($0)}
+    }
     func scrub(to date: Date, keepingInspector:Bool = false) {
         guard let first = timelineStart ?? timeline.first?.timestamp else { return }
         let time = max(first,min(Date(),date))
@@ -678,7 +729,7 @@ import ServiceManagement
         else {
             previewWorker.cancel(); previewRequestedID = nil
             if selected != nil {
-                selected = nil;player?.pause();player = nil;lines = [];originalTranscriptLines = []
+                selected = nil;stopVideo();lines = [];originalTranscriptLines = []
                 transcriptWorker.cancel();transcriptSessionID = nil;recordingDetail = nil
             }
         }
@@ -811,6 +862,7 @@ import ServiceManagement
     func interfaceVisibilityChanged(_ visible:Bool) {
         // Visibility controls capture, never processing of already saved media.
         interfaceVisible = visible
+        if !visible {stopVideo();cancelArchiveExtraction()}
         capture.setInterfaceVisible(visible)
         storageOptimizer.setInterfaceVisible(visible)
         recordingCoordinator.setInterfaceVisible(visible || storageClearing)
@@ -824,7 +876,7 @@ import ServiceManagement
     func stopRecording() async { recordingCoordinator.request(false);await recordingCoordinator.waitUntilSettled() }
     func shutDownRecording() async { await recordingCoordinator.shutdown();transcriptionTask?.cancel() }
     // Prevent a pending animation completion from restarting capture during quit.
-    func prepareToQuit() { cancelArchiveRefresh();cancelArchiveWindowLoad();cancelArchiveExtraction();recordingCoordinator.request(false) }
+    func prepareToQuit() { stopVideo();cancelArchiveRefresh();cancelArchiveWindowLoad();cancelArchiveExtraction();recordingCoordinator.request(false) }
     private func beginCapture() async throws {
         error = nil;capturePermissionRequired = false
         try await capture.start(settings:settings,allowed:{ [weak self] in self?.recordingCoordinator.state.shouldCapture == true })
@@ -1004,23 +1056,50 @@ import ServiceManagement
     }
     func cancelAsk() { askGeneration += 1; chatTask?.cancel(); asking = false; askStatus = ""; messages.removeAll { $0.role == "assistant" && $0.text.isEmpty } }
     private var videoLoadTask:Task<Void,Never>?
+    private var videoGeneration=0
+    private var preparingPlayer:AVPlayer?
+    func stopVideo() {
+        videoGeneration += 1;videoLoadTask?.cancel();videoLoadTask=nil
+        preparingPlayer?.pause();preparingPlayer?.currentItem?.cancelPendingSeeks();preparingPlayer=nil
+        player?.pause();player?.currentItem?.cancelPendingSeeks();player=nil;videoReady=false
+    }
+    func videoDidBecomeReady(_ candidate:AVPlayer) {
+        guard player === candidate,!videoReady,inspectorOpen else {return}
+        videoReady=true;candidate.play()
+    }
+    func videoDidFail(_ candidate:AVPlayer,message:String) {
+        guard player === candidate else {return}
+        stopVideo();notify("Playback: "+message)
+    }
+    func waitForVideoLoad() async {await videoLoadTask?.value}
     func openVideo() {
         guard let frame = selected,let id = frame.sessionID else { return }
-        videoLoadTask?.cancel()
+        stopVideo()
+        let generation=videoGeneration,meeting=meetingView
         let time = max(frame.timestamp,min(timelineCursor ?? frame.timestamp,frame.endTimestamp ?? frame.timestamp))
         videoLoadTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let reader = libraryReader
-                guard let session = try await Task.detached(priority:.userInitiated,operation:{try reader.session(id)}).value else { return }
+                guard let session = try await Task.detached(priority:.userInitiated,operation:{try reader.session(id)}).value else {throw RewindError.message("The recording is no longer available.")}
+                guard !Task.isCancelled,videoGeneration == generation else {return}
                 guard session.endedAt != nil else { notify("Pause recording to play this active segment");return }
                 let asset = try await RecordingPlayback.asset(session:session,root:store.root)
-                guard !Task.isCancelled,selected?.id == frame.id,inspectorOpen else { return }
+                guard !Task.isCancelled,videoGeneration == generation,selected?.id == frame.id,inspectorOpen,meetingView == meeting else { return }
+                guard try await asset.load(.isPlayable),!(try await asset.loadTracks(withMediaType:.video)).isEmpty else {throw RewindError.message("This recording has no playable video.")}
                 let player = AVPlayer(playerItem:AVPlayerItem(asset:asset))
-                await player.seek(to:CMTime(seconds:max(0,time.timeIntervalSince(session.startedAt)),preferredTimescale:600))
-                guard !Task.isCancelled,selected?.id == frame.id,inspectorOpen else { return }
-                self.player = player;player.play()
-            } catch { if !Task.isCancelled { notify("Playback: " + error.localizedDescription) } }
+                guard !Task.isCancelled,videoGeneration == generation else {return}
+                preparingPlayer=player
+                let duration=try await asset.load(.duration).seconds
+                let offset=max(0,min(time.timeIntervalSince(session.startedAt),duration.isFinite ? max(0,duration-1/600):.greatestFiniteMagnitude))
+                let completed=await player.seek(to:CMTime(seconds:offset,preferredTimescale:600),toleranceBefore:.zero,toleranceAfter:.zero)
+                guard !Task.isCancelled,videoGeneration == generation,selected?.id == frame.id,inspectorOpen,meetingView == meeting else {player.pause();return}
+                guard completed else {throw RewindError.message("The recording could not seek to this moment.")}
+                preparingPlayer=nil
+                // Seeking is not presentation: the mounted AVPlayerView must
+                // acknowledge its first frame before audio or video starts.
+                self.player = player
+            } catch { if !Task.isCancelled,videoGeneration == generation {stopVideo();notify("Playback: " + error.localizedDescription)} }
         }
     }
     func importImages() {

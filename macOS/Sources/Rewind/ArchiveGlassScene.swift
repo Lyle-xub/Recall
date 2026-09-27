@@ -31,6 +31,7 @@ private final class ArchiveRecordControl: SCNNode {
     private var slots:[String:Slot] = [:]
     private var heights:[String:ArchiveMotionSpring] = [:]
     private var depths:[String:ArchiveMotionSpring] = [:]
+    private var laterals:[String:ArchiveMotionSpring] = [:]
     private var extractions:[String:Extraction] = [:]
     private var framesByID:[String:MemoryFrame] = [:]
     private var imageAspects:[String:CGFloat] = [:]
@@ -94,6 +95,11 @@ private final class ArchiveRecordControl: SCNNode {
     private(set) var layoutUpdateCount = 0
     private(set) var informationTextureBuildCount = 0
     private var navigationTarget:Double?
+    private var resolvedNavigation:ArchiveNavigationTarget?
+    private var reportedNavigationGeneration:Int?
+    private var timelineNavigation=false
+    var onNavigationSettled:((ArchiveNavigationTarget)->Void)?
+    var onNavigationWindowDemand:((Double,ArchiveNavigationTarget)->Void)?
     private var navigationMotion = ArchiveMotionSpring(value:0)
     private var maxScroll:CGFloat = 0
     private var minScroll:CGFloat = 0
@@ -152,7 +158,7 @@ private final class ArchiveRecordControl: SCNNode {
         frameClock.archive = self
     }
 
-    func update(frames:[MemoryFrame],images:[String:NSImage],appearance:OverlayAppearance,selected:String?,size:CGSize,reduced:Bool,day:Date? = nil,timelinePosition:Date? = nil,window:ArchiveWindow? = nil) {
+    func update(frames:[MemoryFrame],images:[String:NSImage],appearance:OverlayAppearance,selected:String?,size:CGSize,reduced:Bool,day:Date? = nil,timelinePosition:Date? = nil,window:ArchiveWindow? = nil,navigation:ArchiveNavigationTarget? = nil) {
         let started=onWorkMeasured == nil ? nil:ContinuousClock.now
         defer {if let started {onWorkMeasured?("update",started.duration(to:.now))}}
         let resized = viewport != size
@@ -166,10 +172,15 @@ private final class ArchiveRecordControl: SCNNode {
         if isNight != night {scene.fogColor = isNight ? NSColor(red:0.04,green:0.05,blue:0.07,alpha:1):NSColor(red:0.90,green:0.89,blue:0.86,alpha:1)}
         let center = Calendar.current.startOfDay(for:day ?? frames.max(by: { $0.timestamp < $1.timestamp })?.timestamp ?? Date())
         let suppliedWindow=window?.columns.isEmpty == false ? window:nil
+        timelineNavigation=timelinePosition != nil
         let nextWindowKeys=suppliedWindow?.columns.map { "\($0.day)|\($0.startIndex)|\($0.totalCount)|\($0.origin)" } ?? []
         if let suppliedWindow,windowEpoch != suppliedWindow.epoch {
-            scrollOffset=CGFloat(suppliedWindow.focusRow ?? 0);navigationTarget=nil
-            cameraScroll=ArchiveMotionSpring(value:Double(scrollOffset));cameraAcross=ArchiveMotionSpring(value:Double(horizontalOffset))
+            // A near-time page resolves a destination; it must never teleport
+            // the displayed camera before the navigation spring can run.
+            if !timelineNavigation {
+                scrollOffset=CGFloat(suppliedWindow.focusRow ?? 0);navigationTarget=nil
+                cameraScroll=ArchiveMotionSpring(value:Double(scrollOffset));cameraAcross=ArchiveMotionSpring(value:Double(horizontalOffset))
+            }
             windowEpoch=suppliedWindow.epoch;virtualBucket=nil
         }
         dataWindow=suppliedWindow;retainedFrames=frames;retainedImages=images
@@ -199,7 +210,7 @@ private final class ArchiveRecordControl: SCNNode {
             if reduced { advance(dt:1,immediate:true) } else { wake() }
         }
         if let currentID,let node = nodes[currentID] { shape(node,id:currentID,progress:Float(extractions[currentID]?.spring.value ?? 0)) }
-        navigateArchive(to:timelinePosition)
+        navigateArchive(to:timelinePosition,resolved:navigation)
         if resized,!extractions.isEmpty {
             if reducedMotion { advance(dt:1,immediate:true) } else { wake() }
         }
@@ -212,10 +223,19 @@ private final class ArchiveRecordControl: SCNNode {
         return SIMD3(Float(point.x),Float(point.y),Float(point.z))
     }
 
-    private func navigateArchive(to date:Date?) {
-        let revision=dataWindow?.epoch ?? layoutRevision
+    private func navigateArchive(to date:Date?,resolved:ArchiveNavigationTarget?) {
+        let revision=resolved?.generation ?? dataWindow?.epoch ?? layoutRevision
         guard date != navigationDate || navigationRevision != revision else { return }
         navigationDate = date;navigationRevision = revision
+        resolvedNavigation=resolved;reportedNavigationGeneration=nil
+        if let resolved {
+            navigationMotion=ArchiveMotionSpring(value:cameraScroll.value,velocity:navigationMotion.velocity)
+            scrollOffset=CGFloat(cameraScroll.value)
+            navigationTarget=resolved.row
+            crestTarget=resolved.row;acrossTarget=0;hoveredID=resolved.recordID
+            if reducedMotion {advance(dt:1,immediate:true)} else {wake()}
+            return
+        }
         guard let date,let column = dayColumns.first(where:{ Calendar.current.isDate($0.day,inSameDayAs:date) }),!column.records.isEmpty else {
             navigationTarget = nil;return
         }
@@ -229,7 +249,7 @@ private final class ArchiveRecordControl: SCNNode {
             }
         }
         let depth = row+Double(column.origin+column.startIndex)-(column.lane == 0 ? 0:column.lane < 0 ? 3.5:1.5)
-        navigationMotion = ArchiveMotionSpring(value:Double(scrollOffset),velocity:navigationMotion.velocity)
+        navigationMotion = ArchiveMotionSpring(value:cameraScroll.value,velocity:navigationMotion.velocity)
         navigationTarget = max(Double(minScroll),min(Double(maxScroll),depth))
         crestTarget = depth;acrossTarget = Double(column.lane)
         hoveredID = records.min(by:{ abs($0.timestamp.timeIntervalSince(date)) < abs($1.timestamp.timeIntervalSince(date)) })?.id
@@ -238,7 +258,7 @@ private final class ArchiveRecordControl: SCNNode {
 
     /// Reconcile by record ID. Loading thumbnails or starring a record must
     /// never replace its moving root node or restart an extraction.
-    private func reconcile(frames:[MemoryFrame],images:[String:NSImage],placeView:Bool = true) {
+    private func reconcile(frames:[MemoryFrame],images:[String:NSImage],placeView:Bool = true,animate:Bool = true) {
         SCNTransaction.begin();SCNTransaction.disableActions = true
         defer {SCNTransaction.commit()}
         let rack:SCNNode
@@ -251,10 +271,11 @@ private final class ArchiveRecordControl: SCNNode {
         } ?? ArchiveDayLayout.columns(frames:frames,around:anchorDay ?? Date())
         let oldFrames=framesByID
         framesByID=Dictionary(uniqueKeysWithValues:dayColumns.flatMap(\.records).map {($0.id,$0)})
-        let rowCount=max(20,dayColumns.map {$0.origin+$0.totalCount}.max() ?? 0)
+        let rowCount=max(20,dayColumns.map {$0.origin+$0.totalCount}.max() ?? 0,
+            timelineNavigation ? Int(ceil(Double(scrollOffset)))+ArchiveDayLayout.renderedRows/2:0)
         minScroll=CGFloat(min(0,dayColumns.map(\.origin).min() ?? 0))
         maxScroll=max(17,CGFloat(dayColumns.map {Double($0.origin+$0.totalCount-1)-($0.lane == 0 ? 0:$0.lane < 0 ? 3.5:1.5)}.max() ?? 0))
-        scrollOffset=max(minScroll,min(scrollOffset,maxScroll))
+        if !timelineNavigation {scrollOffset=max(minScroll,min(scrollOffset,maxScroll))}
         let bucket=Int(floor(Double(scrollOffset)/8))*8
         virtualBucket=bucket
         var entries:[(String,MemoryFrame?,Int,Double)]=[]
@@ -289,7 +310,7 @@ private final class ArchiveRecordControl: SCNNode {
         let ids = Set(entries.map { $0.0 })
         footerLoader.retain(ids)
         for id in Array(nodes.keys) where !ids.contains(id) {
-            nodes.removeValue(forKey:id)?.removeFromParentNode();positions[id] = nil;slots[id] = nil;heights[id] = nil;depths[id] = nil;extractions[id] = nil;surfaceKeys[id] = nil;imageAspects[id] = nil;imageKeys[id] = nil;shapeKeys[id] = nil;informationAspects[id] = nil
+            nodes.removeValue(forKey:id)?.removeFromParentNode();positions[id] = nil;slots[id] = nil;heights[id] = nil;depths[id] = nil;laterals[id] = nil;extractions[id] = nil;surfaceKeys[id] = nil;imageAspects[id] = nil;imageKeys[id] = nil;shapeKeys[id] = nil;informationAspects[id] = nil
         }
         for (id,frame,lane,row) in entries {
             let depth = row-(lane == 0 ? 0:lane < 0 ? 3.5:1.5)
@@ -316,6 +337,7 @@ private final class ArchiveRecordControl: SCNNode {
                 let height = ArchiveRidgeProfile.height(lane:Double(lane),depth:depth,crest:crest.value,across:across.value)
                 heights[id] = ArchiveMotionSpring(value:height)
                 depths[id] = ArchiveMotionSpring(value:Double(slot.z))
+                laterals[id] = ArchiveMotionSpring(value:Double(slot.x))
                 surface.position = SCNVector3(slot.x,CGFloat(height),slot.z)
                 positions[id] = surface.position
             }
@@ -324,7 +346,7 @@ private final class ArchiveRecordControl: SCNNode {
         footerLoader.prioritize(selected:currentID,center:Double(scrollOffset))
         updateDayLabels()
         if placeView {placeCamera()}
-        if reducedMotion { advance(dt:1,immediate:true) } else { wake() }
+        if animate {if reducedMotion { advance(dt:1,immediate:true) } else { wake() }}
     }
 
     /// Image arrivals only replace the artwork texture. Glass geometry, labels,
@@ -504,7 +526,7 @@ private final class ArchiveRecordControl: SCNNode {
         if active {
             footerLoader.resume()
             for (id,node) in nodes {shape(node,id:id,progress:Float(extractions[id]?.spring.value ?? 0))}
-        } else {footerLoader.stop()}
+        } else {footerLoader.stop();resolvedNavigation=nil;navigationTarget=nil;navigationDate=nil}
         if active { wake() } else { stopMotion() }
     }
 
@@ -517,16 +539,26 @@ private final class ArchiveRecordControl: SCNNode {
         // Commit the actual camera with its picking transform before another
         // input event. Leaving this implicit can expose a stale native camera.
         SCNTransaction.begin();SCNTransaction.disableActions = true
-        defer {SCNTransaction.commit()}
+        var settledNavigation:ArchiveNavigationTarget?
+        defer {
+            SCNTransaction.commit()
+            if let settledNavigation {onNavigationSettled?(settledNavigation)}
+        }
         if immediate { crest = ArchiveMotionSpring(value:crestTarget);across = ArchiveMotionSpring(value:acrossTarget) }
         else { crest.step(to:crestTarget,frequency:8,dt:dt);across.step(to:acrossTarget,frequency:7,dt:dt) }
         var active = !crest.settled(at:crestTarget) || !across.settled(at:acrossTarget)
         if let navigationTarget,currentID == nil,extractions.isEmpty {
             if immediate { navigationMotion = ArchiveMotionSpring(value:navigationTarget) }
             else { navigationMotion.step(to:navigationTarget,frequency:10,dt:dt) }
-            scrollOffset = CGFloat(navigationMotion.value);horizontalOffset *= immediate ? 0:0.82
-            cameraScroll=ArchiveMotionSpring(value:Double(scrollOffset));cameraAcross=ArchiveMotionSpring(value:Double(horizontalOffset))
-            active = active || !navigationMotion.settled(at:navigationTarget)
+            scrollOffset = CGFloat(navigationMotion.value)
+            if immediate {cameraAcross=ArchiveMotionSpring(value:0)} else {cameraAcross.step(to:0,frequency:10,dt:dt)}
+            horizontalOffset=CGFloat(cameraAcross.value)
+            cameraScroll=ArchiveMotionSpring(value:Double(scrollOffset))
+            active = active || !navigationMotion.settled(at:navigationTarget) || !cameraAcross.settled(at:0)
+            if virtualBucket != Int(floor(Double(scrollOffset)/8))*8 {
+                reconcile(frames:retainedFrames,images:retainedImages,placeView:false,animate:false)
+                if let resolvedNavigation {onNavigationWindowDemand?(Double(scrollOffset),resolvedNavigation)}
+            }
         } else {
             if immediate || abs(cameraScroll.value-Double(scrollOffset)) > Double(ArchiveDayLayout.renderedRows)/2 {
                 cameraScroll=ArchiveMotionSpring(value:Double(scrollOffset));cameraAcross=ArchiveMotionSpring(value:Double(horizontalOffset))
@@ -548,12 +580,17 @@ private final class ArchiveRecordControl: SCNNode {
                 if immediate { depth = ArchiveMotionSpring(value:Double(slot.z)) }
                 else { depth.step(to:Double(slot.z),frequency:9,dt:dt) }
                 depths[id] = depth
-                let position = SCNVector3(slot.x,CGFloat(height.value),CGFloat(depth.value))
+                var lateral=laterals[id] ?? ArchiveMotionSpring(value:Double(node.position.x))
+                if immediate {lateral=ArchiveMotionSpring(value:Double(slot.x))}
+                else {lateral.step(to:Double(slot.x),frequency:9,dt:dt)}
+                laterals[id]=lateral
+                let position = SCNVector3(CGFloat(lateral.value),CGFloat(height.value),CGFloat(depth.value))
                 let previous = positions[id] ?? position
                 if abs(previous.x-position.x)+abs(previous.y-position.y)+abs(previous.z-position.z) > 0.00001 {
                     node.position = position;positions[id] = position;positionUpdateCount += 1
                 }
                 active = active || !depth.settled(at:Double(slot.z))
+                active = active || !lateral.settled(at:Double(slot.x))
                 active = active || !height.settled(at:wanted)
                 heights[id] = height
             }
@@ -599,6 +636,11 @@ private final class ArchiveRecordControl: SCNNode {
         if abs((cameraNode.camera?.focusDistance ?? 0)-focalDistance.value) > 0.00001 { cameraNode.camera?.focusDistance = focalDistance.value }
         if abs((cameraNode.camera?.fStop ?? 0)-CGFloat(aperture.value)) > 0.00001 { cameraNode.camera?.fStop = CGFloat(aperture.value) }
         active = active || !focalDistance.settled(at:desiredDistance) || !aperture.settled(at:desiredAperture)
+        if !active,let resolvedNavigation,reportedNavigationGeneration != resolvedNavigation.generation,
+           currentID == nil,extractions.isEmpty,navigationTarget != nil,
+           resolvedNavigation.recordID.map({nodes[$0] != nil}) ?? true {
+            reportedNavigationGeneration=resolvedNavigation.generation;settledNavigation=resolvedNavigation
+        }
         onPresentationChanged?()
         if !active { stopMotion() }
     }
@@ -826,6 +868,14 @@ final class ArchiveSceneView: SCNView {
         textOverlay.setRegions(selectedRegions.isEmpty ? frame.regions:selectedRegions)
         textOverlay.isHidden = false;CATransaction.commit()
     }
+    func selectedImageRectInWindow()->CGRect? {
+        guard let (_,art,rect)=archive?.selectionSurface() else {return nil}
+        let points=[CGPoint(x:rect.minX,y:rect.minY),CGPoint(x:rect.maxX,y:rect.minY),CGPoint(x:rect.minX,y:rect.maxY),CGPoint(x:rect.maxX,y:rect.maxY)]
+            .map {projectPoint(art.convertPosition(SCNVector3($0.x,$0.y,0),to:nil))}
+        let xs=points.map(\.x),ys=points.map(\.y)
+        let projected=CGRect(x:xs.min()!,y:ys.min()!,width:xs.max()!-xs.min()!,height:ys.max()!-ys.min()!)
+        return convert(projected,to:nil)
+    }
     var onSelect: ((String?)->Void)?
     var onHover: ((String?)->Void)?
     var onPointer: ((SCNVector3,SCNVector3,String?)->Void)?
@@ -933,6 +983,10 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
     var onViewportChange:((ArchiveViewportRecords)->Void)? = nil
     var window:ArchiveWindow? = nil
     var onWindowDemand:((Double)->Void)? = nil
+    var navigation:ArchiveNavigationTarget? = nil
+    var onNavigationSettled:((ArchiveNavigationTarget)->Void)? = nil
+    var onNavigationWindowDemand:((Double,ArchiveNavigationTarget)->Void)? = nil
+    var onRewindOrigin:((String,CGRect?)->Void)? = nil
     func makeCoordinator()->ArchiveGlassScene { ArchiveGlassScene() }
     func makeNSView(context:Context)->SCNView {
         let view = ArchiveSceneView(frame:.zero)
@@ -947,11 +1001,14 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
         view.rendersContinuously = false;view.isPlaying = false
         view.onViewportChange = onViewportChange
         context.coordinator.onWindowDemand=onWindowDemand
+        context.coordinator.onNavigationSettled=onNavigationSettled
+        context.coordinator.onNavigationWindowDemand=onNavigationWindowDemand
         view.onSelect = onSelect
         view.onHover = { [weak coordinator = context.coordinator] id in coordinator?.hover(id);onHoverRecord?(id) }
         view.onPointer = { [weak coordinator = context.coordinator] near,far,id in coordinator?.pointer(rayNear:near,rayFar:far,recordID:id) }
-        view.onAction = { [weak coordinator = context.coordinator] hit in
+        view.onAction = { [weak coordinator = context.coordinator,weak view] hit in
             guard let (id,action) = coordinator?.action(at:hit) else { return false }
+            if action == "rewind",let onRewindOrigin {onRewindOrigin(id,view?.selectedImageRectInWindow());return true}
             onRecordAction(id,action);return true
         }
         view.onScroll = { [weak coordinator = context.coordinator] delta,horizontal,precise in coordinator?.scroll(by:delta,horizontal:horizontal,precise:precise) }
@@ -963,6 +1020,8 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
     }
     func updateNSView(_ view:SCNView,context:Context) {
         context.coordinator.onWindowDemand=onWindowDemand
+        context.coordinator.onNavigationSettled=onNavigationSettled
+        context.coordinator.onNavigationWindowDemand=onNavigationWindowDemand
         context.coordinator.setActive(active)
         view.isHidden = !active
         guard active else { (view as? ArchiveSceneView)?.cancelPendingInteraction();return }
@@ -970,11 +1029,12 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
         (view as? ArchiveSceneView)?.onViewportChange = onViewportChange
         (view as? ArchiveSceneView)?.selectedRegions = regions
         (view as? ArchiveSceneView)?.onHover = { [weak coordinator = context.coordinator] id in coordinator?.hover(id);onHoverRecord?(id) }
-        (view as? ArchiveSceneView)?.onAction = { [weak coordinator = context.coordinator] hit in
+        (view as? ArchiveSceneView)?.onAction = { [weak coordinator = context.coordinator,weak view] hit in
             guard let (id,action) = coordinator?.action(at:hit) else { return false }
+            if action == "rewind",let onRewindOrigin {onRewindOrigin(id,(view as? ArchiveSceneView)?.selectedImageRectInWindow());return true}
             onRecordAction(id,action);return true
         }
-        context.coordinator.update(frames:frames,images:images,appearance:appearance,selected:selected,size:size,reduced:reduced,day:day,timelinePosition:timelinePosition,window:window)
+        context.coordinator.update(frames:frames,images:images,appearance:appearance,selected:selected,size:size,reduced:reduced,day:day,timelinePosition:timelinePosition,window:window,navigation:navigation)
         (view as? ArchiveSceneView)?.refreshViewport()
     }
 }

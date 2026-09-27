@@ -73,6 +73,7 @@ struct ArchiveStackView: View {
     @ObservedObject var model: AppModel
     @Binding var focusedID: String?
     var active:Bool = true
+    var onRewind:((MemoryFrame,NSImage?,CGRect?)->Void)?
     @StateObject private var imageLoader = ArchiveImageLoader()
     private var images:[String:NSImage] { imageLoader.images }
     @State private var recognizedRegions:[String:[TextRegion]] = [:]
@@ -82,7 +83,13 @@ struct ArchiveStackView: View {
         GeometryReader { geo in
             ZStack {
                 ArchiveGlassRenderer(frames:frames,images:images,appearance:model.settings.appearance,
-                    selected:focusedID,day:model.archiveDay,timelinePosition:model.archiveTimelinePosition,regions:focusedID.flatMap { recognizedRegions[$0] } ?? [],size:geo.size,reduced:reduceMotion,active:active,onSelect:toggle,onRecordAction:recordAction,onHoverRecord:{ imageLoader.hover(focusedID == nil ? $0:nil) },onViewportChange:{ imageLoader.updateViewport($0) },window:model.archiveWindow,onWindowDemand:{model.requestArchiveWindow(at:$0)})
+                    selected:focusedID,day:model.archiveDay,timelinePosition:model.archiveNavigationTarget?.date,regions:focusedID.flatMap { recognizedRegions[$0] } ?? [],size:geo.size,reduced:reduceMotion,active:active,onSelect:toggle,onRecordAction:recordAction,onHoverRecord:{ imageLoader.hover(focusedID == nil ? $0:nil) },onViewportChange:{ imageLoader.updateViewport($0) },window:model.archiveWindow,onWindowDemand:{model.requestArchiveWindow(at:$0)},navigation:model.archiveNavigationTarget,onNavigationSettled:{target in
+                        Task { @MainActor in model.archiveNavigationDidSettle(target) }
+                    },onNavigationWindowDemand:{row,target in
+                        Task { @MainActor in
+                            model.requestArchiveNavigationWindow(at:row,target:target)
+                        }
+                    },onRewindOrigin:rewind)
                     .accessibilityRepresentation {
                         VStack {
                             ForEach(frames) { frame in
@@ -154,7 +161,7 @@ struct ArchiveStackView: View {
             .onAppear { requestImages() }
             .onChange(of:frames.map(\.imagePath)) { _,_ in requestImages() }
             .onChange(of:active) { _,isActive in
-                if isActive { requestImages() } else { imageLoader.stop() }
+                if isActive { requestImages() } else { imageLoader.stop();model.cancelArchiveExtraction() }
             }
             .onDisappear { imageLoader.stop() }
         }
@@ -173,9 +180,13 @@ struct ArchiveStackView: View {
         switch action {
         case "star":model.star(frame)
         case "copy":model.copy(frame.text.isEmpty ? (recognizedRegions[id] ?? frame.regions).map(\.text).joined(separator:"\n"):frame.text)
-        case "rewind":model.select(frame)
+        case "rewind":rewind(id,nil)
         case "close":model.cancelArchiveExtraction();focusedID = nil
         default:break
         }
+    }
+    private func rewind(_ id:String,_ rect:CGRect?) {
+        guard let frame=frames.first(where:{$0.id == id}) else {return}
+        if let onRewind {onRewind(frame,images[frame.imagePath],rect)} else {model.select(frame)}
     }
 }

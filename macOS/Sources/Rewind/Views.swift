@@ -40,6 +40,7 @@ struct RootView: View {
     @State private var searchFocused = false
     @State private var searchEngaged = false
     @State private var archiveFocusedID: String?
+    @State private var memorySource:MemoryImageTransitionSource?
     @Namespace private var searchGlassNamespace
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var expanded: Bool { model.searchPresented || model.askOpen || model.inspectorOpen }
@@ -86,20 +87,19 @@ struct RootView: View {
                     } else { model.dismissTimeline() }
                 }.ignoresSafeArea()
                 if model.settings.glassArchiveEnabled {
-                ArchiveStackView(model:model,focusedID:$archiveFocusedID,active:model.interfaceVisible && !expanded && model.selected == nil)
+                ArchiveStackView(model:model,focusedID:$archiveFocusedID,active:model.interfaceVisible && !expanded && model.selected == nil,onRewind:openMemory)
                     .opacity(!expanded && model.selected == nil ? 1:0)
                     .scaleEffect(expanded || model.selected != nil ? 0.96:1)
                     .allowsHitTesting(!expanded && model.selected == nil)
                     .accessibilityHidden(expanded || model.selected != nil)
                 }
-                if !expanded,let frame = model.selected {
-                    history(frame, size:geo.size).transition(.opacity)
+                if !model.searchPresented,!model.askOpen,let frame=model.selected {
+                    MemoryDetailStage(model:model,frame:frame,screen:geo.size,topInset:top,source:memorySource,onOpen:openInspector)
+                        .transition(.identity)
                 }
-                if model.searchPresented { results.padding(.top,top+120).padding(.bottom,28) }
+                if model.searchPresented { results.padding(.top,top+120).padding(.bottom,28).transition(.identity) }
                 else if model.askOpen { AskView(model:model).padding(.horizontal,60).padding(.top,top+118).padding(.bottom,30) }
-                else if model.inspectorOpen, let frame = model.selected {
-                    DetailView(model:model,frame:frame).padding(.horizontal,40).padding(.top,top+110).padding(.bottom,32)
-                } else {
+                else if !model.inspectorOpen {
                     if model.selected != nil { historyActions.position(x:geo.size.width/2,y:top+108) }
                     if model.total == 0 { recordingPrompt.position(x:geo.size.width/2,y:geo.size.height*0.425+106) }
                     else if !model.settings.glassArchiveEnabled,model.timelineCursor != nil,model.selected == nil {
@@ -147,6 +147,7 @@ struct RootView: View {
         .preferredColorScheme(model.settings.glassArchiveEnabled ? ArchiveTone.colorScheme(model.settings.appearance):nil)
         .onChange(of:model.timelineDragging) { _,dragging in if dragging { archiveFocusedID = nil } }
         .onChange(of:model.archiveTimelinePosition) { _,_ in archiveFocusedID = nil }
+        .onChange(of:model.selected?.id) {_,id in if id == nil {memorySource=nil}}
         .onChange(of:model.settings.glassArchiveEnabled) { _,enabled in
             archiveFocusedID = nil;searchFocused = false;searchEngaged = false
             model.returnToDesktop()
@@ -168,7 +169,7 @@ struct RootView: View {
         if archiveFocusedID != nil,!expanded,model.selected == nil {
             withAnimation(reduceMotion ? nil:.spring(response:0.76,dampingFraction:0.86)) { model.cancelArchiveExtraction();archiveFocusedID = nil }
         }
-        else if model.inspectorOpen { model.inspectorOpen = false }
+        else if model.inspectorOpen { model.stopVideo();model.inspectorOpen = false }
         else if expanded || model.selected != nil { model.returnToDesktop() }
         else if !wasSearching { model.hideOverlay() }
     }
@@ -286,8 +287,13 @@ struct RootView: View {
             Text("\(model.settings.shortcuts.open.label) to rewind · Screens stay on this Mac").font(.system(size:11)).foregroundStyle(.secondary)
         }
     }
-    private func history(_ frame:MemoryFrame,size:CGSize) -> some View {
-        HistoryMemoryPreview(url:model.store.root.appendingPathComponent(frame.imagePath),regions:frame.regions,screen:size,topInset:model.desktopInsets.top)
+    private func openMemory(_ frame:MemoryFrame,_ image:NSImage?,_ rect:CGRect?) {
+        memorySource=image.flatMap {image in rect.map {MemoryImageTransitionSource(id:frame.id,image:image,rectInWindow:$0)}}
+        model.select(frame)
+    }
+    private func openInspector() {
+        guard model.selected != nil else {return}
+        model.meetingView=false;model.inspectorOpen=true;searchFocused=false
     }
     private var historyActions: some View {
         HStack(spacing:6) {
@@ -300,7 +306,7 @@ struct RootView: View {
                 Divider().frame(height:16)
                 Button {model.star(frame)} label: {Image(systemName:frame.starred ? "star.fill":"star")}.help("Star this memory")
                 Button {model.copy(frame.text)} label: {Image(systemName:"doc.on.doc")}.help("Copy all recognized text")
-                Button {model.inspectorOpen = true;searchFocused = false} label: {Image(systemName:"sidebar.right")}.help("Recording, meeting and transcript")
+                Button(action:openInspector) {Image(systemName:"sidebar.right")}.help("Recording, meeting and transcript")
                 if !model.query.isEmpty {Button {model.showSearch()} label: {Image(systemName:"square.grid.2x2")}.help("Back to search results")}
             }
         }.foregroundStyle(Color.overlayControl).symbolRenderingMode(.monochrome)
@@ -331,7 +337,7 @@ struct RootView: View {
             } else {
                 ScrollView(showsIndicators:false) {
                     LazyVGrid(columns:Array(repeating:GridItem(.flexible(),spacing:26),count:3),alignment:.leading,spacing:28) {
-                        ForEach(model.frames) { frame in MemoryCard(model:model,frame:frame) }
+                        ForEach(model.frames) { frame in MemoryCard(model:model,frame:frame,onOpen:openMemory) }
                     }.padding(.horizontal,42).padding(.top,6).padding(.bottom,24)
                     if model.searchHasMore {Button(model.searchLoading ? "Loading…":"Load more memories") {model.loadMore()}.disabled(model.searchLoading).padding()}
                 }.scrollIndicators(.never).modifier(ContinuousResultsBackground(fadesVerticalEdges:true)).id("\(model.query)|\(model.appFilter ?? "")|\(model.starredOnly)|\(model.since?.timeIntervalSince1970 ?? 0)")
@@ -353,8 +359,10 @@ struct RootView: View {
 struct MemoryCard: View {
     @ObservedObject var model: AppModel
     let frame: MemoryFrame
+    var onOpen:((MemoryFrame,NSImage?,CGRect?)->Void)?
     @State private var hovered = false
     @State private var thumbnail: NSImage?
+    @State private var imageAnchor=MemoryImageAnchorView()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private func screenshot(size:CGSize) -> some View {
         let plan = MemorySearchPlan(model.query)
@@ -376,10 +384,12 @@ struct MemoryCard: View {
         }.clipped().clipShape(RoundedRectangle(cornerRadius:19))
     }
     var body: some View {
-        Button {model.select(frame)} label: {
+        Button {
+            if let onOpen {onOpen(frame,thumbnail,thumbnail.map {imageAnchor.imageRect($0)})} else {model.select(frame)}
+        } label: {
             VStack(alignment:.leading,spacing:12) {
                 GeometryReader { geo in
-                    screenshot(size:geo.size)
+                    screenshot(size:geo.size).background(MemoryImageAnchor(view:imageAnchor))
                 }.aspectRatio(1.6,contentMode:.fit).background(.black.opacity(0.08),in:RoundedRectangle(cornerRadius:19))
                 HStack(alignment:.center,spacing:10) {
                     AppBadge(name:frame.appName,bundleID:frame.bundleID,size:29)
@@ -406,23 +416,5 @@ struct MemoryCard: View {
                 if let source = frame.sourceURL,let url = URL(string:source),["https","http"].contains(url.scheme?.lowercased() ?? "") {Button("Open source") {NSWorkspace.shared.open(url)}}
                 if frame.deletedAt == nil {Button("Move to Trash") {model.delete(frame)}} else {Button("Restore") {model.restore(frame)}}
             }
-    }
-}
-
-private struct HistoryMemoryPreview: View {
-    let url:URL
-    let regions:[TextRegion]
-    let screen:CGSize
-    let topInset:CGFloat
-    @State private var imageSize:CGSize?
-    var body: some View {
-        let rect = HistoryPreviewGeometry.rect(screen:screen,image:imageSize ?? screen,topInset:topInset)
-        SelectableMemoryImage(url:url,regions:regions,maxPixels:2048,onImageSize:{ size in if imageSize != size { imageSize = size } })
-            .frame(width:rect.width,height:rect.height)
-            .background(.black.opacity(0.08),in:RoundedRectangle(cornerRadius:22))
-            .clipShape(RoundedRectangle(cornerRadius:22))
-            .overlay(RoundedRectangle(cornerRadius:22).strokeBorder(.white.opacity(0.7),lineWidth:1.5).allowsHitTesting(false))
-            .shadow(color:.black.opacity(0.26),radius:28,y:12)
-            .position(x:rect.midX,y:rect.midY)
     }
 }

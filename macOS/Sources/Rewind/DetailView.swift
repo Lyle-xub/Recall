@@ -4,6 +4,9 @@ import AVKit
 struct DetailView: View {
     @ObservedObject var model: AppModel
     let frame: MemoryFrame
+    var showsPoster=true
+    var imageAnchor:MemoryImageAnchorView?
+    var onImageBounds:((CGRect)->Void)?
     @State private var selectedLine = ""
     @State private var showOriginalTracks = false
     private var visibleLines: [TranscriptLine] { showOriginalTracks ? model.originalTranscriptLines : model.lines }
@@ -15,17 +18,24 @@ struct DetailView: View {
         HStack(alignment:.top,spacing:25) {
             VStack(spacing:11) {
                 ZStack(alignment:.bottomLeading) {
-                    if let player = model.player { RecordingPlayerView(player:player) }
-                    else {
+                    // Keep the same poster mounted while AVKit decodes and fits
+                    // the sought frame. A completed seek alone can still be black.
+                    if showsPoster {
                         SelectableMemoryImage(url:model.store.root.appendingPathComponent(model.meetingView ? frame.meetingImagePath ?? frame.imagePath:frame.imagePath),regions:regions)
+                            .allowsHitTesting(!model.videoReady)
+                    } else {Color.clear.allowsHitTesting(false)}
+                    if let player = model.player {
+                        RecordingPlayerView(player:player,reducedMotion:reduceMotion,cornerRadius:showsPoster ? 22:14,
+                            onReady:model.videoDidBecomeReady,onFailure:model.videoDidFail)
                     }
 
                     if let meeting = frame.meetingImagePath {
-                        Button {model.meetingView.toggle();model.player?.pause();model.player = nil} label: {
+                        Button {model.stopVideo();model.meetingView.toggle()} label: {
                             MeetingThumbnail(url:model.store.root.appendingPathComponent(model.meetingView ? frame.imagePath:meeting))
                         }.buttonStyle(ComfortableButtonStyle()).padding(12).help("Switch between meeting and desktop")
                     }
                 }.frame(maxWidth:.infinity,maxHeight:.infinity)
+                    .background {if let imageAnchor {MemoryImageAnchor(view:imageAnchor,onRect:onImageBounds)}}
                 HStack(spacing:14) {
                     AppBadge(name:frame.appName,size:20); Text(frame.title).lineLimit(1).font(.system(size:12,weight:.medium));Spacer()
                     Button {model.showText.toggle()} label: {Image(systemName:"text.viewfinder")}.help("Show selectable text").popover(isPresented:$model.showText) {ScrollView(showsIndicators:false) {Text(frame.text).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading).padding(20)}.scrollIndicators(.never).frame(width:530,height:400)}
@@ -128,8 +138,14 @@ struct DetailView: View {
 /// resolve AVPlayerView superclass metadata on newer macOS SDK/runtime pairs.
 struct RecordingPlayerView:NSViewRepresentable {
     let player:AVPlayer
+    var reducedMotion=false
+    var cornerRadius:CGFloat=22
+    var onReady:((AVPlayer)->Void)?
+    var onFailure:((AVPlayer,String)->Void)?
     func makeNSView(context:Context)->RoundedRecordingPlayer { RoundedRecordingPlayer() }
-    func updateNSView(_ view:RoundedRecordingPlayer,context:Context) { view.setPlayer(player) }
+    func updateNSView(_ view:RoundedRecordingPlayer,context:Context) {
+        view.reducedMotion=reducedMotion;view.cornerRadius=cornerRadius;view.onReady=onReady;view.onFailure=onFailure;view.setPlayer(player)
+    }
     static func dismantleNSView(_ view:RoundedRecordingPlayer,coordinator:()) { view.setPlayer(nil) }
 }
 
@@ -138,22 +154,51 @@ struct RecordingPlayerView:NSViewRepresentable {
 final class RoundedRecordingPlayer:NSView {
     let video = AVPlayerView()
     private var sizeObservation:NSKeyValueObservation?
+    private var readyObservation:NSKeyValueObservation?
+    private var statusObservation:NSKeyValueObservation?
+    private(set) var firstFrameVisible=false
+    var reducedMotion=false
+    var cornerRadius:CGFloat=22 {didSet {if oldValue != cornerRadius {needsLayout=true}}}
+    var onReady:((AVPlayer)->Void)?
+    var onFailure:((AVPlayer,String)->Void)?
     private let videoMask = CAShapeLayer()
     override init(frame:NSRect) {
         super.init(frame:frame);wantsLayer = true
         video.controlsStyle = .floating;video.videoGravity = .resizeAspect;video.wantsLayer = true
         video.layer?.masksToBounds = true;video.layer?.mask = videoMask
-        addSubview(video)
+        video.alphaValue=0;addSubview(video)
     }
     required init?(coder:NSCoder) { fatalError("init(coder:) has not been implemented") }
     override var wantsDefaultClipping:Bool { true }
     func setPlayer(_ player:AVPlayer?) {
         guard video.player !== player else { return }
-        video.player?.pause();sizeObservation = nil;video.player = player
+        video.player?.pause();sizeObservation=nil;readyObservation=nil;statusObservation=nil
+        firstFrameVisible=false;video.alphaValue=0;video.player=player
         sizeObservation = player?.currentItem?.observe(\.presentationSize,options:[.initial,.new]) { [weak self] _,_ in
-            DispatchQueue.main.async { self?.needsLayout = true }
+            DispatchQueue.main.async { self?.needsLayout = true;self?.revealIfReady(player) }
+        }
+        readyObservation=video.observe(\.isReadyForDisplay,options:[.initial,.new]) { [weak self] _,_ in
+            DispatchQueue.main.async {self?.revealIfReady(player)}
+        }
+        statusObservation=player?.currentItem?.observe(\.status,options:[.initial,.new]) { [weak self] _,_ in
+            DispatchQueue.main.async {self?.revealIfReady(player)}
         }
         needsLayout = true
+    }
+    private func revealIfReady(_ candidate:AVPlayer?) {
+        guard let candidate,video.player === candidate else {return}
+        if candidate.currentItem?.status == .failed {
+            onFailure?(candidate,candidate.currentItem?.error?.localizedDescription ?? "The recording could not be played.");return
+        }
+        let size=candidate.currentItem?.presentationSize ?? .zero
+        guard !firstFrameVisible,video.isReadyForDisplay,size.width > 0,size.height > 0 else {return}
+        needsLayout=true;layoutSubtreeIfNeeded()
+        firstFrameVisible=true
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration=reducedMotion ? 0:0.12
+            video.animator().alphaValue=1
+        }
+        onReady?(candidate)
     }
     override func layout() {
         super.layout()
@@ -165,7 +210,7 @@ final class RoundedRecordingPlayer:NSView {
         } else { video.frame = bounds }
         CATransaction.begin();CATransaction.setDisableActions(true)
         videoMask.frame = video.bounds
-        videoMask.path = CGPath(roundedRect:video.bounds,cornerWidth:22,cornerHeight:22,transform:nil)
+        videoMask.path = CGPath(roundedRect:video.bounds,cornerWidth:cornerRadius,cornerHeight:cornerRadius,transform:nil)
         CATransaction.commit()
     }
 }

@@ -223,15 +223,37 @@ struct SelectableMemoryImage: NSViewRepresentable {
     static func dismantleNSView(_ view: LiveTextImageView, coordinator: ()) { view.cancelAnalysis() }
 }
 
+@MainActor private final class OpenableMemoryPicture:NSImageView {
+    var onOpen:(()->Void)?
+    override var acceptsFirstResponder:Bool {onOpen != nil}
+    override func accessibilityPerformPress()->Bool {
+        guard let onOpen else {return super.accessibilityPerformPress()}
+        onOpen();return true
+    }
+    override func keyDown(with event:NSEvent) {
+        if [36,49].contains(event.keyCode),let onOpen {onOpen()} else {super.keyDown(with:event)}
+    }
+}
+
 @MainActor final class LiveTextImageView: NSView {
     private let content = NSView()
-    private let picture = NSImageView()
+    private let picture = OpenableMemoryPicture()
     private let indexedText = IndexedTextOverlay()
     private var task: Task<Void, Never>?
     private var loadedURL: URL?
     private var displayedURL:URL?
+    private var decodedURL:URL?
     private var latestRegions:[TextRegion] = []
     var onImageSize: ((CGSize)->Void)?
+    var onOpen:(()->Void)? {didSet {
+        picture.onOpen=onOpen
+        picture.setAccessibilityRole(onOpen == nil ? .image:.button)
+        picture.setAccessibilityLabel(onOpen == nil ? "Recorded screen. Drag across text to select, then press Command C to copy.":"Open recording details. Recorded screen.")
+        picture.setAccessibilityHelp(onOpen == nil ? nil:"Press Return or Space to open recording details. Drag recognized text to select it.")
+        picture.focusRingType=onOpen == nil ? .none:.exterior
+    }}
+    private var clickOrigin:NSPoint?
+    private var clickDragged=false
     var cornerRadius:CGFloat = 22 { didSet { if oldValue != cornerRadius { needsLayout = true } } }
     private final class Recognition { let regions:[TextRegion];init(_ regions:[TextRegion]) { self.regions = regions } }
     private static let analyses = NSCache<NSURL,Recognition>()
@@ -250,6 +272,30 @@ struct SelectableMemoryImage: NSViewRepresentable {
         Self.analyses.countLimit = 12
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func hitTest(_ point:NSPoint)->NSView? {
+        let hit=super.hitTest(point)
+        guard onOpen != nil,let hit,hit !== indexedText else {return hit}
+        return content.frame.contains(convert(point,from:superview)) ? self:hit
+    }
+    override func mouseDown(with event:NSEvent) {clickOrigin=event.locationInWindow;clickDragged=false}
+    override func mouseDragged(with event:NSEvent) {
+        if let clickOrigin,hypot(event.locationInWindow.x-clickOrigin.x,event.locationInWindow.y-clickOrigin.y)>4 {clickDragged=true}
+    }
+    override func mouseUp(with event:NSEvent) {
+        defer {clickOrigin=nil;clickDragged=false}
+        guard clickOrigin != nil,!clickDragged,event.clickCount == 1,event.modifierFlags.intersection([.command,.shift,.option,.control]).isEmpty else {return}
+        onOpen?()
+    }
+    override func accessibilityPerformPress()->Bool {
+        guard let onOpen else {return super.accessibilityPerformPress()}
+        onOpen();return true
+    }
+    /// Borrow the already visible thumbnail for the first animation frame;
+    /// the normal cancellable pipeline still upgrades it off the main thread.
+    func seed(_ image:NSImage,for url:URL) {
+        guard displayedURL != url else {return}
+        picture.image=image;displayedURL=url;needsLayout=true
+    }
     override func layout() {
         super.layout()
         // Round the actual fitted pixels, not the letterboxed SwiftUI view.
@@ -283,7 +329,7 @@ struct SelectableMemoryImage: NSViewRepresentable {
             guard !Task.isCancelled,let self,self.loadedURL == url else { return }
             guard let pixels = decoded else { picture.image = nil;needsLayout = true;return }
             let image = NSImage(cgImage:pixels,size:NSSize(width:pixels.width,height:pixels.height))
-            picture.image = image;displayedURL = url;needsLayout = true;onImageSize?(image.size)
+            picture.image = image;displayedURL = url;decodedURL=url;needsLayout = true;onImageSize?(image.size)
             indexedText.imageSize = image.size
             indexedText.setRegions(latestRegions);indexedText.isHidden = latestRegions.isEmpty
             if !latestRegions.isEmpty { return }
@@ -305,7 +351,10 @@ struct SelectableMemoryImage: NSViewRepresentable {
             } catch { /* Indexed OCR remains available in the inspector. */ }
         }
     }
-    func cancelAnalysis() { task?.cancel() }
+    func cancelAnalysis() {
+        task?.cancel();task=nil;clickOrigin=nil;clickDragged=false
+        if decodedURL != loadedURL {loadedURL=nil}
+    }
 }
 
 @MainActor enum AppIconCache {

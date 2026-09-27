@@ -42,17 +42,6 @@ struct UsageReport: Sendable {
         }
         var days = buckets(week,component:.day), hours = buckets(day,component:.hour)
         var identities:[String:AppUsageIdentity] = [:], totals:[String:Double] = [:]
-        // A sweep resolves overlaps once: the latest foreground transition wins.
-        // An unavailable interval also masks older records rather than extending them.
-        let valid = intervals.filter { $0.end > $0.start && $0.start < min(now,week.end) && $0.end > week.start }
-        struct Edge { let date:Date; let index:Int; let entering:Bool }
-        var edges:[Edge] = []
-        for (index,interval) in valid.enumerated() {
-            edges.append(Edge(date:max(interval.start,week.start),index:index,entering:true))
-            edges.append(Edge(date:min(interval.end,now,week.end),index:index,entering:false))
-        }
-        edges.sort { $0.date < $1.date }
-        var active = Set<Int>(), previous:Date?, winner:Int?, cursor = 0
         func accumulate(_ start:Date,_ end:Date,_ app:AppUsageIdentity) {
             guard end > start,app.kind != .unavailable else { return }
             let key = Self.key(app); identities[key] = app
@@ -65,20 +54,8 @@ struct UsageReport: Sendable {
                 if duration > 0 { hours[i].apps[key,default:0] += duration; totals[key,default:0] += duration }
             }
         }
-        while cursor < edges.count {
-            let point = edges[cursor].date
-            if let previous,let winner { accumulate(previous,point,valid[winner].app) }
-            var entering:[Int] = [], leaving:[Int] = []
-            while cursor < edges.count,edges[cursor].date == point {
-                if edges[cursor].entering { entering.append(edges[cursor].index) } else { leaving.append(edges[cursor].index) }
-                cursor += 1
-            }
-            for index in leaving { active.remove(index) }; for index in entering { active.insert(index) }
-            winner = active.max {
-                let a = valid[$0],b = valid[$1]
-                return a.start == b.start ? a.id < b.id:a.start < b.start
-            }
-            previous = point
+        for interval in effectiveActivity(intervals,in:week,now:now) {
+            accumulate(interval.start,interval.end,interval.app)
         }
         var apps:[UsageAppTotal] = []
         for (key,seconds) in totals {
@@ -90,10 +67,61 @@ struct UsageReport: Sendable {
         }
         return Self(day:day,week:week,days:days,hours:hours,apps:apps,identities:identities,firstRecorded:firstRecorded,updated:now)
     }
+    /// Shared with calendar markers so an unavailable interval masks earlier activity
+    /// in exactly the same way as the report. Ranges are half open at midnight.
+    private static func effectiveActivity(_ intervals:[AppUsageInterval],in range:DateInterval,now:Date) -> [AppUsageInterval] {
+        let end = min(now,range.end)
+        guard end > range.start else { return [] }
+        let valid = intervals.filter { $0.end > $0.start && $0.start < end && $0.end > range.start }
+        struct Edge { let date:Date; let index:Int; let entering:Bool }
+        var edges:[Edge] = []
+        for (index,interval) in valid.enumerated() {
+            edges.append(Edge(date:max(interval.start,range.start),index:index,entering:true))
+            edges.append(Edge(date:min(interval.end,end),index:index,entering:false))
+        }
+        edges.sort { $0.date < $1.date }
+        var active = Set<Int>(),previous:Date?,winner:Int?,cursor = 0,result:[AppUsageInterval] = []
+        while cursor < edges.count {
+            let point = edges[cursor].date
+            if let previous,let winner,point > previous,valid[winner].app.kind != .unavailable {
+                result.append(AppUsageInterval(id:valid[winner].id,app:valid[winner].app,start:previous,end:point))
+            }
+            var entering:[Int] = [],leaving:[Int] = []
+            while cursor < edges.count,edges[cursor].date == point {
+                if edges[cursor].entering { entering.append(edges[cursor].index) } else { leaving.append(edges[cursor].index) }
+                cursor += 1
+            }
+            for index in leaving { active.remove(index) }; for index in entering { active.insert(index) }
+            winner = active.max {
+                let a = valid[$0],b = valid[$1]
+                return a.start == b.start ? a.id < b.id:a.start < b.start
+            }
+            previous = point
+        }
+        return result
+    }
+    static func recordedDays(_ intervals:[AppUsageInterval],in range:DateInterval,now:Date = Date(),calendar:Calendar = .current) -> Set<Date> {
+        var days = Set<Date>()
+        for interval in effectiveActivity(intervals,in:range,now:now) {
+            var day = calendar.startOfDay(for:interval.start)
+            while day < interval.end {
+                days.insert(day)
+                guard let next = calendar.date(byAdding:.day,value:1,to:day),next > day else { break }
+                day = next
+            }
+        }
+        return days
+    }
     static func load(root:URL,date:Date,now:Date = Date(),calendar:Calendar = .current) throws -> Self {
+        try Task.checkCancellation()
         let store = try MemoryStore(root:root,readOnly:true)
         let range = calendar.dateInterval(of:.weekOfYear,for:date)!
-        return build(try store.usage(in:range),date:date,now:now,calendar:calendar,firstRecorded:try store.firstUsageDate())
+        let intervals = try store.usage(in:range)
+        try Task.checkCancellation()
+        let firstRecorded = try store.firstUsageDate()
+        let report = build(intervals,date:date,now:now,calendar:calendar,firstRecorded:firstRecorded)
+        try Task.checkCancellation()
+        return report
     }
     static func duration(_ seconds:Double) -> String {
         let minutes = Int(max(0,seconds)/60)

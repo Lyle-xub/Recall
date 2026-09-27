@@ -1,48 +1,16 @@
 import SwiftUI
 import Charts
 
-private enum UsageCategory:String,CaseIterable {
-    case productivity = "Productivity", communication = "Communication", creativity = "Creativity"
-    case tools = "Utilities", entertainment = "Entertainment", education = "Education", other = "Other", privateActivity = "Private activity"
-    var color:Color { switch self {
-        case .productivity: Color(red:0.25,green:0.57,blue:0.94)
-        case .communication: Color(red:0.25,green:0.74,blue:0.76)
-        case .creativity: Color(red:0.64,green:0.53,blue:0.85)
-        case .tools: Color(red:0.43,green:0.65,blue:0.89)
-        case .entertainment: Color(red:0.97,green:0.65,blue:0.40)
-        case .education: Color(red:0.49,green:0.75,blue:0.57)
-        case .other: Color(red:0.62,green:0.68,blue:0.75)
-        case .privateActivity: Color(red:0.73,green:0.74,blue:0.77)
-    } }
-    @MainActor private static var cache:[String:Self] = [:]
-    @MainActor static func resolve(_ app:AppUsageIdentity) -> Self {
-        if app.kind == .excluded { return .privateActivity }
-        if let cached = cache[app.bundleID] { return cached }
-        let category = NSWorkspace.shared.urlForApplication(withBundleIdentifier:app.bundleID)
-            .flatMap { Bundle(url:$0)?.object(forInfoDictionaryKey:"LSApplicationCategoryType") as? String } ?? ""
-        let value:Self
-        if category.contains("productivity") || category.contains("business") || category.contains("finance") { value = .productivity }
-        else if category.contains("social") { value = .communication }
-        else if ["design","photography","music","video","graphics"].contains(where:category.contains) { value = .creativity }
-        else if category.contains("utilities") || category.contains("developer") { value = .tools }
-        else if category.contains("games") || category.contains("entertainment") { value = .entertainment }
-        else if category.contains("education") || category.contains("reference") { value = .education }
-        else { value = .other }
-        cache[app.bundleID] = value; return value
-    }
-}
-
 struct AppUsageView: View {
     @ObservedObject var model:AppModel
-    @State private var date = Calendar.current.startOfDay(for:Date())
-    @State private var report:UsageReport?
+    @StateObject private var activity = UsageReportState()
+    @State private var selectedCategory:UsageCategory?
     @State private var search = ""
-    @State private var error:String?
-    @State private var loading = true
     @State private var refresh = 0
     @State private var calendarOpen = false
     @Environment(\.dismiss) private var dismiss
     private let cardColor = Color(red:0.97,green:0.978,blue:0.989)
+    private var date:Date { activity.selectedDay }
     private var today:Date { Calendar.current.startOfDay(for:Date()) }
     private var isToday:Bool { Calendar.current.isDateInToday(date) }
     var body: some View {
@@ -54,21 +22,17 @@ struct AppUsageView: View {
                     Label("This Mac",systemImage:"desktopcomputer").font(.system(size:12)).foregroundStyle(.secondary)
                 }
                 Spacer()
-                if loading { ProgressView().controlSize(.small) }
+                if activity.loading { ProgressView().controlSize(.small) }
                 Button { dismiss() } label: { Image(systemName:"xmark").font(.system(size:13,weight:.semibold)).frame(width:44,height:44).liquidGlass(radius:22) }
                     .buttonStyle(.plain).accessibilityLabel("Close app usage")
             }.padding(24)
             ScrollView(showsIndicators:false) {
                 VStack(spacing:18) {
-                    if let report,Calendar.current.isDate(report.day.start,inSameDayAs:date) {
-                        overview(report)
-                        applicationList(report)
-                        Text("Foreground app time recorded by Recall. Paused recording and unavailable screen time are excluded. Private apps appear only as Private activity.\(report.firstRecorded.map { " History begins " + $0.recallFormatted(date:.abbreviated,time:.shortened) + "." } ?? "")")
-                            .font(.system(size:11)).foregroundStyle(.secondary).frame(maxWidth:.infinity,alignment:.leading)
-                    } else if error == nil { ProgressView("Loading app activity…").frame(maxWidth:.infinity,minHeight:300) }
-                    if let error {
-                        VStack(spacing:10) {Text(error).foregroundStyle(.secondary);Button("Try again") { refresh += 1 }}.padding()
-                    }
+                    let report = activity.report ?? UsageReport.build([],date:date)
+                    overview(report)
+                    applicationList(report)
+                    Text("Foreground app time recorded by Recall. Paused recording and unavailable screen time are excluded. Calendar dots mark days with app usage activity, including private activity. Private apps appear only as Private activity.\(report.firstRecorded.map { " History begins " + $0.recallFormatted(date:.abbreviated,time:.shortened) + "." } ?? "")")
+                        .font(.system(size:11)).foregroundStyle(.secondary).frame(maxWidth:.infinity,alignment:.leading)
                 }.padding(.horizontal,24).padding(.bottom,24)
             }.scrollIndicators(.never)
         }
@@ -76,14 +40,10 @@ struct AppUsageView: View {
         .background(.white).presentationBackground(.white).preferredColorScheme(.light)
         .font(.system(size:13)).controlSize(.large)
         .task(id:"\(date.timeIntervalSince1970)-\(refresh)") {
-            loading = true; error = nil
-            let root = model.store.root, selectedDate = date
+            let root = model.store.root,calendar = Calendar.current
             repeat {
-                let work = Task.detached(priority:.utility) { try UsageReport.load(root:root,date:selectedDate) }
-                do {
-                    let result = try await withTaskCancellationHandler(operation:{try await work.value},onCancel:{work.cancel()})
-                    guard !Task.isCancelled else { return }; report = result; loading = false
-                } catch { if !Task.isCancelled { self.error = error.localizedDescription; loading = false }; return }
+                await activity.load { day in try await UsageDataSource.shared.report(root:root,date:day,calendar:calendar) }
+                guard !Task.isCancelled else { return }
                 do { try await Task.sleep(for:.seconds(30)) } catch { return }
             } while !Task.isCancelled
         }
@@ -94,7 +54,7 @@ struct AppUsageView: View {
             HStack(alignment:.top) {
                 VStack(alignment:.leading,spacing:7) {
                     Text("Usage time").font(.system(size:14,weight:.medium)).foregroundStyle(.secondary)
-                    Text(UsageReport.duration(report.total)).font(.system(size:34,weight:.semibold,design:.rounded)).monospacedDigit()
+                    Text(activity.report == nil ? "—":UsageReport.duration(report.total)).font(.system(size:34,weight:.semibold,design:.rounded)).monospacedDigit()
                 }
                 Spacer()
                 VStack(alignment:.trailing,spacing:8) {
@@ -107,18 +67,31 @@ struct AppUsageView: View {
                             .background(.white,in:Capsule()).overlay(Capsule().strokeBorder(.blue.opacity(0.08)))
                     }.buttonStyle(.plain).accessibilityLabel("Choose usage date")
                         .popover(isPresented:$calendarOpen,arrowEdge:.bottom) {
-                            UsageCalendar(selection:date) { selected in calendarOpen = false; date = selected }
+                            UsageCalendar(selection:date,root:model.store.root) { selected in calendarOpen = false; activity.select(selected) }
                                 .presentationBackground(.white).preferredColorScheme(.light)
                         }
                     HStack(spacing:4) {
                         navigationButton("chevron.left",label:"Previous day",disabled:false) { changeDay(-1) }
-                        Button("Today") { date = today }.buttonStyle(.plain).frame(width:62,height:36).background(.white,in:RoundedRectangle(cornerRadius:10))
+                        Text(UsageDateLabel.navigation(date)).font(.system(size:12,weight:.medium)).frame(width:112,height:36)
+                            .accessibilityLabel("Selected date: " + UsageDateLabel.navigation(date))
                         navigationButton("chevron.right",label:"Next day",disabled:isToday) { changeDay(1) }
+                        Button("Today") { activity.select(today) }.buttonStyle(.plain).font(.system(size:11,weight:.medium))
+                            .foregroundStyle(.blue).frame(width:44,height:36).disabled(isToday).help("Return to today")
+                            .accessibilityLabel("Return to today")
                     }
                 }
             }
+            reportStatus(report)
             VStack(alignment:.leading,spacing:9) {
-                HStack {Text("Week · hours").font(.system(size:12,weight:.medium));Spacer();Text("Daily average · \(UsageReport.duration(report.dailyAverage))").font(.system(size:11)).foregroundStyle(.secondary).help("Average across days with recorded activity")}
+                HStack {
+                    Text("Week · hours").font(.system(size:12,weight:.medium))
+                    Picker("Chart category",selection:$selectedCategory) {
+                        Text("All categories").tag(Optional<UsageCategory>.none)
+                        ForEach(UsageCategory.allCases,id:\.self) { category in Label(category.rawValue,systemImage:category.symbol).tag(Optional(category)) }
+                    }.labelsHidden().pickerStyle(.menu).controlSize(.small).frame(width:155).accessibilityLabel("Chart category")
+                    Spacer()
+                    Text("Daily average · \(UsageReport.duration(chartDailyAverage(report)))").font(.system(size:11)).foregroundStyle(.secondary).help("Average across days with recorded activity")
+                }
                 weekChart(report).frame(height:122)
             }
             Divider().opacity(0.45)
@@ -127,23 +100,51 @@ struct AppUsageView: View {
                 hourChart(report).frame(height:112)
             }
             let categories = totals(report.apps,identities:report.identities)
-            if !categories.isEmpty {
-                LazyVGrid(columns:[GridItem(.adaptive(minimum:140),alignment:.leading)],alignment:.leading,spacing:12) {
-                    ForEach(categories,id:\.0) { category,seconds in
-                        HStack(alignment:.top,spacing:7) {
-                            RoundedRectangle(cornerRadius:3).fill(category.color).frame(width:9,height:9).padding(.top,3)
-                            VStack(alignment:.leading,spacing:4) {Text(category.rawValue).foregroundStyle(.secondary);Text(UsageReport.duration(seconds)).fontWeight(.medium)}.font(.system(size:11))
+            Group {
+                if !categories.isEmpty {
+                    LazyVGrid(columns:[GridItem(.adaptive(minimum:140),alignment:.leading)],alignment:.leading,spacing:12) {
+                        ForEach(categories,id:\.0) { category,seconds in
+                            HStack(alignment:.top,spacing:7) {
+                                Image(systemName:category.symbol).foregroundStyle(category.color).font(.system(size:12)).frame(width:16).padding(.top,2).accessibilityHidden(true)
+                                VStack(alignment:.leading,spacing:4) {Text(category.rawValue).foregroundStyle(.secondary);Text(UsageReport.duration(seconds)).fontWeight(.medium)}.font(.system(size:11))
+                            }
                         }
                     }
+                } else {
+                    Text(activity.report == nil ? "Loading category totals…":"No categorized activity on this day")
+                        .font(.system(size:11)).foregroundStyle(.secondary)
                 }
-            }
+            }.frame(maxWidth:.infinity,minHeight:80,alignment:.topLeading)
         }.padding(22).background(cardColor,in:RoundedRectangle(cornerRadius:22))
     }
+    private func reportStatus(_ report:UsageReport) -> some View {
+        HStack(spacing:6) {
+            if let error = activity.error {
+                Image(systemName:"exclamationmark.circle").foregroundStyle(.orange)
+                Text("Could not load " + UsageDateLabel.absolute(date)).help(error)
+                if activity.report != nil { Text("· Showing " + UsageDateLabel.absolute(report.day.start)) }
+                Spacer(minLength:0)
+                Button("Try again") { refresh += 1 }.buttonStyle(.plain).foregroundStyle(.blue)
+            } else if activity.loading {
+                Text("Loading " + UsageDateLabel.absolute(date) + "…")
+                if activity.report != nil { Text("· Showing " + UsageDateLabel.absolute(report.day.start)) }
+                Spacer(minLength:0)
+            } else {
+                Text("Showing " + UsageDateLabel.absolute(report.day.start))
+                Spacer(minLength:0)
+            }
+        }.font(.system(size:11)).foregroundStyle(.secondary).lineLimit(1).frame(height:18)
+            .accessibilityElement(children:.combine)
+    }
+    private func chartDailyAverage(_ report:UsageReport) -> Double {
+        let recorded = report.days.filter { $0.seconds > 0 }
+        guard !recorded.isEmpty else { return 0 }
+        return recorded.reduce(0) { total,day in total + categoryBuckets(day,identities:report.identities).reduce(0) { $0+$1.1 } } / Double(recorded.count)
+    }
     private func weekBar(_ bucket:UsageBucket,category:UsageCategory,seconds:Double) -> some ChartContent {
-        let color:Color = Calendar.current.isDate(bucket.start,inSameDayAs:date) ? category.color:Color(red:0.78,green:0.81,blue:0.85)
         let label:String = bucket.start.recallFormatted(.dateTime.weekday().month().day()) + ", " + category.rawValue
         return BarMark(x:.value("Day",bucket.start,unit:.day),y:.value("Hours",seconds/3600))
-            .foregroundStyle(color).cornerRadius(3)
+            .foregroundStyle(category.color).cornerRadius(3)
             .accessibilityLabel(label).accessibilityValue(UsageReport.duration(seconds))
     }
     @ChartContentBuilder private func weekMarks(_ report:UsageReport) -> some ChartContent {
@@ -152,21 +153,35 @@ struct AppUsageView: View {
                 weekBar(bucket,category:category,seconds:seconds)
             }
         }
-        if report.dailyAverage > 0 {
-            RuleMark(y:.value("Daily average",report.dailyAverage/3600)).lineStyle(StrokeStyle(lineWidth:1,dash:[4,4])).foregroundStyle(.green.opacity(0.65))
+        if chartDailyAverage(report) > 0 {
+            RuleMark(y:.value("Daily average",chartDailyAverage(report)/3600)).lineStyle(StrokeStyle(lineWidth:1,dash:[4,4])).foregroundStyle(.green.opacity(0.65))
         }
     }
     private func weekChart(_ report:UsageReport) -> some View {
         let maximum:Double = max(1,(report.days.map(\.seconds).max() ?? 0)/3600*1.18)
         return Chart { weekMarks(report) }.chartLegend(.hidden).chartXScale(domain:report.week.start...report.week.end)
             .chartYScale(domain:0...maximum)
-            .chartXAxis { AxisMarks(values:.stride(by:.day)) { AxisValueLabel(format:.dateTime.weekday(.narrow));AxisGridLine().foregroundStyle(.gray.opacity(0.1)) } }
+            .chartXAxis {
+                AxisMarks(values:.stride(by:.day)) { value in
+                    AxisValueLabel {
+                        if let day = value.as(Date.self) {
+                            let selected = Calendar.current.isDate(day,inSameDayAs:report.day.start)
+                            Text(day.recallFormatted(.dateTime.weekday(.narrow)))
+                                .font(.system(size:10,weight:selected ? .bold:.regular))
+                                .foregroundStyle(selected ? Color.white:Color.secondary)
+                                .frame(width:20,height:20).background(selected ? Color.primary.opacity(0.8):Color.clear,in:Circle())
+                                .accessibilityLabel(day.recallFormatted(date:.complete,time:.omitted) + (selected ? ", selected usage day":""))
+                        }
+                    }
+                    AxisGridLine().foregroundStyle(.gray.opacity(0.1))
+                }
+            }
             .chartYAxis { AxisMarks(position:.trailing,values:.automatic(desiredCount:3)) { AxisValueLabel();AxisGridLine().foregroundStyle(.gray.opacity(0.13)) } }
             .chartOverlay { proxy in GeometryReader { geometry in
                 Rectangle().fill(.clear).contentShape(Rectangle()).onTapGesture { point in
                     guard let plot = proxy.plotFrame else { return }
                     let x = point.x-geometry[plot].origin.x
-                    if let day:Date = proxy.value(atX:x),day >= report.week.start,day < report.week.end,day <= Date() { date = Calendar.current.startOfDay(for:day) }
+                    if let day:Date = proxy.value(atX:x),day >= report.week.start,day < report.week.end,day <= Date() { activity.select(day) }
                 }
             } }
     }
@@ -193,14 +208,14 @@ struct AppUsageView: View {
             }.padding(.bottom,16)
             HStack {Text("Application");Spacer();Text("Time")}.font(.system(size:11,weight:.medium)).foregroundStyle(.secondary).padding(.bottom,10)
             Divider()
-            HStack {Label("Total usage",systemImage:"square.stack.3d.up.fill");Spacer();Text(UsageReport.duration(report.total)).monospacedDigit()}.fontWeight(.semibold).padding(.vertical,14)
+            HStack {Label("Total usage",systemImage:"square.stack.3d.up.fill");Spacer();Text(activity.report == nil ? "—":UsageReport.duration(report.total)).monospacedDigit()}.fontWeight(.semibold).padding(.vertical,14)
             let filtered = report.apps.filter { search.isEmpty || $0.app.name.localizedStandardContains(search) }
             ForEach(filtered) { app in
                 Divider().opacity(0.5)
                 HStack(spacing:12) {
                     if app.app.kind == .excluded { Image(systemName:"lock.shield").foregroundStyle(.secondary).frame(width:30,height:30) }
                     else { AppBadge(name:app.app.name,bundleID:app.app.bundleID,size:30) }
-                    VStack(alignment:.leading,spacing:4) {Text(app.app.name).lineLimit(1);Text(UsageCategory.resolve(app.app).rawValue).font(.system(size:10)).foregroundStyle(.secondary)}
+                    VStack(alignment:.leading,spacing:4) {Text(app.app.name).lineLimit(1);Label(UsageCategory.resolve(app.app).rawValue,systemImage:UsageCategory.resolve(app.app).symbol).font(.system(size:10)).foregroundStyle(.secondary)}
                     Spacer()
                     GeometryReader { geometry in
                         Capsule().fill(.primary.opacity(0.045))
@@ -212,20 +227,20 @@ struct AppUsageView: View {
             if filtered.isEmpty {
                 VStack(spacing:8) {
                     Image(systemName:search.isEmpty ? "clock":"magnifyingglass").font(.title2).foregroundStyle(.secondary)
-                    Text(search.isEmpty ? "No activity recorded on this day":"No matching apps").foregroundStyle(.secondary)
-                    if search.isEmpty,isToday,!model.recording { Button("Start recording") { model.toggleRecording() }.disabled(model.working) }
+                    Text(activity.report == nil ? (activity.loading ? "Loading app activity…":"App activity unavailable"):(search.isEmpty ? "No activity recorded on this day":"No matching apps")).foregroundStyle(.secondary)
+                    if activity.report != nil,search.isEmpty,Calendar.current.isDateInToday(report.day.start),!model.recording { Button("Start recording") { model.toggleRecording() }.disabled(model.working) }
                 }.frame(maxWidth:.infinity).padding(24)
             }
         }.padding(22).background(cardColor,in:RoundedRectangle(cornerRadius:22))
     }
-    private func changeDay(_ delta:Int) { if let next = Calendar.current.date(byAdding:.day,value:delta,to:date) { date = min(today,next) } }
+    private func changeDay(_ delta:Int) { if let next = Calendar.current.date(byAdding:.day,value:delta,to:date) { activity.select(min(today,next)) } }
     private func navigationButton(_ symbol:String,label:String,disabled:Bool,action:@escaping()->Void) -> some View {
         Button(action:action) { Image(systemName:symbol).font(.system(size:12,weight:.semibold)).frame(width:36,height:36).background(.white,in:RoundedRectangle(cornerRadius:10)) }.buttonStyle(.plain).disabled(disabled).accessibilityLabel(label)
     }
     private func categoryBuckets(_ bucket:UsageBucket,identities:[String:AppUsageIdentity]) -> [(UsageCategory,Double)] {
         var values:[UsageCategory:Double] = [:]
         for (key,seconds) in bucket.apps { if let app = identities[key] { values[UsageCategory.resolve(app),default:0] += seconds } }
-        return UsageCategory.allCases.compactMap { category in values[category].map { (category,$0) } }
+        return UsageCategory.allCases.filter { selectedCategory == nil || $0 == selectedCategory }.compactMap { category in values[category].map { (category,$0) } }
     }
     private func totals(_ apps:[UsageAppTotal],identities:[String:AppUsageIdentity]) -> [(UsageCategory,Double)] {
         var values:[UsageCategory:Double] = [:]
