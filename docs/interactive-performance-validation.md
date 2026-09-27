@@ -179,3 +179,30 @@ evidence of OCR pause/resume. The synthetic records were restored afterward.
 The real-queue XCTest above and deterministic gate tests remain the validated
 evidence for that behavior. No pending records were injected into the user's
 library. Both test apps exited normally after GUI acceptance.
+
+The Developer ID Release build from `ed691c8` was installed to
+`/Applications/Recall.app` on 2026-09-28 at 00:46 +08:00. Its designated
+requirement remains `studio.rewind.replica` with team `GXVN75MDQN`.
+The Release and installed executable SHA-256 are both
+`f6e1e2b254471a445f00b8fb9a02e200cb23392ea94744cf0d02eb2514947ee6`.
+The previous application, settings and SQLite backup are retained in the ignored
+`.test-data/install-macos-interactive-20260928/` directory, with a JSON receipt.
+
+The previous process was no longer running immediately before replacement,
+despite recording earlier in this session. The installed application was opened
+and then hidden with recording still unrequested; no automatic recording restart
+was forced. Settings matched the pre-install snapshot, the database quick check
+passed, and the record count remained 27,943. The actual installed OCR initially
+deferred two jobs, then successfully resumed PPOCR processing (30.3, 27.2 and
+3.8 second observations). Thus runtime recovery was observed, but those variable
+cold-start/contended times do not establish an OCR throughput improvement.
+
+The first native CI run passed the Windows job and all Mac tests except the
+mounted motion fixture. Its Reduce Motion environment advanced directly to
+row 550 despite stopping the animation clock. Forcing Reduce Motion on locally
+reproduced that failure. The test host now explicitly uses the SDK-exported
+`_accessibilityReduceMotion` override with false; the original row-20, source-page
+and final extraction assertions remain. Three navigation tests and three further
+mounted repetitions passed after this test-only correction. Product sources and
+the installed executable are unchanged. The Mac/Linux/Windows CLI matrix for
+`ed691c8` passed in run `36334229414`.

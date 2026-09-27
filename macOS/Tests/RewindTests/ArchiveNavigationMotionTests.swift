@@ -21,7 +21,11 @@ final class ArchiveNavigationMotionTests:XCTestCase {
         model.requestArchiveWindow(at:20);await model.waitForPendingLoads()
         let extracted=expectation(description:"Real mounted archive extracts the latest record after camera arrival")
         var opened:[String]=[]
-        let host=NSHostingView(rootView:ArchiveMotionHost(model:model,onFocus:{id in if let id {opened.append(id);extracted.fulfill()}}))
+        // This test controls an animation clock; CI may enable Reduce Motion.
+        // Its read-only facade has an SDK-exported writable backing value.
+        // Override only this host, leaving system preferences untouched.
+        let host=NSHostingView(rootView:ArchiveMotionHost(model:model,onFocus:{id in if let id {opened.append(id);extracted.fulfill()}})
+            .environment(\._accessibilityReduceMotion,false))
         let window=NSWindow(contentRect:NSRect(x:0,y:0,width:1200,height:800),styleMask:.borderless,backing:.buffered,defer:false)
         window.isReleasedWhenClosed=false;window.level = .statusBar;window.contentView=host;window.orderFront(nil)
         defer {window.close()}
