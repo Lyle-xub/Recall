@@ -143,6 +143,38 @@ packaged distribution on Windows, macOS and Linux.
 Hosted Windows results do not certify every physical GPU/driver or establish
 a universal compression ratio for real user libraries.
 
+### Accepted build evidence
+
+Implementation commit: `82caf01a4229c2b8c3a5c7da5feab24b0ea55316`.
+The [Windows native job](https://github.com/Lyle-xub/Recall/actions/runs/36350015180/job/108706757887)
+and all three jobs in the [CLI matrix](https://github.com/Lyle-xub/Recall/actions/runs/36350015185)
+passed against that exact commit. The unchanged Mac desktop also passed its
+[native regression and build job](https://github.com/Lyle-xub/Recall/actions/runs/36350015180/job/108706757664).
+
+| Environment | Verified result |
+| --- | --- |
+| Windows native desktop | 328 shared-core checks, 9 image archive checks, 29 Media Foundation/worker checks, and 24 application smoke checks |
+| Windows CLI with native desktop | 16 real capture-to-shutdown checks, including native auto-start, exact video card, bundled OCR, export, maintenance protection, process exit and library reopen |
+| Packaged Windows CLI | 342 process and interoperability assertions |
+| Packaged macOS CLI | 387 assertions, 15 Swift integration/cleanup tests and 28 terminal/JSON checks |
+| Packaged Linux CLI | 345 assertions, isolated Xvfb/FFmpeg capture and OCR/export, and 28 terminal/JSON checks |
+| Unchanged Mac desktop | 294 registered tests: 29 skipped, 0 failures; release build passed with the CI-only ad-hoc signature |
+| Legacy Windows WPF entry point | Release cross-build on the Mac host: 0 warnings, 0 errors |
+
+The Windows runner actually selected H.264 and captured 1024 × 768 pixels.
+Its retained `unified-archive.json` confirms exact native decoding, release of
+the original OCR spool and independent decoding from the exported library.
+Synthetic native-video evidence preserves submitted and decoded timestamps at
+0, 1.375 and 2.625 seconds, plus a rapid sequence at 0, 0.125, 0.375, 1 and
+1.375 seconds. The reader correctly crops the decoder's declared padding to
+the original 641 × 359 pixels; missing samples are rejected.
+
+Build outputs: [Windows installer and portable ZIP](https://github.com/Lyle-xub/Recall/actions/runs/36350015180/artifacts/10941219791),
+[Windows CLI and checksum](https://github.com/Lyle-xub/Recall/actions/runs/36350015185/artifacts/10942385311),
+and [native validation evidence](https://github.com/Lyle-xub/Recall/actions/runs/36350015180/artifacts/10942155937).
+These are Actions artifacts with finite retention; the workflow links above
+also retain the associated build and test logs.
+
 Native API references: [sink-writer input and encoding parameters](https://learn.microsoft.com/en-us/windows/win32/api/mfreadwrite/nf-mfreadwrite-imfsinkwriter-setinputmediatype),
 [hardware transform selection](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-readwrite-enable-hardware-transforms),
 [H.264 quality and GOP properties](https://learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-encoder),
