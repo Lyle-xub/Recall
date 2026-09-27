@@ -245,6 +245,8 @@ struct SelectableMemoryImage: NSViewRepresentable {
     private var decodedURL:URL?
     private var latestRegions:[TextRegion] = []
     var onImageSize: ((CGSize)->Void)?
+    var onLayout:(()->Void)?
+    private var compositedCornerRadius:CGFloat?
     var onOpen:(()->Void)? {didSet {
         picture.onOpen=onOpen
         picture.setAccessibilityRole(onOpen == nil ? .image:.button)
@@ -296,8 +298,15 @@ struct SelectableMemoryImage: NSViewRepresentable {
         guard displayedURL != url else {return}
         picture.image=image;displayedURL=url;needsLayout=true
     }
+    /// Composition can change the displayed radius without invalidating image
+    /// or text layout; the frame stays at its full-resolution backing size.
+    func setCompositedCornerRadius(_ radius:CGFloat?) {
+        compositedCornerRadius=radius
+        content.layer?.cornerRadius=min(radius ?? cornerRadius,min(content.bounds.width,content.bounds.height)/2)
+    }
     override func layout() {
         super.layout()
+        onLayout?()
         // Round the actual fitted pixels, not the letterboxed SwiftUI view.
         // Keep the selection in this same surface so its coordinates and
         // highlights remain aligned when the transcript changes the layout.
@@ -307,7 +316,7 @@ struct SelectableMemoryImage: NSViewRepresentable {
         let rect = CGRect(x:bounds.midX-fitted.width/2,y:bounds.midY-fitted.height/2,width:fitted.width,height:fitted.height)
         CATransaction.begin();CATransaction.setDisableActions(true)
         content.frame = rect
-        content.layer?.cornerRadius = min(cornerRadius,min(fitted.width,fitted.height)/2)
+        content.layer?.cornerRadius = min(compositedCornerRadius ?? cornerRadius,min(fitted.width,fitted.height)/2)
         picture.frame = content.bounds;indexedText.frame = content.bounds
         CATransaction.commit()
     }
@@ -466,6 +475,7 @@ struct ScreenTextSelection {
     override var isFlipped:Bool {true}
     override var isOpaque:Bool {false}
     override var acceptsFirstResponder:Bool {true}
+    var onLayout:(()->Void)?
     var imageSize:CGSize = .zero { didSet { if oldValue != imageSize { needsLayout = true } } }
     private var regions:[TextRegion] = []
     private var rects:[CGRect] = []
@@ -493,6 +503,7 @@ struct ScreenTextSelection {
     override func resetCursorRects() { for rect in rects { addCursorRect(rect,cursor:.iBeam) } }
     override func layout() {
         super.layout()
+        onLayout?()
         guard imageSize.width > 0,imageSize.height > 0 else { rects = [];return }
         let scale = min(bounds.width/imageSize.width,bounds.height/imageSize.height)
         let size = CGSize(width:imageSize.width*scale,height:imageSize.height*scale)

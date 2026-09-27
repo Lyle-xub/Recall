@@ -19,23 +19,30 @@ final class MemoryDetailTransitionTests:XCTestCase {
         let surface=native.image
         var completions:[Int]=[];native.onSettled={completions.append($0)}
         native.update(id:"image",url:URL(fileURLWithPath:"/synthetic-missing.png"),regions:[],destination:destination,source:source,radius:14,reduced:false)
-        XCTAssertEqual(native.image.frame,start);XCTAssertTrue(native.image === surface)
+        XCTAssertEqual(native.presentedFrame,start);XCTAssertTrue(native.image === surface)
         native.advance(by:0.12)
-        let midpoint=native.image.frame
+        let midpoint=native.presentedFrame
         XCTAssertGreaterThan(midpoint.width,start.width);XCTAssertLessThan(midpoint.width,destination.width)
         XCTAssertLessThan(midpoint.minX,start.minX);XCTAssertGreaterThan(midpoint.minX,destination.minX)
-        XCTAssertGreaterThan(native.image.cornerRadius,14);XCTAssertLessThan(native.image.cornerRadius,19)
+        XCTAssertGreaterThan(native.presentedCornerRadius,14);XCTAssertLessThan(native.presentedCornerRadius,19)
+        let layer=try XCTUnwrap(native.image.layer)
+        var composed=layer.frame
+        if native.isFlipped != (layer.superlayer?.isGeometryFlipped ?? false) {composed.origin.y=native.bounds.height-composed.maxY}
+        XCTAssertEqual(composed.minX,midpoint.minX,accuracy:0.001)
+        XCTAssertEqual(composed.minY,midpoint.minY,accuracy:0.001)
+        XCTAssertEqual(composed.width,midpoint.width,accuracy:0.001)
+        XCTAssertEqual(composed.height,midpoint.height,accuracy:0.001)
         XCTAssertTrue(completions.isEmpty)
         native.update(id:"image",url:URL(fileURLWithPath:"/synthetic-missing.png"),regions:[],destination:start,source:nil,radius:22,reduced:false)
-        XCTAssertEqual(native.image.frame,midpoint,"Reversal begins at the actual in-flight rectangle")
+        XCTAssertEqual(native.presentedFrame,midpoint,"Reversal begins at the actual in-flight rectangle")
         native.advance(by:MemoryImageFlight.duration)
-        XCTAssertEqual(native.image.frame,start);XCTAssertEqual(native.image.cornerRadius,22)
+        XCTAssertEqual(native.presentedFrame,start);XCTAssertEqual(native.presentedCornerRadius,22)
         XCTAssertTrue(native.image === surface);XCTAssertEqual(completions.count,1)
         native.update(id:"image",url:URL(fileURLWithPath:"/synthetic-missing.png"),regions:[],destination:destination,source:nil,radius:14,reduced:false)
         native.advance(by:0.1);native.stop();native.advance(by:1)
         XCTAssertEqual(completions.count,1,"Dismantled or cancelled motion cannot publish old completion")
         native.update(id:"image",url:URL(fileURLWithPath:"/synthetic-missing.png"),regions:[],destination:destination,source:nil,radius:14,reduced:true)
-        XCTAssertEqual(native.image.frame,destination);XCTAssertNil(native.flight)
+        XCTAssertEqual(native.presentedFrame,destination);XCTAssertNil(native.flight)
     }
 
     @MainActor func testNativeImageClickOpensButOCRSelectionAndDraggingDoNot()async throws {
@@ -81,6 +88,50 @@ final class MemoryDetailTransitionTests:XCTestCase {
         XCTAssertEqual(opened,3)
     }
 
+    @MainActor func testCompositionKeepsLargeImageAndDenseOCRBackingStableUntilItLands()async throws {
+        let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
+        defer {try? FileManager.default.removeItem(at:root)}
+        let image=picture(),url=root.appendingPathComponent("dense.png")
+        try XCTUnwrap(NSBitmapImageRep(data:try XCTUnwrap(image.tiffRepresentation))?.representation(using:.png,properties:[:])).write(to:url)
+        let native=MemoryImageTransitionView(frame:NSRect(x:0,y:0,width:1000,height:800))
+        let window=NSWindow(contentRect:native.frame,styleMask:.borderless,backing:.buffered,defer:false)
+        window.isReleasedWhenClosed=false;window.contentView=native
+        defer {native.stop();window.close()}
+        let loaded=expectation(description:"Dense OCR surface ready")
+        native.image.onImageSize={_ in loaded.fulfill()}
+        let regions=(0..<300).map {index in TextRegion(text:"Words \(index)",x:Double(index % 6)/6,y:Double(index / 6)/50,width:0.15,height:0.016)}
+        let large=CGRect(x:40,y:40,width:800,height:500),small=CGRect(x:500,y:400,width:240,height:150)
+        native.update(id:"dense",url:url,regions:regions,destination:large,source:nil,radius:14,reduced:true)
+        await fulfillment(of:[loaded],timeout:5)
+        native.image.layoutSubtreeIfNeeded()
+        func find(_ view:NSView)->IndexedTextOverlay? {if let result=view as? IndexedTextOverlay {return result};return view.subviews.compactMap(find).first}
+        let text=try XCTUnwrap(find(native.image))
+        native.update(id:"dense",url:url,regions:regions,destination:small,source:nil,radius:22,reduced:false)
+        let backing=native.image.frame
+        XCTAssertEqual(backing.size,large.size,"A shrinking flight retains large pixels instead of scaling up a small backing")
+        var imageLayouts=0,textLayouts=0
+        native.image.onLayout={imageLayouts += 1};text.onLayout={textLayouts += 1}
+        for _ in 0..<20 {
+            native.advance(by:0.01)
+            XCTAssertEqual(native.image.frame,backing)
+            XCTAssertEqual(try XCTUnwrap(native.image.layer).frame.width,native.presentedFrame.width,accuracy:0.001)
+        }
+        XCTAssertEqual(imageLayouts,0);XCTAssertEqual(textLayouts,0)
+        let clipping=try XCTUnwrap(native.image.subviews.first?.layer)
+        let radius=clipping.cornerRadius
+        native.image.needsLayout=true;native.image.layoutSubtreeIfNeeded()
+        XCTAssertEqual(clipping.cornerRadius,radius,accuracy:0.001,"A decode or window layout during flight preserves the current composited corner")
+        imageLayouts=0;textLayouts=0
+        let point=CGPoint(x:native.presentedFrame.midX,y:native.presentedFrame.midY)
+        XCTAssertTrue(native.hitTest(native.convert(point,to:native.superview)) === native,"In-flight OCR uses backing coordinates and must not start a misplaced selection")
+        native.advance(by:MemoryImageFlight.duration)
+        XCTAssertEqual(native.image.frame,small)
+        XCTAssertTrue(CATransform3DIsIdentity(try XCTUnwrap(native.image.layer).transform))
+        XCTAssertLessThanOrEqual(imageLayouts,1);XCTAssertLessThanOrEqual(textLayouts,1)
+        XCTAssertFalse(native.hitTest(native.convert(CGPoint(x:small.midX,y:small.midY),to:native.superview)) === native,"Native selection resumes at the final geometry")
+    }
+
     @MainActor func testCancelledDecodeForSameURLRestartsAndNoOpGeometryStillAcknowledgesCompletion()async throws {
         let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
@@ -124,14 +175,14 @@ final class MemoryDetailTransitionTests:XCTestCase {
             let open=XCTNSPredicateExpectation(predicate:NSPredicate {_ ,_ in shown.last == true},object:nil)
             await fulfillment(of:[open],timeout:5)
             XCTAssertTrue(native.image === surface);XCTAssertNil(model.player)
-            let detailRect=native.image.frame
+            let detailRect=native.presentedFrame
             model.inspectorOpen=false
             let closed=XCTNSPredicateExpectation(predicate:NSPredicate {_,_ in shown.last == false && native.flight == nil},object:nil)
             await fulfillment(of:[closed],timeout:5)
-            XCTAssertNotEqual(native.image.frame,detailRect)
+            XCTAssertNotEqual(native.presentedFrame,detailRect)
             model.inspectorOpen=true
             await fulfillment(of:[ready],timeout:5)
-            XCTAssertTrue(native.image === surface);XCTAssertEqual(native.image.cornerRadius,14)
+            XCTAssertTrue(native.image === surface);XCTAssertEqual(native.presentedCornerRadius,14)
             native.stop();window.close();model.prepareToQuit();await model.shutDownRecording();await model.storageOptimizer.stop()
         }
     }

@@ -62,6 +62,8 @@ struct MemoryImageFlight {
     let image=LiveTextImageView()
     private(set) var flight:MemoryImageFlight?
     private(set) var revision=0
+    var presentedFrame:CGRect {flight?.rect ?? image.frame}
+    var presentedCornerRadius:CGFloat {flight?.radius ?? image.cornerRadius}
     private var clock:CADisplayLink?
     private var previousTime:TimeInterval=0
     private var key:String?
@@ -70,6 +72,9 @@ struct MemoryImageFlight {
     var onSettled:((Int)->Void)?
     var onMotionChanged:((Int,Bool)->Void)?
     var interactionEnabled=true
+    /// Optional native benchmark instrumentation; no clock reads in ordinary use.
+    var onFrameMeasured:((Double,Double)->Void)?
+    private var measuredPrevious:TimeInterval?
     override var isFlipped:Bool {true}
     override init(frame:NSRect) {
         super.init(frame:frame);image.wantsLayer=true
@@ -82,8 +87,10 @@ struct MemoryImageFlight {
     required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
     override func hitTest(_ point:NSPoint)->NSView? {
         let local=convert(point,from:superview)
-        guard interactionEnabled,image.frame.contains(local) else {return nil}
-        return super.hitTest(point)
+        guard interactionEnabled,presentedFrame.contains(local) else {return nil}
+        // OCR hit rectangles describe the stable backing surface during flight.
+        // Consume its clicks until it lands, then restore native text selection.
+        return flight == nil ? super.hitTest(point):self
     }
     func update(id:String,url:URL,regions:[TextRegion],destination:CGRect,inWindow:Bool = false,source:MemoryImageTransitionSource?,radius:CGFloat,reduced:Bool) {
         guard window != nil else {
@@ -105,35 +112,82 @@ struct MemoryImageFlight {
             if flight == nil {onMotionChanged?(revision,false);onSettled?(revision)}
             return
         }
+        let from=presentedFrame,fromRadius=presentedCornerRadius
         target=destination;revision += 1
-        flight=MemoryImageFlight(from:image.frame,to:destination,fromRadius:image.cornerRadius,toRadius:radius)
+        flight=MemoryImageFlight(from:from,to:destination,fromRadius:fromRadius,toRadius:radius)
+        // Lay out at the larger endpoint exactly once, so shrinking flights do
+        // not magnify a thumbnail-sized backing store. Only layer composition
+        // changes per frame; AppKit image drawing and OCR geometry stay stable.
+        CATransaction.begin();CATransaction.setDisableActions(true)
+        image.layer?.transform=CATransform3DIdentity
+        image.frame=CGRect(origin:destination.origin,size:CGSize(width:max(from.width,destination.width),height:max(from.height,destination.height)))
+        image.cornerRadius=radius;image.layoutSubtreeIfNeeded()
+        image.layer?.shadowPath=CGPath(roundedRect:image.bounds,cornerWidth:radius,cornerHeight:radius,transform:nil)
+        compose(rect:from,radius:fromRadius)
+        CATransaction.commit()
         onMotionChanged?(revision,true)
         if reduced {advance(by:MemoryImageFlight.duration)}
         else {start()}
     }
     private func start() {
         guard clock == nil else {return}
+        measuredPrevious=nil
         previousTime=ProcessInfo.processInfo.systemUptime
         let link=displayLink(target:self,selector:#selector(tick(_:)))
-        link.preferredFrameRateRange=CAFrameRateRange(minimum:60,maximum:60,preferred:60)
+        let maximum=Float(window?.screen?.maximumFramesPerSecond ?? 60)
+        link.preferredFrameRateRange=CAFrameRateRange(minimum:min(60,maximum),maximum:maximum,preferred:maximum)
         clock=link;link.add(to:.main,forMode:.common)
     }
     @objc private func tick(_ link:CADisplayLink) {
         let now=link.targetTimestamp
+        let began=onFrameMeasured == nil ? nil:ProcessInfo.processInfo.systemUptime
         advance(by:max(0,min(0.05,now-previousTime)));previousTime=now
+        if let began {
+            if let measuredPrevious {onFrameMeasured?((began-measuredPrevious)*1000,(ProcessInfo.processInfo.systemUptime-began)*1000)}
+            measuredPrevious=began
+        }
     }
     func advance(by duration:TimeInterval) {
         guard var flight else {return}
         flight.elapsed += duration
         CATransaction.begin();CATransaction.setDisableActions(true)
-        image.frame=flight.rect;image.cornerRadius=flight.radius;image.layoutSubtreeIfNeeded()
-        image.layer?.cornerRadius=flight.radius
-        image.layer?.shadowPath=CGPath(roundedRect:image.bounds,cornerWidth:flight.radius,cornerHeight:flight.radius,transform:nil)
+        if flight.finished {land(rect:flight.to,radius:flight.toRadius)}
+        else {compose(rect:flight.rect,radius:flight.radius)}
         CATransaction.commit()
         self.flight=flight
         if flight.finished {self.flight=nil;clock?.invalidate();clock=nil;onMotionChanged?(revision,false);onSettled?(revision)}
     }
+    private func compose(rect:CGRect,radius:CGFloat) {
+        let sx=rect.width/max(1,image.frame.width),sy=rect.height/max(1,image.frame.height)
+        if let layer=image.layer {
+            // AppKit uses a bottom-left anchor for this backing layer, and its
+            // parent layer need not share the flipped NSView coordinate space.
+            var destination=rect
+            if isFlipped != (layer.superlayer?.isGeometryFlipped ?? false) {destination.origin.y=bounds.height-rect.maxY}
+            let tx=destination.minX+layer.anchorPoint.x*destination.width-layer.position.x
+            let ty=destination.minY+layer.anchorPoint.y*destination.height-layer.position.y
+            layer.setAffineTransform(CGAffineTransform(a:sx,b:0,c:0,d:sy,tx:tx,ty:ty))
+        }
+        let scale=max(0.01,min(sx,sy))
+        image.setCompositedCornerRadius(radius/scale)
+        image.layer?.cornerRadius=radius/scale
+        image.layer?.borderWidth=1.5/scale
+        image.layer?.shadowRadius=28/scale
+        image.layer?.shadowOffset=CGSize(width:0,height:-12/scale)
+    }
+    private func land(rect:CGRect,radius:CGFloat) {
+        image.layer?.transform=CATransform3DIdentity
+        image.frame=rect;image.cornerRadius=radius;image.layoutSubtreeIfNeeded()
+        image.setCompositedCornerRadius(nil)
+        image.layer?.cornerRadius=radius;image.layer?.borderWidth=1.5
+        image.layer?.shadowRadius=28;image.layer?.shadowOffset=CGSize(width:0,height:-12)
+        image.layer?.shadowPath=CGPath(roundedRect:image.bounds,cornerWidth:radius,cornerHeight:radius,transform:nil)
+    }
     func stop(cancelImage:Bool = true) {
+        if let flight {
+            CATransaction.begin();CATransaction.setDisableActions(true)
+            land(rect:flight.rect,radius:flight.radius);CATransaction.commit()
+        }
         revision += 1;clock?.invalidate();clock=nil;flight=nil;pendingUpdate=nil
         if cancelImage {image.cancelAnalysis()}
     }
