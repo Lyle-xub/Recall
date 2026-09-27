@@ -80,6 +80,13 @@ real Qwen/Whisper execution was verified separately on the local Mac as above.
 
 ## Desktop regression boundary
 
+The pointer timing issue below was subsequently repaired in `8ca1824` and tested
+on the user's Mac: 226 Swift tests with zero failures, followed by 20 rounds of
+critical pointer checks and actual native GUI interaction. See the
+[macOS pointer validation report](macos-pointer-validation.md) for current evidence.
+
+The following describes the historical failures before that repair.
+
 The additional
 [desktop run 36286656950](https://github.com/Lyle-xub/Recall/actions/runs/36286656950)
 passed the full Windows build. Its Mac suite ran 219 tests, skipped 24, and failed
@@ -93,9 +100,9 @@ These tests expect a scheduled trailing pointer sample within 40–50 millisecon
 These tests and their pointer implementation were not changed by the CLI work.
 Both had already failed in
 [earlier desktop run 36264717534](https://github.com/Lyle-xub/Recall/actions/runs/36264717534).
-This is a separately recorded desktop regression risk; the full Mac desktop suite
-is not claimed to be green. A same-runner baseline comparison has not been
-performed. Glass UI development remains paused.
+Those historical runs were not green. A same-runner baseline comparison was not
+performed; the follow-up adds deterministic race coverage and native integration
+checks. Broader glass UI development remains paused.
 
 ## Distribution and remaining platform checks
 
