@@ -135,11 +135,30 @@ import ServiceManagement
         cliControl = try NativeCLIControl(lease:lease) { [weak self] operation,args in
             guard let self else { throw CoreCLIError(code:"service_unavailable",message:"Recall is shutting down.") }
             switch operation {
+            case "service-stop":
+                guard CommandLine.arguments.contains("--headless-service") else {throw CoreCLIError(code:"unsupported",message:"This owner is a desktop app. Quit it normally.")}
+                await stopRecording()
+                // AppKit's terminateLater loop cannot make progress when
+                // entered from this MainActor task. A headless owner drains
+                // its jobs directly after the response has been persisted.
+                Task {
+                    try? await Task.sleep(for:.milliseconds(250))
+                    await self.stopCLIControl();self.prepareToQuit()
+                    await self.shutDownRecording();await self.storageOptimizer.stop()
+                    await LocalInference.shared.stop();exit(0)
+                }
+                return ["stopping":true]
             case "recording-start","recording-stop","recording-status":
-                if operation == "recording-start" { await startRecording() }
+                if operation == "recording-start" {
+                    if CommandLine.arguments.contains("--headless-service") {
+                        guard CGPreflightScreenCaptureAccess() else {throw CoreCLIError(code:"capture_unavailable",message:"Screen Recording permission is missing for this native helper. Grant permission before starting headless recording.")}
+                        if settings.microphone,AVCaptureDevice.authorizationStatus(for:.audio) != .authorized {throw CoreCLIError(code:"capture_unavailable",message:"Microphone permission is missing. Grant it through the desktop app or disable microphone.")}
+                    }
+                    await startRecording()
+                }
                 if operation == "recording-stop" { await stopRecording() }
                 if operation == "recording-start",!recording,!recordingAutomaticallyPaused,let error { throw CoreCLIError(code:"capture_failed",message:error) }
-                return ["available":true,"requested":recordingRequested,"active":recording,"automaticallyPaused":recordingAutomaticallyPaused,"owner":"desktop"]
+                return ["available":true,"requested":recordingRequested,"active":recording,"automaticallyPaused":recordingAutomaticallyPaused,"owner":CommandLine.arguments.contains("--headless-service") ? "headless":"desktop","error":error ?? ""]
             case "tasks-status": return ["indexing":indexingStatus,"optimizing":storageOptimizer.running,"optimizationStatus":storageOptimizer.status,"clearing":storageClearing]
             case "index":
                 let frame = args["id"] is String ? try NativeCoreCLI.required(args,store:store):nil
@@ -149,7 +168,31 @@ import ServiceManagement
                 } catch { await capture.resumeIndexingAfterCleanup();throw error }
                 await capture.resumeIndexingAfterCleanup()
                 return ["accepted":true,"owner":"desktop"]
-            case "optimize": storageOptimizer.optimizeExisting();return ["accepted":true,"owner":"desktop","running":storageOptimizer.running]
+            case "export":
+                guard !storageClearing else { throw CoreCLIError(code:"busy",message:"Storage maintenance is running.") }
+                await storageOptimizer.beginCleanup();await capture.suspendIndexing()
+                do {
+                    let database=store
+                    let result=try await Task.detached(priority:.utility) {try NativeCoreCLI.execute("export",args:args,store:database)}.value
+                    await capture.resumeIndexingAfterCleanup();storageOptimizer.endCleanup();return result
+                } catch {await capture.resumeIndexingAfterCleanup();storageOptimizer.endCleanup();throw error}
+            case "config-set":
+                let next=try NativeCoreCLI.configured(args,current:settings)
+                if next.microphone,AVCaptureDevice.authorizationStatus(for:.audio) != .authorized {throw CoreCLIError(code:"capture_unavailable",message:"Grant microphone permission through the desktop app before enabling it through the CLI.")}
+                try await saveSettings(next,chatKey:"",speechKey:"",updateKeys:false,applyRetention:args["key"] as? String == "retention-days")
+                return try NativeCoreCLI.object(next)
+            case "index-one":
+                _ = try NativeCoreCLI.required(args,store:store)
+                await capture.suspendIndexing()
+                do {
+                    let database = store
+                    let result = try await Task.detached(priority:.utility) { try NativeCoreCLI.execute("index-one",args:args,store:database) }.value
+                    await capture.resumeIndexingAfterCleanup();reload();return result
+                } catch { await capture.resumeIndexingAfterCleanup();throw error }
+            case "optimize":
+                storageOptimizer.optimizeExisting();await storageOptimizer.waitUntilFinished()
+                if storageOptimizer.failedItems>0 {throw CoreCLIError(code:"optimization_failed",message:storageOptimizer.status)}
+                return ["completed":true,"owner":"desktop","savedBytes":storageOptimizer.savedBytes,"status":storageOptimizer.status]
             case "cleanup":
                 guard args["confirmed"] as? Bool == true else { throw CoreCLIError(code:"confirmation_required",message:"Permanent cleanup requires --yes.") }
                 return NativeCoreCLI.cleanupResult(try await clearStorage(NativeCoreCLI.cleanupPlan(args,store:store)))
@@ -183,9 +226,10 @@ import ServiceManagement
     }
     func stopCLIControl() async { await cliControl?.stop();cliControl = nil }
 
-    init(root: URL? = nil) throws {
+    init(root: URL? = nil,maintenanceOnly:Bool = false) throws {
         let root = root ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("RewindReplica")
-        store = try MemoryStore(root:root)
+        store = try MemoryStore(root:root,maintenanceOnly:maintenanceOnly)
+        if maintenanceOnly {try store.recoverForHeadless()}
         storageOptimizer = StorageOptimizer(store:store)
         storageUsage = StorageUsageModel(root:root,modelRoot:BuiltinModels.shared.root)
         // A separate WAL reader keeps long history/search queries from holding
@@ -260,14 +304,14 @@ import ServiceManagement
             }
         }
         capture.onStopped = { [weak self] in self?.recordingCoordinator.interrupted(); self?.rotationTask?.cancel(); self?.indexingStatus = "Recording stopped" }
-        try? store.applyRetention(days:settings.retentionDays)
+        if !maintenanceOnly {try? store.applyRetention(days:settings.retentionDays)}
         reload()
         onboardingOpen = OnboardingPolicy.shouldPresent(completed:settings.onboardingComplete,memories:total)
         launchFilmOpen = OnboardingPolicy.shouldPlayFilm(settings:settings,memories:total)
-        capture.resumePendingIndexing()
-        storageOptimizer.resume()
+        if !maintenanceOnly {capture.resumePendingIndexing()}
+        if !maintenanceOnly {storageOptimizer.resume()}
         let pendingURL = store.root.appendingPathComponent("pending-transcriptions.json")
-        if let data = try? Data(contentsOf:pendingURL),let ids = try? JSONDecoder().decode([String].self,from:data) {
+        if !maintenanceOnly,let data = try? Data(contentsOf:pendingURL),let ids = try? JSONDecoder().decode([String].self,from:data) {
             for id in ids { if let session = try? libraryReader.session(id),session.endedAt != nil { enqueueTranscription(session) } }
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName:NSWorkspace.willSleepNotification,object:nil,queue:.main) { [weak self] _ in
@@ -768,12 +812,12 @@ import ServiceManagement
             CaptureDiagnostics(root: store.root).write("Speech recognition failed; domain=\((error as NSError).domain); code=\((error as NSError).code)")
         }
     }
-    func persistSettings() throws { try JSONEncoder().encode(settings).write(to:store.root.appendingPathComponent("settings.json"),options:.atomic) }
+    func persistSettings() throws { try NativeCoreCLI.saveConfiguration(settings,root:store.root) }
     func toggleAppearance() {
         settings.appearance = settings.appearance == .warmDay ? .deepNight:.warmDay
         do { try persistSettings() } catch { notify("Appearance preference could not be saved") }
     }
-    func saveSettings(_ new: AppSettings, chatKey: String, speechKey: String) async throws {
+    func saveSettings(_ new: AppSettings, chatKey: String, speechKey: String,updateKeys:Bool = true,applyRetention:Bool = true) async throws {
         try new.shortcuts.validate()
         _ = try ModelClient.endpoint(new.chat,path:"models")
         if new.transcriptionEnabled { _ = try ModelClient.endpoint(new.transcription,path:"audio/transcriptions") }
@@ -786,12 +830,12 @@ import ServiceManagement
         let shortcutsChanged = old.shortcuts != new.shortcuts
         if shortcutsChanged { try configureShortcuts?(new.shortcuts) }
         do {
-            try SecretStore.save(chatKey,account:"chat"); try SecretStore.save(speechKey,account:"transcription")
+            if updateKeys {try SecretStore.save(chatKey,account:"chat"); try SecretStore.save(speechKey,account:"transcription")}
             if new.launchAtLogin != old.launchAtLogin {
                 if new.launchAtLogin { try SMAppService.mainApp.register() }
                 else if SMAppService.mainApp.status == .enabled { try await SMAppService.mainApp.unregister() }
             }
-            try JSONEncoder().encode(new).write(to:store.root.appendingPathComponent("settings.json"),options:.atomic)
+            try NativeCoreCLI.saveConfiguration(new,root:store.root)
         } catch {
             if shortcutsChanged { try? configureShortcuts?(old.shortcuts) }
             throw error
@@ -802,7 +846,7 @@ import ServiceManagement
         settings = new
         NotificationCenter.default.post(name:.recallSettingsSaved,object:nil)
         let database = store
-        try await Task.detached(priority:.utility) { try database.applyRetention(days:new.retentionDays) }.value
+        if applyRetention {try await Task.detached(priority:.utility) { try database.applyRetention(days:new.retentionDays) }.value}
         reload(); settingsOpen = false; notify("Settings saved")
         if restart { await startRecording() }
     }

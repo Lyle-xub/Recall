@@ -19,7 +19,8 @@ import Darwin
         let watcher = DispatchSource.makeFileSystemObjectSource(fileDescriptor:descriptor,eventMask:.write,queue:.main)
         watcher.setEventHandler { [weak self] in self?.drain() }
         watcher.setCancelHandler { close(descriptor) };source = watcher;watcher.resume()
-        try write(["protocol":1,"pid":getpid(),"instance":instance,"backend":"macos"],to:lease.directory.appendingPathComponent("owner.json"))
+        try write(["protocol":1,"pid":getpid(),"started":InferenceOwnership.started(getpid()) ?? 0,"instance":instance,"backend":CommandLine.arguments.contains("--headless-service") ? "macos-headless":"macos"],to:lease.directory.appendingPathComponent("owner.json"))
+        drain()
     }
     private func write(_ value:Any,to url:URL)throws {
         try JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]).write(to:url,options:.atomic)
@@ -42,10 +43,14 @@ import Darwin
                         guard attributes.isSymbolicLink != true,(attributes.fileSize ?? Int.max) <= 2_000_000,
                               let request = try JSONSerialization.jsonObject(with:Data(contentsOf:file)) as? [String:Any],request["instance"] as? String == instance,
                               let operation = request["operation"] as? String,let args = request["args"] as? [String:Any] else { throw CoreCLIError(code:"invalid_request",message:"Invalid or stale control request.") }
+                        if FileManager.default.fileExists(atPath:lease.directory.appendingPathComponent(id+".cancel").path) { throw CoreCLIError(code:"cancelled",message:"Request cancelled before it started.") }
+                        try write(["id":id,"operation":operation,"state":"running","ownerPid":getpid(),"instance":instance],to:lease.directory.appendingPathComponent(id+".task.json"))
                         response = ["ok":true,"result":try await handler(operation,args)]
                     } catch { response = ["ok":false,"error":["code":(error as? CoreCLIError)?.code ?? "operation_failed","message":error.localizedDescription]] }
                     try? write(response,to:lease.directory.appendingPathComponent(id+".response.json"))
+                    try? write(["id":id,"state":"finished","ownerPid":getpid(),"instance":instance],to:lease.directory.appendingPathComponent(id+".task.json"))
                     try? FileManager.default.removeItem(at:file)
+                    try? FileManager.default.removeItem(at:lease.directory.appendingPathComponent(id+".cancel"))
                 }
             }
         }

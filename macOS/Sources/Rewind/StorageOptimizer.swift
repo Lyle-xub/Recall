@@ -18,6 +18,7 @@ import Combine
     private var scheduled = Set<Job>()
     private(set) var checkedImages = 0,checkedVideos = 0,checkedIndexes = 0
     private var packedTiles = 0
+    private(set) var failedItems = 0
     var onImageArchived:((String,String)->Void)?
     var onFramesArchived:(([MemoryFrame])->Void)?
     var onFinished:(()->Void)?
@@ -39,6 +40,7 @@ import Combine
     }
     func resume() { guard !paused,!maintenanceSuspended else { return };add(.discover(false));startWorker() }
     func continueWhileOpen() { userInitiated = true;updateGate() }
+    func waitUntilFinished() async {await worker?.value}
     func optimizeExisting() {
         guard !maintenanceSuspended else { return }
         paused = false;continueWhileOpen();add(.discover(true));startWorker()
@@ -55,7 +57,7 @@ import Combine
     private func startWorker() {
         guard worker == nil,!maintenanceSuspended else { return }
         totalItems = pending.filter { if case .discover = $0 {return false};return true }.count
-        running = true;completedItems = 0;checkedImages = 0;checkedVideos = 0;checkedIndexes = 0;packedTiles = 0;indeterminate = true
+        running = true;completedItems = 0;failedItems = 0;checkedImages = 0;checkedVideos = 0;checkedIndexes = 0;packedTiles = 0;indeterminate = true
         updateGate()
         worker = Task { [weak self] in
             guard let self else { return }
@@ -71,7 +73,7 @@ import Combine
                     store = try await Task.detached(priority:.utility) { try MemoryStore(root:root,maintenanceOnly:true) }.value
                     database = store
                 }
-            } catch { status = "Could not open storage for optimization. Try again.";return }
+            } catch { failedItems=1;status = "Could not open storage for optimization. Try again.";return }
             var failed = 0,keptVideos = 0,tileScanStarted = false
             while !pending.isEmpty,!Task.isCancelled {
                 do { try await workGate.wait() } catch { break }
@@ -174,7 +176,7 @@ import Combine
                     }
                 } catch {
                     if Task.isCancelled { break }
-                    failed += 1;CaptureDiagnostics(root:root).write("Storage optimization deferred; originals retained; code=\((error as NSError).code)")
+                    failed += 1;failedItems=failed;CaptureDiagnostics(root:root).write("Storage optimization deferred; originals retained; code=\((error as NSError).code)")
                 }
                 if completed { completedItems += 1 }
                 if !pending.isEmpty { try? await Task.sleep(for:.seconds(BackgroundProcessingPolicy.recoveryInterval(after:Date().timeIntervalSince(started)))) }
@@ -191,5 +193,5 @@ import Combine
         database = nil
     }
     func endCleanup() { maintenanceSuspended = false;resume() }
-    func stop() async { worker?.cancel() }
+    func stop() async { worker?.cancel();await worker?.value }
 }

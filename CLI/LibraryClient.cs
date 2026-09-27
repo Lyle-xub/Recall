@@ -31,20 +31,28 @@ public sealed class LibraryClient(string root)
     }
     public async Task<JsonElement> Call(string operation, object args, CancellationToken ct)
     {
+        if(LibraryCommands.Exclusive(operation)) LibrarySafety.CheckLegacyDefaultOwner(Root);
         var format = LibraryFormats.Detect(Root);
         if (format == LibraryFormat.Missing) throw new RecallException("not_found", "No Recall database exists at this data directory. Use library init explicitly to create one.");
         if (format == LibraryFormat.Unknown) throw new RecallException("unsupported_schema", "Unrecognized or ambiguous library schema. No changes were made.");
-        if (LibraryCommands.Writes(operation) && LibraryControlClient.Owner(Root) != null)
+        if (LibraryCommands.Exclusive(operation) && LibraryControlClient.Owner(Root) != null)
             return await LibraryControlClient.Send(Root, operation, args, ct);
         if (format == LibraryFormat.MacOS) return await Native(operation, args, ct);
-        using var lease = LibraryCommands.Writes(operation) ? new LibraryLease(Root) : null;
+        using var lease = LibraryCommands.Exclusive(operation) ? new LibraryLease(Root) : null;
         using var store = new MemoryStore(Root, readOnly: !LibraryCommands.Writes(operation), initialize: false);
+        if (operation == "index-one")
+        {
+            var input = Wire.Element(args);var frame = LibraryCommands.Require(store,input);
+            var path = store.SafePath(frame.ImagePath) ?? throw new RecallException("invalid_path","Unsafe image path.");
+            var result = await OcrEngine.Recognize(path,input.Text("language") ?? "eng",ct);
+            store.Recognized(frame.Id,result.Text,result.Regions);return Wire.Element(new { completed=1,id=frame.Id });
+        }
         return Wire.Element(LibraryCommands.Execute(store, operation, Wire.Element(args)));
     }
     async Task<JsonElement> Native(string operation, object args, CancellationToken ct)
     {
         var helper = MacHelper ?? throw new RecallException("platform_unavailable", "This is a native Mac library. Use the macOS CLI bundle with recall-macos-core (or set RECALL_MAC_CORE). Its original schema is preserved.");
-        var result = await ChildProcess.Run(helper, ["--core-service"], JsonSerializer.Serialize(new { root = Root, operation, args }, Wire.Json), ct);
+        var result = await ChildProcess.Run(helper, ["--core-service"], JsonSerializer.Serialize(new { root = Root, operation, args }, Wire.Json), ct, LibraryCommands.Writes(operation) ? 0 : 120);
         using var document = JsonDocument.Parse(result.Output);
         if (result.ExitCode != 0 || !document.RootElement.Flag("ok"))
         {
@@ -52,27 +60,5 @@ public sealed class LibraryClient(string root)
             throw new RecallException(error.Text("code") ?? "operation_failed", error.Text("message") ?? "Native core request failed.");
         }
         return document.RootElement.GetProperty("result").Clone();
-    }
-}
-
-public static class ChildProcess
-{
-    public static async Task<(int ExitCode, string Output, string Error)> Run(string executable, IEnumerable<string> args, string? input, CancellationToken ct, int timeoutSeconds = 120)
-    {
-        var info = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true };
-        foreach (var arg in args) info.ArgumentList.Add(arg);
-        info.Environment["OMP_THREAD_LIMIT"] = "2";
-        using var process = Process.Start(info) ?? throw new RecallException("engine_missing", "Could not start the requested engine.");
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
-        var output = process.StandardOutput.ReadToEndAsync(deadline.Token);
-        var error = process.StandardError.ReadToEndAsync(deadline.Token);
-        try
-        {
-            if (input != null) await process.StandardInput.WriteAsync(input.AsMemory(), deadline.Token);
-            process.StandardInput.Close();
-            await process.WaitForExitAsync(deadline.Token);
-            return (process.ExitCode, await output, await error);
-        }
-        catch { if (!process.HasExited) process.Kill(true); throw; }
     }
 }

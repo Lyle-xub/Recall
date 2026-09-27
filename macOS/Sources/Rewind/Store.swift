@@ -56,6 +56,12 @@ final class MemoryStore: @unchecked Sendable {
         try recoverImageArchives()
         try recoverInterruptedVisualSessions()
     }
+    // The headless owner holds the same exclusive lease as the desktop, so it
+    // can recover interrupted work without creating or migrating any tables.
+    func recoverForHeadless()throws {
+        try recoverPendingCleanups();try recoverVideoArchives();try recoverImageArchives();try recoverInterruptedVisualSessions()
+        for var session in try sessions() where session.endedAt == nil {session.endedAt=Date();try saveSession(session)}
+    }
     deinit { sqlite3_close(db) }
 
     @discardableResult private func synchronized<T>(_ body: () throws -> T) rethrows -> T {
@@ -304,7 +310,7 @@ final class MemoryStore: @unchecked Sendable {
     }
     func applyRetention(days: Int) throws {
         guard days > 0 else {return};let now = Date()
-        try execute("UPDATE frames SET deleted=?,json=json_set(json,'$.deletedAt',?) WHERE deleted IS NULL AND starred=0 AND demo=0 AND time<?",[now.timeIntervalSince1970,now.timeIntervalSinceReferenceDate,now.addingTimeInterval(-Double(days)*86400).timeIntervalSince1970])
+        try execute("UPDATE frames SET deleted=?,json=json_set(json,'$.deletedAt',?) WHERE deleted IS NULL AND starred=0 AND demo=0 AND time<? AND (json_extract(json,'$.sessionID') IS NULL OR json_extract(json,'$.sessionID') NOT IN (SELECT id FROM sessions WHERE json_extract(json,'$.endedAt') IS NULL))",[now.timeIntervalSince1970,now.timeIntervalSinceReferenceDate,now.addingTimeInterval(-Double(days)*86400).timeIntervalSince1970])
         try execute("DELETE FROM app_usage WHERE end<?",[now.addingTimeInterval(-Double(days)*86400).timeIntervalSince1970])
     }
     @discardableResult func emptyTrash() throws -> Int {
@@ -343,7 +349,7 @@ final class MemoryStore: @unchecked Sendable {
                     if container {
                         guard let image = StoredImage.load(source) else {throw RewindError.message("A screenshot could not be exported.")}
                         try ScreenArchive.encode(image,type:.png).write(to:target,options:.atomic)
-                    } else if FileManager.default.fileExists(atPath:source.path) {try FileManager.default.copyItem(at:source,to:target)}
+                    } else {guard FileManager.default.fileExists(atPath:source.path) else {throw CoreCLIError(code:"not_found",message:"A referenced screenshot is missing; no export was published.")};try FileManager.default.copyItem(at:source,to:target)}
                 }
                 return relative
             }
@@ -352,7 +358,7 @@ final class MemoryStore: @unchecked Sendable {
         }
         let sessionIDs = Set(frames.compactMap(\.sessionID))
         let sessions = try sessions().filter { sessionIDs.contains($0.id) }
-        for s in sessions {for path in [s.videoPath,s.systemAudioPath,s.microphoneAudioPath].compactMap({$0}) where FileManager.default.fileExists(atPath:root.appendingPathComponent(path).path) {try FileManager.default.copyItem(at:root.appendingPathComponent(path),to:destination.appendingPathComponent(path))}}
+        for s in sessions {for path in [s.videoPath,s.systemAudioPath,s.microphoneAudioPath].compactMap({$0}) where !path.isEmpty {guard FileManager.default.fileExists(atPath:root.appendingPathComponent(path).path) else {throw CoreCLIError(code:"not_found",message:"A referenced recording is missing; no export was published.")};try FileManager.default.copyItem(at:root.appendingPathComponent(path),to:destination.appendingPathComponent(path))}}
         let lines = try sessions.flatMap { try transcript($0.id) }
         try encoder.encode(copies).write(to: destination.appendingPathComponent("frames.json"))
         try encoder.encode(sessions).write(to: destination.appendingPathComponent("sessions.json"))

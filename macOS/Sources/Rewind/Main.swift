@@ -6,6 +6,9 @@ import Combine
 @main struct RewindApplication {
     static func main() {
         if CommandLine.arguments.contains("--core-service") { exit(NativeCoreCLI.run()) }
+        if CommandLine.arguments.contains("--headless-service") {
+            let sink = open("/dev/null",O_RDWR);if sink >= 0 {dup2(sink,STDOUT_FILENO);dup2(sink,STDERR_FILENO);close(sink)}
+        }
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
@@ -40,9 +43,16 @@ import Combine
         do {
             let root = dataRoot ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("RewindReplica")
             cliLease = try CoreCLILease(root:root)
-            model = try AppModel(root:root)
+            model = try AppModel(root:root,maintenanceOnly:args.contains("--headless-service"))
             try model.enableCLIControl(lease:cliLease!)
-        } catch {let alert = NSAlert();alert.messageText = "Recall could not open your library";alert.informativeText = error.localizedDescription;alert.runModal();NSApp.terminate(nil);return}
+        } catch {
+            if args.contains("--headless-service"),let dataRoot {
+                let target=dataRoot.appendingPathComponent(".recall-control/startup-error.json")
+                try? JSONSerialization.data(withJSONObject:["code":(error as? CoreCLIError)?.code ?? "service_failed","message":error.localizedDescription]).write(to:target,options:.atomic)
+                exit(1)
+            }
+            let alert = NSAlert();alert.messageText = "Recall could not open your library";alert.informativeText = error.localizedDescription;alert.runModal();NSApp.terminate(nil);return}
+        if args.contains("--headless-service") {NSApp.setActivationPolicy(.accessory);return}
         responseWatchdog = UIResponseWatchdog(root:model.store.root)
         NSApp.setActivationPolicy(model.settings.showDockIcon ? .regular:.accessory)
         window = RewindOverlayWindow(contentRect:NSScreen.main?.frame ?? NSRect(x:0,y:0,width:1240,height:820),styleMask:[.borderless,.fullSizeContentView],backing:.buffered,defer:false)
@@ -106,7 +116,7 @@ import Combine
             CaptureDiagnostics(root:self.model.store.root).write("Overlay active; dockHidden=\(NSApp.currentSystemPresentationOptions.contains(.hideDock)); currentSpace=\(self.window.isOnActiveSpace)")
         }
     }
-    func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool)->Bool {show();return true}
+    func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool)->Bool {if !CommandLine.arguments.contains("--headless-service") {show()};return true}
     func windowShouldClose(_ sender:NSWindow)->Bool {model.hideOverlay();return false}
     func applicationShouldTerminate(_ sender:NSApplication)->NSApplication.TerminateReply {
         if terminating || model == nil {return .terminateNow}

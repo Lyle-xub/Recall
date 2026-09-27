@@ -28,6 +28,7 @@ public sealed class MemoryStore : IDisposable
         {
             db = new(new SqliteConnectionStringBuilder { DataSource = Path.Combine(Root, "memory.sqlite"), Mode = readOnly ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWrite, DefaultTimeout = 15, Pooling = false }.ToString());
             db.Open();
+            try {if(!readOnly)RecoverPendingCleanups();}catch {db.Dispose();throw;}
             return;
         }
         Directory.CreateDirectory(Root);
@@ -65,6 +66,7 @@ public sealed class MemoryStore : IDisposable
             foreach (var frame in legacy)
                 Save(frame);
         }
+        try {RecoverPendingCleanups();}catch {db.Dispose();throw;}
     }
     private static double Seconds(DateTimeOffset date) => date.ToUnixTimeMilliseconds() / 1000.0;
     private SqliteCommand Command(string sql, params object?[] values)
@@ -347,7 +349,7 @@ public sealed class MemoryStore : IDisposable
         if (days <= 0)
             return;
         var now = DateTimeOffset.Now;
-        Execute("UPDATE frames SET deleted=$p0,json=json_set(json,'$.DeletedAt',$p1) WHERE deleted IS NULL AND starred=0 AND demo=0 AND time<$p2", Seconds(now), now.ToString("O"), Seconds(now.AddDays(-days)));
+        Execute("UPDATE frames SET deleted=$p0,json=json_set(json,'$.DeletedAt',$p1) WHERE deleted IS NULL AND starred=0 AND demo=0 AND time<$p2 AND (json_extract(json,'$.SessionId') IS NULL OR json_extract(json,'$.SessionId') NOT IN (SELECT id FROM sessions WHERE json_extract(json,'$.EndedAt') IS NULL))", Seconds(now), now.ToString("O"), Seconds(now.AddDays(-days)));
     }
     public List<MemoryFrame> MetadataFrames() => Rows<MemoryFrame>("SELECT json FROM frames");
     public List<MemoryFrame> PendingFrames() => Rows<MemoryFrame>("SELECT json FROM frames WHERE json_extract(json,'$.TextState') IN (0,1)");
@@ -366,7 +368,7 @@ public sealed class MemoryStore : IDisposable
             var ids = selected.Select(f => f.Id).ToHashSet();
             var kept = all.Where(f => !ids.Contains(f.Id)).ToList();
             var removedSessions = sessions.Where(s => s.EndedAt != null && selected.Any(f => f.SessionId == s.Id) && !kept.Any(f => f.SessionId == s.Id)).ToList();
-            var files = selected.SelectMany(Media).Except(kept.SelectMany(Media)).Concat(removedSessions.SelectMany(Media)).Distinct().Where(p => SafePath(p) != null).ToArray();
+            var files = selected.SelectMany(Media).Except(kept.SelectMany(Media)).Concat(removedSessions.SelectMany(Media)).Distinct().Where(p => OwnedMediaPath(p) != null).ToArray();
             return new(selected.Select(f => f.Id).ToArray(), files, files.Sum(p => File.Exists(SafePath(p)) ? new FileInfo(SafePath(p)!).Length : 0), keepStarred);
         }
     }
@@ -375,6 +377,7 @@ public sealed class MemoryStore : IDisposable
         lock (mediaGate)
             lock (gate)
             {
+                RecoverPendingCleanups();
                 var ids = plan.Ids.ToHashSet();
                 var all = MetadataFrames();
                 var sessions = Sessions();
@@ -384,6 +387,11 @@ public sealed class MemoryStore : IDisposable
                 var kept = all.Where(f => !actual.Contains(f.Id)).ToList();
                 var removedSessions = sessions.Where(s => s.EndedAt != null && removed.Any(f => f.SessionId == s.Id) && !kept.Any(f => f.SessionId == s.Id)).ToList();
                 var paths = removed.SelectMany(Media).Except(kept.SelectMany(Media)).Concat(removedSessions.SelectMany(Media)).Distinct().ToList();
+                var control=Path.Combine(Root,".recall-control");
+                Directory.CreateDirectory(control);
+                if(!OperatingSystem.IsWindows())File.SetUnixFileMode(control,UnixFileMode.UserRead|UnixFileMode.UserWrite|UnixFileMode.UserExecute);
+                var receipt=Path.Combine(control,"cleanup-"+Guid.NewGuid().ToString("N")+".json");
+                Wire.Atomic(receipt,new CleanupRecovery(removed.Select(f=>f.Id).ToArray(),removedSessions.Select(s=>s.Id).ToArray(),paths.ToArray()));
                 Execute("BEGIN IMMEDIATE");
                 try
                 {
@@ -397,28 +405,57 @@ public sealed class MemoryStore : IDisposable
                     Execute("DELETE FROM ocr_payloads WHERE id NOT IN (SELECT ocr_id FROM frames WHERE ocr_id IS NOT NULL)");
                     Execute("COMMIT");
                 }
-                catch { Execute("ROLLBACK"); throw; }
-                foreach (var p in paths)
-                {
-                    var full = SafePath(p);
-                    if (full != null && File.Exists(full))
-                        File.Delete(full);
-                }
+                catch { Execute("ROLLBACK");File.Delete(receipt);throw; }
+                RecoverPendingCleanups();
                 Execute("PRAGMA wal_checkpoint(TRUNCATE)");
                 return removed.Count;
             }
     }
-    public void ReplaceImage(string source, string target)
+    private record CleanupRecovery(string[] Ids,string[] Sessions,string[] Files);
+    public void RecoverPendingCleanups()
+    {
+        var control=Path.Combine(Root,".recall-control");
+        if(!Directory.Exists(control))return;
+        if((File.GetAttributes(control)&FileAttributes.ReparsePoint)!=0)throw new RecallException("invalid_path","Cleanup directory must not be a symbolic link.");
+        lock(mediaGate)lock(gate)
+        foreach(var receipt in Directory.EnumerateFiles(control,"cleanup-*.json"))
+        {
+            if((File.GetAttributes(receipt)&FileAttributes.ReparsePoint)!=0)throw new RecallException("invalid_path","Cleanup receipt must not be a symbolic link.");
+            var recovery=JsonSerializer.Deserialize<CleanupRecovery>(File.ReadAllText(receipt),Wire.Json)??throw new RecallException("invalid_data","Invalid cleanup recovery receipt.");
+            // A prepared receipt precedes the SQLite transaction. Existing rows
+            // mean rollback; absent rows mean its deletion committed before exit.
+            if(recovery.Ids.Any(id=>Frame(id)!=null) || recovery.Sessions.Any(id=>Session(id)!=null)){File.Delete(receipt);continue;}
+            var referenced=MetadataFrames().SelectMany(Media).Concat(Sessions().SelectMany(Media)).ToHashSet();
+            try
+            {
+                foreach(var relative in recovery.Files.Where(p=>!referenced.Contains(p)))
+                    if(OwnedMediaPath(relative) is { } full && File.Exists(full))File.Delete(full);
+                File.Delete(receipt);
+            }
+            catch(Exception e) when(e is IOException or UnauthorizedAccessException)
+            {throw new RecallException("cleanup_pending","Database cleanup committed; some media could not be removed. The next writable open resumes removal after file access is restored.",new {receipt,error=e.Message});}
+        }
+    }
+    public void ReplaceImage(string source, string target,double? quality = null)
     {
         lock (gate)
         {
-            foreach (var f in AllFrames().Where(f => f.ImagePath == source || f.MeetingImagePath == source))
-                Save(f with
-                {
-                    ImagePath = f.ImagePath == source ? target : f.ImagePath,
-                    MeetingImagePath = f.MeetingImagePath == source ? target : f.MeetingImagePath
-                });
+            Execute("BEGIN IMMEDIATE");
+            try
+            {
+                foreach (var f in AllFrames().Where(f => f.ImagePath == source || f.MeetingImagePath == source))
+                    Save(f with {ImagePath=f.ImagePath==source?target:f.ImagePath,MeetingImagePath=f.MeetingImagePath==source?target:f.MeetingImagePath,ImageQuality=quality??f.ImageQuality});
+                Execute("COMMIT");
+            }
+            catch {Execute("ROLLBACK");throw;}
         }
+    }
+    private string? OwnedMediaPath(string relative)
+    {
+        var path=SafePath(relative);
+        if(path==null)return null;
+        var local=Path.GetRelativePath(Root,path);
+        return local.StartsWith("frames"+Path.DirectorySeparatorChar,StringComparison.Ordinal) || local.StartsWith("recordings"+Path.DirectorySeparatorChar,StringComparison.Ordinal) ? path:null;
     }
     public string? SafePath(string relative)
     {
@@ -475,10 +512,18 @@ public sealed class MemoryStore : IDisposable
     private static IEnumerable<string> Media(RecordingSession s) => new[] { s.VideoPath, s.SystemAudioPath, s.MicrophoneAudioPath, $"recordings/{s.Id}.wav" }.Where(p => !string.IsNullOrEmpty(p)).Cast<string>();
     public void Export(string destination, List<MemoryFrame> frames)
     {
+        lock(mediaGate)
+        lock(gate)
+        {
         Directory.CreateDirectory(destination);
         var sessions = frames.Select(x => x.SessionId).Distinct().Where(x => x != null).Select(x => Session(x!)).Where(x => x != null).Cast<RecordingSession>().ToList();
-        foreach (var name in frames.SelectMany(Media).Concat(sessions.SelectMany(Media)).Distinct())
-            if (SafePath(name) is { } source && File.Exists(source))
+        var required=frames.SelectMany(f=>new[]{f.ImagePath,f.MeetingImagePath}).Where(p=>!string.IsNullOrEmpty(p)).Cast<string>().Concat(sessions.SelectMany(s=>new[]{s.VideoPath,s.SystemAudioPath,s.MicrophoneAudioPath}.Where(p=>!string.IsNullOrEmpty(p)).Cast<string>())).ToHashSet();
+        foreach(var path in required.ToArray().Where(p=>p.EndsWith(".recallframe")))
+            if(SafePath(path) is { } manifest && File.Exists(manifest))foreach(var tile in ScreenManifest.Read(manifest).Tiles)required.Add(tile.Path);
+        foreach(var sidecar in frames.SelectMany(f=>new[]{$"frames/{f.Id}.ocr.png",$"frames/{f.Id}-meeting.ocr.png"}).Where(p=>File.Exists(SafePath(p))))required.Add(sidecar);
+        var names=required.Concat(sessions.Select(s=>$"recordings/{s.Id}.wav").Where(p=>File.Exists(SafePath(p)))).Distinct();
+        foreach (var name in names)
+            if (OwnedMediaPath(name) is { } source && File.Exists(source))
             {
                 var target = Path.GetFullPath(Path.Combine(destination, name));
                 if (!target.StartsWith(Path.GetFullPath(destination) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
@@ -486,9 +531,11 @@ public sealed class MemoryStore : IDisposable
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                 File.Copy(source, target, true);
             }
+            else throw new RecallException("not_found","A referenced media file is missing or unsafe; no export was published.");
         File.WriteAllText(Path.Combine(destination, "frames.json"), JsonSerializer.Serialize(frames));
         File.WriteAllText(Path.Combine(destination, "sessions.json"), JsonSerializer.Serialize(sessions));
         File.WriteAllText(Path.Combine(destination, "transcripts.json"), JsonSerializer.Serialize(sessions.SelectMany(s => Transcript(s.Id))));
+        }
     }
     public void Dispose()
     {

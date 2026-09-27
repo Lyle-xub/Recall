@@ -19,8 +19,9 @@ The script builds for the host architecture. It produces a self-contained direct
 archive and SHA-256 manifest under `release/Recall-CLI-<rid>` (Windows: `recall.exe`).
 Copy the **whole directory**, not only the launcher. No .NET installation is needed
 to run a published bundle. Mac bundles include `recall-macos-core`, built from the
-existing Swift store and decoder. Its headless entry point exits before creating a
-GUI. Local Mac builds are ad-hoc signed, not notarized releases.
+existing Swift store and decoder. Per-command native requests exit without creating
+a GUI; the optional background service stays alive until stopped. Local Mac builds
+are ad-hoc signed, not notarized releases.
 
 For source development, use `dotnet run --project CLI -- ...`. Native Mac libraries
 also require `swift build --package-path macOS --product Recall` and
@@ -42,7 +43,10 @@ migrates an existing database. Unknown schemas are rejected before a write.
 Windows-format libraries work on all three platforms. macOS retains its native
 schema, compressed OCR and media through the Swift adapter and therefore requires
 macOS. This is shared local application data, not cross-device synchronization.
-Linux has no desktop recorder in this repository; use `records import` for ingestion.
+Linux can import existing images or capture screenshots through a headless service in an
+authorized graphical session. X11 uses FFmpeg; compatible Wayland compositors use
+`grim`. A plain SSH session without a display cannot capture a desktop. Native Mac
+libraries and their recording pipeline still require macOS.
 
 ```sh
 # An explicit disposable library, for a new installation or a test
@@ -69,9 +73,13 @@ pages. Filters include `--app`, `--since`, `--until`, `--starred`, `--trash`, `-
 recall recording status --json
 recall recording start
 recall recording stop
+recall service start
+recall service stop
 recall tasks status
 recall ocr image screenshot.png --language eng
-recall index run --limit 100
+recall index run --limit 100 --language eng
+recall tasks resume TASK_ID
+recall tasks result TASK_OR_REQUEST_ID
 recall storage stats
 recall storage check
 recall storage cleanup --scope trash             # preview only
@@ -80,28 +88,90 @@ recall storage compact --yes
 recall storage optimize
 ```
 
-Recording start/stop and media optimization require the updated macOS or WinUI
-desktop from this branch running with the same data directory. They control that
-application's existing coordinator and background jobs. The CLI does not launch a
-second recorder or force the GUI open. Recording can remain automatically paused
-while the app interface is visible; the status reports requested and active states
-separately. Legacy desktop builds and the legacy WinForms shell do not expose this
-protocol: close them before offline mutations, or upgrade to the compatible desktop.
+`recording start` uses the compatible desktop owner when one is running. Otherwise,
+it starts a background owner for the selected library without opening the Recall
+interface. `service start` starts that owner without requesting recording.
+`recording stop` stops acquisition but leaves the owner available; `service stop`
+exits a headless owner and refuses to quit a desktop application. A library must
+already exist; starting the service never initializes or migrates it implicitly.
 
-When the compatible desktop is running, `index run` queues its native OCR pipeline.
-`--id` retries a particular memory. Offline indexing uses Tesseract installed on
-`PATH` (or `RECALL_TESSERACT`) and holds the library's exclusive task lease. Install
-the language data needed by `--language`; the default is `eng`. It processes up to
-`--limit` pending/failed records; repeat for subsequent batches. Offline Windows
-packed images require the desktop decoder; the command reports `unsupported_media`
-instead of marking an unread image indexed. The Mac helper uses the app decoder.
+| Owner / platform | Capture path | Requirements and limits |
+| --- | --- | --- |
+| Running compatible desktop | Existing native recording coordinator | Same library; capture may be automatically paused while its UI is visible |
+| macOS native library, no desktop | Native Mac helper, without UI | macOS screen-recording permission; microphone permission if enabled |
+| Windows-format library on Windows | FFmpeg `gdigrab` screenshot service | Interactive desktop and FFmpeg on `PATH` |
+| Windows-format library on Linux / X11 | FFmpeg `x11grab` screenshot service | Authorized `DISPLAY` and FFmpeg on `PATH` |
+| Windows-format library on Linux / Wayland | `grim` screenshot service | A compositor supported by `grim` and its required permission |
 
-`storage compact` compacts SQLite/FTS; `storage optimize` is the desktop's existing
-image/video compression job and reports acceptance, not completion. Inspect
-`tasks status` for progress. Cleanup protects starred memories and active sessions
-by default. `--include-starred --yes` explicitly includes stars. `--dry-run` and
-`--yes` are mutually exclusive. Database updates and media removal reuse each
-platform's existing store maintenance logic.
+The portable service captures still screenshots and runs OCR. It does not provide
+native video/audio recording or the full desktop's application metadata. Audio
+transcription of supplied files remains available separately. Unsupported capture
+requirements and missing engines are errors; no synthetic fallback frames are
+created. `RECALL_FFMPEG` and `RECALL_GRIM` select explicit backend executables.
+Portable capture refuses a nonempty application exclusion list or a saved display
+selection, because it cannot enforce those native rules. Default settings exclude
+password managers. Keep the native recorder for application-aware exclusions. For
+an explicitly chosen whole-display session, `config set excluded-apps '[]'` clears
+the exclusions; all visible content on that display may then be captured.
+
+Legacy desktop builds do not expose the ownership protocol. Close an older desktop
+before CLI writes to its library, or upgrade both components. Reads do not need a
+running desktop. The default-library write guard detects known legacy owners;
+it is not a substitute for stopping arbitrary old software that writes the same
+custom directory.
+
+`index run` snapshots up to `--limit` pending/failed record IDs, or the explicit
+`--id`, and records a durable task. It processes each record through the current
+owner or offline adapter, using the requested Tesseract `--language`. Install that
+language's data and Tesseract on `PATH`, or set `RECALL_TESSERACT`. Native Mac images
+are decoded through the Swift store; unsupported packed media is reported as an
+error rather than marked recognized. Progress events go to stderr; `--json` keeps
+one result envelope on stdout.
+
+Use `tasks status` to inspect index jobs and owner request receipts. A failed or
+cancelled indexing command includes its task ID, completed count and resume command.
+`tasks resume` continues unfinished records. If a request's completion is uncertain,
+inspect its durable receipt with `tasks result` before retrying a mutation such as
+`records star`, which toggles state. Cancelling a waiting client does not roll back
+an already running owner operation.
+
+`storage compact` compacts SQLite/FTS. `storage optimize` uses the native optimizer
+when available; the portable path recompresses supported still images with FFmpeg.
+Install both `ffmpeg` and `ffprobe` for portable optimization; their executable
+overrides are `RECALL_FFMPEG` and `RECALL_FFPROBE`.
+Portable optimization preserves dimensions and existing OCR, skips images awaiting
+OCR and leaves video recompression to the native desktop. Completed replacements
+are retained after interruption; rerun the command to continue. Inspect the result
+for completed/skipped work, saved bytes and platform-specific limits.
+
+Cleanup protects starred memories and active sessions by default.
+`--include-starred --yes` explicitly includes stars. `--dry-run` and `--yes` are
+mutually exclusive. Exports use a separate staging directory and only publish the
+requested destination after the export completes. Export requires a new or empty
+directory outside the live library.
+
+## Settings
+
+```sh
+recall config show
+recall config set capture-interval 3
+recall config set retention-days 0
+recall config set system-audio false
+recall config set microphone false
+recall config set transcription-enabled false
+```
+
+`config set` changes the selected library's settings through its current owner, or
+under an exclusive offline lease. `capture-interval` is an integer from 1 to 3600
+seconds. `retention-days` accepts 0 to 36500; 0 keeps all records. Changing retention
+also applies the native retention policy to existing unstarred records, moving
+eligible records to trash. Permanent removal is a separate cleanup command.
+Boolean values are `true` and `false`. Model endpoints can be selected per command
+with the options below; saved credentials are never printed by `config show`.
+`excluded-apps` accepts a JSON array: application names for Windows-format libraries
+(for example, `'["1Password","Bitwarden"]'`) or bundle identifiers for native Mac
+libraries (for example, `'["com.1password.1password"]'`). The Mac desktop's separate
+name-based exclusions are retained.
 
 ## Models and transcription
 
@@ -136,6 +206,13 @@ Windows x64; Linux engines must be installed separately. No model weights are
 downloaded implicitly. Use `doctor` to inspect paths. Native model execution
 requires adequate memory and is not covered by the lightweight CI model mock.
 
+Built-in inference uses one process owner per user and engine. A CLI can reuse a
+compatible desktop's ready chat service when it has the same model file identity;
+it never stops the desktop's engine when the command exits. If another client is
+loading a model or owns a non-shared engine, the command reports `busy` instead of
+loading another copy. Recorded process identities allow a later CLI invocation to
+recover an abandoned engine without treating a reused PID as the original process.
+
 ## Interoperability and concurrency
 
 The shared C# core is in `Core/`; WinUI and the CLI reference it. The Mac helper calls
@@ -166,7 +243,7 @@ Human output is indented JSON. `--json` emits one compact stdout envelope:
 
 Exit codes: `0` success; `2` usage; `3` missing record/file/library; `4` unsupported
 platform/schema or unavailable service/engine; `5` busy/conflict/confirmation;
-`6` operation failure; `130` cancellation. `--help` and `--version` never require
+`6` operation failure or an uncertain timed-out request; `130` cancellation. `--help` and `--version` never require
 a library. Library-specific metadata retains platform fields; common memory IDs,
 text, normalized OCR rectangles and wire ISO timestamps are consistent.
 
@@ -183,6 +260,20 @@ Set `RECALL_MAC_CORE` for native Mac checks and `RECALL_OCR_FIXTURE` to
 `docs/macos-visual-reference/fixtures/frames/parity-2-0.png` for real Tesseract OCR.
 Tests create isolated temporary libraries and never delete real application records.
 The `Shared library CLI` GitHub Actions workflow builds and exercises published
-bundles on Windows, macOS and Linux, including actual OCR on Mac/Linux. Model HTTP
-and recording ownership tests use local mock engines; permission dialogs, physical
-screen/audio recording and downloaded LLM inference still need platform smoke tests.
+bundles on Windows, macOS and Linux, including actual OCR on Mac/Linux. Linux also
+runs a real FFmpeg capture, Tesseract OCR, search, stop, optimization and export
+round trip in a private Xvfb display containing only a generated scene:
+
+```sh
+# Linux: install FFmpeg, Tesseract, Xvfb, python3-tk and DejaVu fonts first
+python3 scripts/test-cli-capture.py --cli release/Recall-CLI-linux-x64/recall
+```
+
+This script creates its own display and never records the user's current desktop.
+It removes its temporary library by default; `--keep-library` retains synthetic
+evidence. Windows physical-console capture, Wayland compositor compatibility, Mac
+permission prompts and native audio capture require their platform smoke tests.
+The lightweight CI model service is a mock. To exercise already-installed native
+models locally, set `RECALL_REAL_AUDIO` to a generated speech fixture along with
+`REWIND_MODEL_ROOT` and `REWIND_RUNTIME_ROOT`; no model download is implicit.
+See [validation and platform limits](cli-validation.md) for measured results.

@@ -6,6 +6,8 @@ using System.Text.Json;
 using Recall.Cli;
 using Rewind;
 
+if(args is ["--inference-test-child"]) {await Task.Delay(TimeSpan.FromSeconds(60));return;}
+
 var root = Path.Combine(Path.GetTempPath(), "recall-cli-tests-" + Guid.NewGuid());
 var host = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet";
 var packaged = Environment.GetEnvironmentVariable("RECALL_CLI_BINARY");
@@ -14,7 +16,7 @@ var tests = 0;
 void Assert(bool value, string description) { if (!value) throw new Exception(description); Interlocked.Increment(ref tests); }
 async Task<JsonElement> Run(string library, int expected, params string[] words)
 {
-    var result = await ChildProcess.Run(packaged ?? host, (packaged == null ? new[] { cli } : Array.Empty<string>()).Concat(new[] { "--data-dir", library, "--json" }).Concat(words), null, default, 30);
+    var result = await ChildProcess.Run(packaged ?? host, (packaged == null ? new[] { cli } : Array.Empty<string>()).Concat(new[] { "--data-dir", library, "--json" }).Concat(words), null, default, Environment.GetEnvironmentVariable("RECALL_REAL_AUDIO")!=null ? 240 : 30);
     Assert(result.ExitCode == expected, $"Exit {result.ExitCode}, expected {expected}: {string.Join(' ', words)}\n{result.Output}\n{result.Error}");
     using var json = JsonDocument.Parse(result.Output);
     Assert(json.RootElement.Flag("ok") == (expected == 0), "Stable JSON success/error contract");
@@ -75,10 +77,11 @@ try
         await Run(windows, 0, "storage", "compact", "--yes");
         Assert((await Run(windows, 0, "storage", "check")).Text("integrity") == "ok", "Post-maintenance integrity");
     }
-    await Run(windows, 4, "recording", "start");
+    Assert(!(await Run(windows, 0, "recording", "status")).Flag("active"), "Recording status does not implicitly start capture");
     await Run(windows, 3, "records", "get", "missing");
     Assert((await Run(windows, 0, "search", "%")).GetArrayLength() == 1, "Literal wildcard search");
     Assert((await Run(windows, 0, "search", "会议记录")).GetArrayLength() == 1, "Unicode search");
+    await DurableChecks.Run(root,Assert,(library,expected,words)=>Run(library,expected,words));
     using (var fakeModel = new FakeModel())
     {
         var models = await Run(windows, 0, "models", "list", "--endpoint", fakeModel.Url); Assert(models[0].GetString() == "test-model", "Model service list");
@@ -91,6 +94,29 @@ try
         Assert(transcript.Flag("saved"), "Transcription explicitly persists to existing desktop session");
         var lines = await Run(windows, 0, "sessions", "transcript", "transcription-test");
         Assert(lines[0].Text("text") == "Shared transcript" && lines[0].GetProperty("timestamp").GetDateTimeOffset() == DateTimeOffset.Parse("2026-01-01T00:00:02Z"), "Transcription shares timestamps and data contract");
+    }
+    if(Environment.GetEnvironmentVariable("RECALL_REAL_AUDIO") is { } realAudio)
+    {
+        var watch=Stopwatch.StartNew();
+        AppPaths.DataRoot=windows;
+        LocalInference.ShareWithCLI=true;
+        try
+        {
+            var service=await LocalInference.Chat();
+            var owner=InferenceOwnership.Read("chat")!;
+            var answers=await Task.WhenAll(Run(windows,0,"ask","What is recorded about Aurora?"),Run(windows,0,"ask","What does the Aurora record say?"));
+            Assert(answers.All(a=>!string.IsNullOrWhiteSpace(a.Text("answer")) && a.GetProperty("sources").GetArrayLength()>0),"Real local model answers cite isolated records");
+            Assert(InferenceOwnership.Read("chat")!.Pid==owner.Pid && InferenceOwnership.Alive(owner.Pid),"Concurrent CLI answers reuse the same running desktop model and leave it alive");
+            Console.WriteLine($"REAL CHAT: two grounded answers reused model PID {owner.Pid}; elapsed {watch.Elapsed.TotalSeconds:F1}s; engine RSS {Process.GetProcessById(owner.Pid).WorkingSet64/1048576} MiB.");
+        }
+        finally {LocalInference.Stop();}
+        using(var db=new MemoryStore(windows))db.SaveSession(new("real-audio",DateTimeOffset.Parse("2026-01-01T00:00:00Z"),DateTimeOffset.Parse("2026-01-01T00:01:00Z"),"",true));
+        watch.Restart();
+        await Run(windows,0,"transcribe",realAudio,"--session","real-audio","--save","--yes","--builtin");
+        var transcript=await Run(windows,0,"sessions","transcript","real-audio");
+        Assert(transcript.EnumerateArray().Any(l=>l.Text("text")?.Contains("Tuesday",StringComparison.OrdinalIgnoreCase)==true),"Actual Whisper audio recognition is persisted and searchable by the desktop");
+        using(var db=new MemoryStore(windows))Assert(db.Session("real-audio")!.SpeechState==RecognitionState.Complete,"Saved real transcript is marked complete and won't be queued again on desktop restart");
+        Console.WriteLine($"REAL SPEECH: generated spoken fixture transcribed and saved in {watch.Elapsed.TotalSeconds:F1}s.");
     }
     var fixture = Environment.GetEnvironmentVariable("RECALL_OCR_FIXTURE");
     if (fixture != null)
@@ -129,6 +155,7 @@ try
             Assert((await Run(mac, 0, "records", "get", pending.Text("id")!)).Text("text")?.Contains("Aurora", StringComparison.OrdinalIgnoreCase) == true, "Native offline OCR decodes and updates the same Mac record");
         }
         Assert((await Run(mac, 0, "storage", "check")).Text("integrity") == "ok", "Native Mac database integrity");
+        await DurableChecks.NativeService(mac,Assert,(library,expected,words)=>Run(library,expected,words));
         await Run(mac, 0, "storage", "cleanup", "--scope", "all", "--include-starred", "--yes");
         Assert((await Run(mac, 0, "records", "list")).GetArrayLength() == 0, "Native Mac cleanup");
         Console.WriteLine("Native macOS bridge checks included.");

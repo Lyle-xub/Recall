@@ -211,11 +211,14 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
         if !ocrQueue.isEmpty { startOCRIfNeeded() }
     }
 
+    private var indexingSuspended = false
     func suspendIndexing() async {
+        indexingSuspended = true
         ocrTask?.cancel();await ocrTask?.value
         ocrQueue.removeAll();publishRecognitionProgress()
     }
     func resumeIndexingAfterCleanup() async {
+        indexingSuspended = false
         let database = store
         ocrQueue = (try? await Task.detached(priority:.utility) { try database.pendingIndexFrames() }.value) ?? []
         publishRecognitionProgress()
@@ -337,6 +340,7 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
         refreshMeetingWindowIfNeeded(sessionID:sessionID)
     }
     private func startOCRIfNeeded() {
+        guard !indexingSuspended else { return }
         guard ocrTask == nil else { return }
         ocrTask = Task(priority:.utility) { [self] in
             defer { ocrTask = nil; recognizingText = false; processingFrame = false; publishRecognitionProgress() }

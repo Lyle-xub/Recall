@@ -3,9 +3,10 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 namespace Rewind;
 
-public sealed class RecallException(string code, string message) : Exception(message)
+public sealed class RecallException(string code, string message, object? details = null) : Exception(message)
 {
     public string Code { get; } = code;
+    public object? Details { get; } = details;
 }
 
 public static class Wire
@@ -71,7 +72,8 @@ public sealed class LibraryControlHost : IDisposable
         lease = ownership ?? new(root); this.handler = handler;
         watcher = new(lease.DirectoryPath, "*.request.json") { NotifyFilter = NotifyFilters.FileName, EnableRaisingEvents = true };
         watcher.Created += (_, _) => _ = Drain(); watcher.Renamed += (_, _) => _ = Drain();
-        Wire.Atomic(Path.Combine(lease.DirectoryPath, "owner.json"), new { protocol = 1, pid = Environment.ProcessId, instance, backend });
+        Wire.Atomic(Path.Combine(lease.DirectoryPath, "owner.json"), new { protocol = 1, pid = Environment.ProcessId, started = InferenceOwnership.Started(Environment.ProcessId), instance, backend });
+        _ = Drain();
     }
     async Task Drain()
     {
@@ -79,7 +81,7 @@ public sealed class LibraryControlHost : IDisposable
         try
         {
             if (disposed) return;
-            foreach (var path in Directory.EnumerateFiles(lease.DirectoryPath, "*.request.json").Take(32))
+            foreach (var path in Directory.EnumerateFiles(lease.DirectoryPath, "*.request.json"))
             {
                 if (disposed) break;
                 var id = Path.GetFileName(path).Replace(".request.json", "");
@@ -91,12 +93,15 @@ public sealed class LibraryControlHost : IDisposable
                     using var doc = JsonDocument.Parse(await File.ReadAllTextAsync(path));
                     var request = doc.RootElement;
                     if (request.Text("instance") != instance) throw new RecallException("stale_owner", "The application restarted; retry this request.");
+                    if (File.Exists(Path.Combine(lease.DirectoryPath,id+".cancel"))) throw new RecallException("cancelled","Request cancelled before it started.");
+                    Wire.Atomic(Path.Combine(lease.DirectoryPath,id+".task.json"),new { id, operation=request.Text("operation"), state="running", ownerPid=Environment.ProcessId, instance, updated=DateTimeOffset.UtcNow });
                     var result = await handler(request.Text("operation") ?? "", request.GetProperty("args").Clone());
                     response = new { ok = true, result };
                 }
                 catch (Exception error) { response = new { ok = false, error = new { code = (error as RecallException)?.Code ?? "operation_failed", message = error.Message } }; }
                 Wire.Atomic(Path.Combine(lease.DirectoryPath, id + ".response.json"), response);
-                File.Delete(path);
+                Wire.Atomic(Path.Combine(lease.DirectoryPath,id+".task.json"),new { id, state="finished", ownerPid=Environment.ProcessId, instance, updated=DateTimeOffset.UtcNow });
+                File.Delete(path);File.Delete(Path.Combine(lease.DirectoryPath,id+".cancel"));
             }
         }
         finally { gate.Release(); }
@@ -124,32 +129,69 @@ public static class LibraryControlClient
             using var document = JsonDocument.Parse(File.ReadAllText(path));
             var owner = document.RootElement;
             using var process = Process.GetProcessById(owner.Number("pid", -1));
-            return !process.HasExited && owner.Number("protocol", 0) == 1 ? owner.Clone() : null;
+            return !process.HasExited && owner.Number("protocol", 0) == 1 && (!owner.TryGetProperty("started", out var started) || InferenceOwnership.Matches(process.Id, started.GetInt64())) ? owner.Clone() : null;
         }
         catch (Exception error) when (error is IOException or JsonException or ArgumentException or InvalidOperationException) { return null; }
     }
-    public static async Task<JsonElement> Send(string root, string operation, object args, CancellationToken ct)
+    static string RequestPath(string root,string id,string suffix)
     {
-        var owner = Owner(root) ?? throw new RecallException("service_unavailable", "Recall is not running for this library. Start the desktop application to use recording and background-task controls.");
-        var directory = Path.Combine(root, ".recall-control");
-        var id = Guid.NewGuid().ToString("N");
-        var request = Path.Combine(directory, id + ".request.json");
-        var reply = Path.Combine(directory, id + ".response.json");
-        Wire.Atomic(request, new { instance = owner.Text("instance"), operation, args });
-        try
+        if (!Guid.TryParseExact(id,"N",out _)) throw new RecallException("usage","Invalid request ID.");
+        return Path.Combine(root,".recall-control",id+suffix);
+    }
+    public static object[] Requests(string root)
+    {
+        var folder=Path.Combine(root,".recall-control");
+        if (!Directory.Exists(folder)) return [];
+        return Directory.EnumerateFiles(folder,"*.task.json").OrderByDescending(File.GetLastWriteTimeUtc).Take(100).Select(path=>Result(root,Path.GetFileName(path).Replace(".task.json",""))).ToArray();
+    }
+    public static object Result(string root,string id)
+    {
+        var reply=RequestPath(root,id,".response.json");
+        if(File.Exists(reply)) { using var response=JsonDocument.Parse(File.ReadAllText(reply)); return response.RootElement.Clone(); }
+        var path=RequestPath(root,id,".task.json");
+        if(!File.Exists(path)) throw new RecallException("not_found","Request receipt not found.");
+        using var task=JsonDocument.Parse(File.ReadAllText(path));
+        var owner=Owner(root);
+        var current=owner != null && owner.Value.Text("instance")==task.RootElement.Text("instance");
+        return new {id,state=current?task.RootElement.Text("state"):"interrupted",completionKnown=false};
+    }
+    public static async Task<JsonElement> Send(string root, string operation, object args, CancellationToken ct, string? requestId = null, TimeSpan? timeout = null)
+    {
+        var id=requestId??Guid.NewGuid().ToString("N");
+        var request=RequestPath(root,id,".request.json");var reply=RequestPath(root,id,".response.json");
+        JsonElement Response()
         {
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            deadline.CancelAfter(TimeSpan.FromMinutes(2));
-            while (!File.Exists(reply)) await Task.Delay(50, deadline.Token);
-            using var response = JsonDocument.Parse(await File.ReadAllTextAsync(reply, ct));
-            if (!response.RootElement.Flag("ok"))
+            using var response=JsonDocument.Parse(File.ReadAllText(reply));
+            if(!response.RootElement.Flag("ok"))
             {
-                var error = response.RootElement.GetProperty("error");
-                throw new RecallException(error.Text("code") ?? "operation_failed", error.Text("message") ?? "Application request failed.");
+                var error=response.RootElement.GetProperty("error");
+                throw new RecallException(error.Text("code")??"operation_failed",error.Text("message")??"Application request failed.",new {requestId=id,result=$"recall tasks result {id}"});
             }
             return response.RootElement.GetProperty("result").Clone();
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new RecallException("timeout", "Application request timed out. Its operation may still finish; inspect state before retrying a mutation."); }
-        finally { if (File.Exists(request)) File.Delete(request); if (File.Exists(reply)) File.Delete(reply); }
+        if(File.Exists(reply)) return Response();
+        var owner=Owner(root)??throw new RecallException("service_unavailable","Recall is not running for this library. Start the desktop application or the headless recording service.");
+        if(!File.Exists(request))
+        {
+            Wire.Atomic(RequestPath(root,id,".task.json"),new {id,operation,state="queued",ownerPid=owner.Number("pid",-1),instance=owner.Text("instance"),updated=DateTimeOffset.UtcNow});
+            Wire.Atomic(request,new {instance=owner.Text("instance"),operation,args});
+        }
+        using var deadline=CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(timeout??TimeSpan.FromSeconds(120));
+        try
+        {
+            while(!File.Exists(reply))
+            {
+                await Task.Delay(100,deadline.Token);
+                if(Owner(root)?.Text("instance")!=owner.Text("instance"))
+                    throw new RecallException("interrupted","The owner changed before acknowledging completion. Inspect the durable receipt before retrying.",new {requestId=id,result=$"recall tasks result {id}"});
+            }
+            return Response();
+        }
+        catch(OperationCanceledException)
+        {
+            File.WriteAllText(RequestPath(root,id,".cancel"),"");
+            throw new RecallException(ct.IsCancellationRequested?"cancelled":"timeout","Stopped waiting. A queued request will be cancelled; an in-flight commit can still finish. Its durable receipt records the outcome.",new {requestId=id,completionKnown=File.Exists(reply),result=$"recall tasks result {id}"});
+        }
     }
 }

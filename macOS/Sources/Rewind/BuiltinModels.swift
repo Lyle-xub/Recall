@@ -103,6 +103,7 @@ actor LocalInference {
     private var server: Process?
     private var runningProfile: ModelProfile?
     private var serverKey = ""
+    private var chatOwnership:InferenceOwnership.Lease?
     private var starting: Task<(ModelProfile,String),Error>?
     private var speech: Process?
     private let speechGate = SpeechOperationGate()
@@ -114,12 +115,20 @@ actor LocalInference {
     func chat() async throws -> (ModelProfile,String) {
         if let server,server.isRunning,let runningProfile {return (runningProfile,serverKey)}
         if let starting {return try await starting.value}
-        let task = Task {try await self.startChat()};starting = task
+        let task = Task {
+            do { return try await self.startChat() }
+            catch { if server?.isRunning == true { server?.terminate();server?.waitUntilExit() };server = nil;chatOwnership = nil;throw error }
+        };starting = task
         defer {starting = nil};return try await task.value
     }
     private func startChat() async throws -> (ModelProfile,String) {
         let model = try await BuiltinModels.shared.require("chat")
         let executable = try Self.runtime("llama","llama-server")
+        do {chatOwnership = try InferenceOwnership.acquire("chat")}
+        catch let error as CoreCLIError where error.code == "busy" {
+            if let shared=try await InferenceOwnership.sharedChat(model:model) {return shared}
+            throw error
+        }
         let listener = socket(AF_INET,SOCK_STREAM,0);guard listener >= 0 else {throw RewindError.message("Cannot allocate a local model port.")}
         var address = sockaddr_in();address.sin_family = sa_family_t(AF_INET);address.sin_addr.s_addr = inet_addr("127.0.0.1")
         let bound = withUnsafePointer(to:&address) {$0.withMemoryRebound(to:sockaddr.self,capacity:1) {bind(listener,$0,socklen_t(MemoryLayout<sockaddr_in>.size))}}
@@ -130,19 +139,20 @@ actor LocalInference {
         let process = Process();process.executableURL = executable;process.currentDirectoryURL = executable.deletingLastPathComponent()
         process.arguments = ["-m",model.path,"--host","127.0.0.1","--port",String(port),"--api-key",key,"--alias","rewind-local","-c","8192","-np","1","-n","768","--jinja","--chat-template-kwargs","{\"enable_thinking\":false}","--no-webui"]
         process.standardOutput = FileHandle.nullDevice;process.standardError = FileHandle.nullDevice
-        try process.run();server = process
+        let started = Date();try process.run();server = process
+        try InferenceOwnership.publish("chat",process:process,started:started,model:model)
         let profile = ModelProfile(provider:"Internal runtime",baseURL:"http://127.0.0.1:\(port)/v1",model:"rewind-local",isLocal:true)
         let config = URLSessionConfiguration.ephemeral;config.timeoutIntervalForRequest = 2;let probe = URLSession(configuration:config);defer {probe.invalidateAndCancel()}
         for _ in 0..<240 {
             try Task.checkCancellation()
             guard process.isRunning else {throw RewindError.message("The built-in model could not start. Check available memory and reinstall the model.")}
             var request = URLRequest(url:try ModelClient.endpoint(profile,path:"models"));request.setValue("Bearer \(key)",forHTTPHeaderField:"Authorization")
-            if let (_,response) = try? await probe.data(for:request),(response as? HTTPURLResponse)?.statusCode == 200 {runningProfile = profile;serverKey = key;return (profile,key)}
+            if let (_,response) = try? await probe.data(for:request),(response as? HTTPURLResponse)?.statusCode == 200 {runningProfile = profile;serverKey = key;try InferenceOwnership.publish("chat",process:process,started:started,profile:profile,key:key,model:model);return (profile,key)}
             try await Task.sleep(for:.milliseconds(250))
         }
         process.terminate();throw RewindError.message("Model loading timed out. Free some memory and retry.")
     }
-    func stop() {starting?.cancel();starting = nil;if server?.isRunning == true {server?.terminate()};if speech?.isRunning == true {speech?.terminate()};server = nil;speech = nil;runningProfile = nil;serverKey = ""}
+    func stop() {starting?.cancel();starting = nil;if server?.isRunning == true {server?.terminate()};if speech?.isRunning == true {speech?.terminate()};server?.waitUntilExit();speech?.waitUntilExit();server = nil;speech = nil;runningProfile = nil;serverKey = "";chatOwnership = nil}
     func transcribe(_ file: URL,sessionID: String,start: Date) async throws -> [TranscriptLine] {
         try await speechGate.acquire()
         do {
@@ -153,6 +163,7 @@ actor LocalInference {
     }
     private func performTranscription(_ file:URL, sessionID:String, start:Date) async throws -> [TranscriptLine] {
         let model = try await BuiltinModels.shared.require("speech");let executable = try Self.runtime("whisper","whisper-cli")
+        let ownership = try InferenceOwnership.acquire("speech");defer { withExtendedLifetime(ownership) {} }
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("rewind-speech-" + UUID().uuidString)
         try FileManager.default.createDirectory(at:temporary,withIntermediateDirectories:true);defer {try? FileManager.default.removeItem(at:temporary)}
         let wave = temporary.appendingPathComponent("input.wav")
@@ -162,8 +173,9 @@ actor LocalInference {
         let output = temporary.appendingPathComponent("transcript");let process = Process();process.executableURL = executable
         process.arguments = ["-m",model.path,"-f",wave.path,"-l","auto","-oj","-of",output.path,"-t",String(max(1,min(2,ProcessInfo.processInfo.activeProcessorCount / 2))),"-np"]
         process.qualityOfService = .background
-        process.standardOutput = FileHandle.nullDevice;process.standardError = FileHandle.nullDevice;try process.run();speech = process
-        defer {if process.isRunning {process.terminate()};speech = nil}
+        process.standardOutput = FileHandle.nullDevice;process.standardError = FileHandle.nullDevice;let started = Date();try process.run();speech = process
+        try InferenceOwnership.publish("speech",process:process,started:started)
+        defer {if process.isRunning {process.terminate();process.waitUntilExit()};speech = nil}
         let deadline = Date().addingTimeInterval(900)
         while process.isRunning {try Task.checkCancellation();guard Date() < deadline else {throw RewindError.message("Transcription timed out. Your audio remains saved for retry.")};try await Task.sleep(for:.milliseconds(150))}
         guard process.terminationStatus == 0 else {throw RewindError.message("Local transcription failed. Your audio remains saved for retry.")}

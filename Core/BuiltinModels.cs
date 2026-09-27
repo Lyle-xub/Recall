@@ -135,6 +135,8 @@ public static class LocalInference
     private static Process? server, speech;
     private static ModelProfile? profile;
     private static string key = "";
+    private static InferenceOwnership? chatOwnership;
+    public static bool ShareWithCLI { get; set; }
     private static string Runtime(string engine, string executable)
     {
         if (!OperatingSystem.IsWindows()) executable = Path.GetFileNameWithoutExtension(executable);
@@ -165,13 +167,21 @@ public static class LocalInference
             if (server is { HasExited: false } && profile != null)
                 return (profile, key);
             var model = BuiltinModels.Shared.Require("chat");
+            try { chatOwnership ??= new InferenceOwnership("chat"); }
+            catch (RecallException e) when (e.Code == "busy")
+            {
+                if (await InferenceOwnership.SharedChat(model,ct) is { } shared) return shared;
+                throw new RecallException("busy", "Another client is loading or using the built-in chat model. No additional model was started; retry after it finishes.");
+            }
+            var executable = Runtime("llama", "llama-server.exe");
             var listener = new TcpListener(IPAddress.Loopback, 0);
             listener.Start();
             var port = ((IPEndPoint)listener.LocalEndpoint).Port;
             listener.Stop();
             key = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-            server = Start(Runtime("llama", "llama-server.exe"), ["-m", model, "--host", "127.0.0.1", "--port", port.ToString(), "--api-key", key, "--alias", "rewind-local", "-c", "8192", "-np", "1", "-n", "768", "-ngl", "0", "--jinja", "--chat-template-kwargs", "{\"enable_thinking\":false}", "--no-webui"]);
+            server = Start(executable, ["-m", model, "--host", "127.0.0.1", "--port", port.ToString(), "--api-key", key, "--alias", "rewind-local", "-c", "8192", "-np", "1", "-n", "768", "-ngl", "0", "-t", Math.Min(4, Environment.ProcessorCount).ToString(), "--jinja", "--chat-template-kwargs", "{\"enable_thinking\":false}", "--no-webui"]);
             var local = new ModelProfile { Provider = "Internal runtime", BaseUrl = $"http://127.0.0.1:{port}/v1", Model = "rewind-local", IsLocal = true };
+            chatOwnership.Publish("chat", server, false, model:model);
             using var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(2) };
             http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", key);
             for (var i = 0; i < 240; i++)
@@ -185,6 +195,7 @@ public static class LocalInference
                     if (response.IsSuccessStatusCode)
                     {
                         profile = local;
+                        chatOwnership.Publish("chat", server, ShareWithCLI, local, key, model);
                         return (local, key);
                     }
                 }
@@ -204,7 +215,7 @@ public static class LocalInference
             try
             {
                 if (process is { HasExited: false })
-                    process.Kill(true);
+                { process.Kill(true); process.WaitForExit(); }
             }
             catch (InvalidOperationException) { }
             process?.Dispose();
@@ -213,16 +224,20 @@ public static class LocalInference
         speech = null;
         profile = null;
         key = "";
+        chatOwnership?.Dispose(); chatOwnership = null;
     }
     public static async Task<List<TranscriptLine>> Transcribe(string wave, RecordingSession session, CancellationToken ct)
     {
         await speechGate.WaitAsync(ct);
         var temporary = Path.Combine(Path.GetTempPath(), "rewind-speech-" + Guid.NewGuid());
+        InferenceOwnership? ownership = null;
         try
         {
+            ownership = new InferenceOwnership("speech");
             Directory.CreateDirectory(temporary);
             var output = Path.Combine(temporary, "transcript");
             speech = Start(Runtime("whisper", "whisper-cli.exe"), ["-m", BuiltinModels.Shared.Require("speech"), "-f", wave, "-l", "auto", "-oj", "-of", output, "-t", Math.Min(8, Environment.ProcessorCount).ToString(), "-np"]);
+            ownership.Publish("speech", speech, false);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(TimeSpan.FromMinutes(15));
             await speech.WaitForExitAsync(timeout.Token);
@@ -230,7 +245,7 @@ public static class LocalInference
                 throw new InvalidOperationException("Local transcription failed. Audio remains saved for retry.");
             return ParseTranscript(await File.ReadAllTextAsync(output + ".json", ct), session);
         }
-        finally { try { if (speech is { HasExited: false }) speech.Kill(true); } finally { speech?.Dispose(); speech = null; if (Directory.Exists(temporary)) Directory.Delete(temporary, true); speechGate.Release(); } }
+        finally { try { if (speech is { HasExited: false }) { speech.Kill(true); speech.WaitForExit(); } } finally { speech?.Dispose(); speech = null; ownership?.Dispose(); if (Directory.Exists(temporary)) Directory.Delete(temporary, true); speechGate.Release(); } }
     }
     public static List<TranscriptLine> ParseTranscript(string json, RecordingSession session)
     {

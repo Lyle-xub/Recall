@@ -4,7 +4,8 @@ namespace Rewind;
 /// GUI-independent operations over the same store used by the Windows desktop.
 public static class LibraryCommands
 {
-    public static bool Writes(string operation) => operation is "import" or "star" or "trash" or "restore" or "recognize" or "compact" or "cleanup" or "save-transcript";
+    public static bool Writes(string operation) => operation is "import" or "star" or "trash" or "restore" or "recognize" or "compact" or "cleanup" or "save-transcript" or "index-one" or "config-set";
+    public static bool Exclusive(string operation) => Writes(operation) || operation == "export";
     public static List<MemoryFrame> Select(MemoryStore store, JsonElement args) => store.Frames(
         args.Text("query") ?? "", args.Text("app"), args.Flag("starred"), args.Flag("trash"), args.Flag("demo"),
         Date(args, "since"), Date(args, "until"), args.Number("limit", 100), args.Number("offset", 0), args.Flag("ascending"));
@@ -14,11 +15,15 @@ public static class LibraryCommands
     {
         switch (operation)
         {
+            case "config-set":
+                var settings=LibrarySettings.Update(store.Root,args.Text("key")??"",args.Text("value")??"",false);
+                if(args.Text("key")=="retention-days")store.Retain(settings.Deserialize<AppSettings>(Wire.Json)!.RetentionDays);return settings;
             case "info": return new { root = store.Root, format = "windows", count = store.Count };
             case "list": return Select(store, args);
             case "get": return Require(store, args);
             case "retrieve": return store.Retrieve(args.Text("query") ?? "", app: args.Text("app"), since: Date(args, "since"));
             case "apps": return store.AppNames();
+            case "index-candidates": return args.Text("id") != null ? new[] { Require(store,args) }.ToList() : store.IndexCandidates(args.Number("limit",100));
             case "sessions": return store.Sessions();
             case "transcript": return store.Transcript(args.Text("id") ?? "");
             case "import":
@@ -54,12 +59,23 @@ public static class LibraryCommands
                 var id = args.Text("id") ?? "";
                 if (store.Session(id) == null) throw new RecallException("not_found", "Recording session not found.");
                 var lines = args.GetProperty("lines").Deserialize<List<TranscriptLine>>(Wire.Json) ?? [];
-                store.ReplaceTranscript(id, lines); return new { count = lines.Count };
+                var current=store.Session(id)!;
+                if(current.SpeechState==RecognitionState.Working)throw new RecallException("busy","Desktop transcription is already working on this session.");
+                store.FinishSpeech(current with {SpeechState=lines.Count==0?RecognitionState.Empty:RecognitionState.Complete,SpeechError=null},lines);
+                return new { count = lines.Count };
             }
             case "export":
             {
                 var destination = ExportDestination(store.Root, args.Text("output") ?? "");
-                var frames = Select(store, args); store.Export(destination, frames);
+                var frames = Select(store, args);
+                var staging = destination + ".partial-" + Guid.NewGuid().ToString("N");
+                try
+                {
+                    store.Export(staging, frames);
+                    if (Directory.Exists(destination)) Directory.Delete(destination);
+                    Directory.Move(staging,destination);
+                }
+                finally { if(Directory.Exists(staging)) Directory.Delete(staging,true); }
                 return new { destination, count = frames.Count, format = "windows" };
             }
             case "check": return new { integrity = store.CheckIntegrity() };

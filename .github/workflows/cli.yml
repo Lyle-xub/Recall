@@ -2,9 +2,9 @@ name: Shared library CLI
 on:
   push:
     branches: [feat/cross-platform-cli]
-    paths: ['Core/**', 'CLI/**', 'CLI.Tests/**', 'macOS/**', 'Windows/**', 'scripts/build-cli.py', 'docs/cli.md', '.github/workflows/cli.yml']
+    paths: ['Core/**', 'CLI/**', 'CLI.Tests/**', 'macOS/**', 'Windows/**', 'scripts/build-cli.py', 'scripts/*cli*capture*', 'docs/cli.md', '.github/workflows/cli.yml']
   pull_request:
-    paths: ['Core/**', 'CLI/**', 'CLI.Tests/**', 'macOS/**', 'Windows/**', 'scripts/build-cli.py', '.github/workflows/cli.yml']
+    paths: ['Core/**', 'CLI/**', 'CLI.Tests/**', 'macOS/**', 'Windows/**', 'scripts/build-cli.py', 'scripts/*cli*capture*', '.github/workflows/cli.yml']
   workflow_dispatch:
 jobs:
   cli:
@@ -24,9 +24,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install Linux OCR
+      - name: Install Linux OCR and isolated capture dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr ffmpeg xvfb python3-tk fonts-dejavu-core
       - name: Install Mac OCR
         if: runner.os == 'macOS'
         run: brew list tesseract || brew install tesseract
@@ -46,6 +46,9 @@ jobs:
           if (!$IsWindows) { $env:RECALL_OCR_FIXTURE = Join-Path $pwd 'docs/macos-visual-reference/fixtures/frames/parity-2-0.png' }
           if ($IsMacOS) { $env:RECALL_MAC_CORE = Join-Path $bundle.FullName 'recall-macos-core' }
           dotnet run --project CLI.Tests/Recall.Cli.Tests.csproj
+      - name: Real capture, OCR, maintenance and export in a private desktop
+        if: runner.os == 'Linux'
+        run: python scripts/test-cli-capture.py --cli release/Recall-CLI-linux-x64/recall --output .test-data/cli-capture-evidence.json
       - uses: actions/upload-artifact@v4
         with:
           name: Recall-CLI-${{ runner.os }}-${{ runner.arch }}
@@ -53,3 +56,9 @@ jobs:
             release/Recall-CLI-*.tar.gz
             release/Recall-CLI-*.zip
             release/Recall-CLI-*.sha256
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: Recall-CLI-Linux-capture-evidence
+          path: |
+            .test-data/cli-capture-evidence.json

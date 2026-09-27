@@ -1,5 +1,46 @@
 # CLI validation and handoff — 2026-09-27
 
+## CLI completion: headless ownership and durable operations
+
+This revision completes the previously uncommitted CLI work on
+`feat/cross-platform-cli`. Windows visual development remains paused.
+
+- `recording start` can launch a headless owner; `service start` remains idle.
+  Concurrent starts share one owner, parent process pipes close promptly, and
+  native Mac shutdown drains work without entering AppKit's nested quit loop.
+- Index jobs persist progress and request receipts. Cancellation, bounded RPC
+  waits, late acknowledgements and stale-owner recovery retain an inspectable
+  outcome instead of silently replaying an uncertain mutation.
+- Native inference shares one owner per user/engine, verifies process and model
+  identity, and prevents cross-library model deletion or replacement during use.
+- Portable capture refuses unsupported exclusion/display/audio requirements.
+  Portable optimization preserves original dimensions and OCR, validates encoded
+  output and skips unrecognized/active media. Incomplete exports are not published.
+- Configuration preserves unrelated fields. Cleanup retains a recovery journal
+  when the database commit succeeds but physical media deletion is interrupted;
+  a later writable open retries only safe, unreferenced media paths.
+
+Source-level acceptance on macOS:
+
+| Check | Result |
+| --- | --- |
+| CLI subprocess tests, real Tesseract, native Mac helper lifecycle | 194 assertions passed |
+| Shared C# core | 85 assertions passed |
+| Swift native CLI and storage cleanup | 15 tests passed |
+| Independent maintenance acceptance | 16 checks passed |
+| Independent native owner / OCR / export acceptance | 12 checks passed |
+| C# build and whitespace validation | Passed |
+
+The independent maintenance checks used actual FFmpeg/FFprobe and an intentionally
+invalid encoder result. They confirmed unchanged original media on failure, full
+image dimensions, preserved OCR/search, pending-image protection, complete exports,
+settings preservation and owner shutdown. The native process checks used a temporary
+Mac-format library and a synthetic Aurora image, exercising actual Tesseract OCR,
+configuration, star mutation, job receipts, export, service exit and SQLite integrity.
+No user history was modified or captured by these checks.
+
+## Earlier CLI handoff (before this completion revision)
+
 Work is isolated on `feat/cross-platform-cli`, based on
 `feat/windows-visual-parity` at `12c9aac`. The original visual-development checkout
 and README files are unchanged. See [CLI commands and library rules](cli.md).

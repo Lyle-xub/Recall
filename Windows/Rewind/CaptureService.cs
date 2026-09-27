@@ -28,6 +28,7 @@ public sealed class CaptureService : IDisposable
     private MemoryFrame? previous;
     private readonly Channel<string> indexing = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
     private readonly HashSet<string> queuedIndex = [];
+    private readonly SemaphoreSlim indexGate = new(1,1);
     private readonly CancellationTokenSource lifetime = new();
     private readonly Task indexingWorker;
     private RecordingSession? stoppedSession;
@@ -55,8 +56,11 @@ public sealed class CaptureService : IDisposable
         {
             if (lifetime.IsCancellationRequested)
                 break;
+            await indexGate.WaitAsync(lifetime.Token);
+            try
+            {
             var frame = store.Frame(id);
-            if (frame == null) { lock (queuedIndex) queuedIndex.Remove(id); continue; }
+            if (frame == null || frame.TextState is RecognitionState.Complete or RecognitionState.Empty) { lock (queuedIndex) queuedIndex.Remove(id); continue; }
             var original = Path.Combine(store.Root, "frames", id + ".ocr.png");
             try
             {
@@ -118,7 +122,24 @@ public sealed class CaptureService : IDisposable
             lock (queuedIndex) queuedIndex.Remove(id);
             if (store.Frame(id) is { } updated)
                 FrameAdded?.Invoke(updated);
+            }
+            finally { indexGate.Release(); }
         }
+    }
+    public async Task<object> IndexOne(string id,string language,CancellationToken ct)
+    {
+        await indexGate.WaitAsync(ct);
+        var temporary=Path.Combine(Path.GetTempPath(),Guid.NewGuid()+".png");
+        try
+        {
+            var frame=store.Frame(id) ?? throw new RecallException("not_found","Memory not found.");
+            using(var image=ImageArchive.Load(store.Root,frame.ImagePath)) image.Save(temporary,ImageFormat.Png);
+            var result=await OcrEngine.Recognize(temporary,language,ct);
+            store.Recognized(id,result.Text,result.Regions);
+            FrameAdded?.Invoke(store.Frame(id)!);
+            return new {completed=1,id};
+        }
+        finally {if(File.Exists(temporary))File.Delete(temporary);indexGate.Release();}
     }
     public async Task<MemoryFrame> Import(string file)
     {

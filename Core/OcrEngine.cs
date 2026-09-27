@@ -1,6 +1,6 @@
 using System.Globalization;
 using Rewind;
-namespace Recall.Cli;
+namespace Rewind;
 
 public static class OcrEngine
 {

@@ -28,13 +28,13 @@ final class CoreCLILease {
 }
 
 enum NativeCoreCLI {
-    static let writes:Set<String> = ["init","import","star","trash","restore","recognize","compact","cleanup","save-transcript","index-offline"]
+    static let writes:Set<String> = ["init","import","star","trash","restore","recognize","compact","cleanup","save-transcript","index-offline","index-one","config-set"]
     static func run() -> Int32 {
         do {
             let input = FileHandle.standardInput.readDataToEndOfFile()
             guard input.count <= 2_000_000,let request = try JSONSerialization.jsonObject(with:input) as? [String:Any],let rootPath = request["root"] as? String,let operation = request["operation"] as? String else { throw CoreCLIError(code:"invalid_request",message:"Invalid native core request.") }
             let root = URL(fileURLWithPath:rootPath).standardizedFileURL
-            let lease = writes.contains(operation) ? try CoreCLILease(root:root):nil
+            let lease = (writes.contains(operation) || operation == "export") ? try CoreCLILease(root:root):nil
             defer { withExtendedLifetime(lease) {} }
             if operation == "init" {
                 guard !FileManager.default.fileExists(atPath:root.appendingPathComponent("memory.sqlite").path) else { throw CoreCLIError(code:"conflict",message:"A database already exists.") }
@@ -74,12 +74,45 @@ enum NativeCoreCLI {
         guard let name = args["scope"] as? String,let scope = StorageCleanupScope(rawValue:name) else { throw CoreCLIError(code:"usage",message:"Scope must be trash, older7, older30 or all.") }
         return try store.cleanupPlan(scope:scope,keepStarred:!(args["includeStarred"] as? Bool ?? false))
     }
+    static func configured(_ args:[String:Any],current:AppSettings)throws->AppSettings {
+        var next=current
+        guard let key=args["key"] as? String,let value=args["value"] as? String else {throw CoreCLIError(code:"usage",message:"A setting key and value are required.")}
+        switch key {
+        case "capture-interval": guard let number=Int(value),(1...3600).contains(number) else {throw CoreCLIError(code:"usage",message:"capture-interval must be 1–3600 seconds.")};next.captureInterval=Double(number)
+        case "retention-days": guard let number=Int(value),(0...36500).contains(number) else {throw CoreCLIError(code:"usage",message:"retention-days must be 0–36500.")};next.retentionDays=number
+        case "excluded-apps":
+            guard let data=value.data(using:.utf8),let names=try? JSONDecoder().decode([String].self,from:data),names.allSatisfy({!$0.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty}) else {throw CoreCLIError(code:"usage",message:"excluded-apps must be a JSON array of application identifiers.")}
+            next.excludedApps=names
+        case "system-audio","microphone","transcription-enabled":
+            guard let enabled=Bool(value.lowercased()) else {throw CoreCLIError(code:"usage",message:"Use true or false.")}
+            if key=="system-audio" {next.systemAudio=enabled} else if key=="microphone" {next.microphone=enabled} else {next.transcriptionEnabled=enabled}
+        default:throw CoreCLIError(code:"usage",message:"Unknown setting key.")
+        }
+        return next
+    }
+    static func saveConfiguration(_ next:AppSettings,root:URL)throws {
+        let file=root.appendingPathComponent("settings.json")
+        var merged=(try? JSONSerialization.jsonObject(with:Data(contentsOf:file)) as? [String:Any]) ?? [:]
+        let encoded=try JSONSerialization.jsonObject(with:JSONEncoder().encode(next)) as! [String:Any]
+        for (key,value) in encoded {merged[key]=value}
+        try JSONSerialization.data(withJSONObject:merged).write(to:file,options:.atomic)
+        try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:file.path)
+    }
     static func execute(_ operation:String,args:[String:Any],store:MemoryStore)throws->Any {
         switch operation {
+        case "config-set":
+            let file=store.root.appendingPathComponent("settings.json")
+            let current=FileManager.default.fileExists(atPath:file.path) ? try JSONDecoder().decode(AppSettings.self,from:Data(contentsOf:file)):AppSettings()
+            let next=try configured(args,current:current)
+            try saveConfiguration(next,root:store.root)
+            if args["key"] as? String == "retention-days" {try store.applyRetention(days:next.retentionDays)}
+            return try object(next)
+        case "capabilities":return ["screenCapturePermission":CGPreflightScreenCaptureAccess(),"nativeRecording":true]
         case "init","info": return ["root":store.root.path,"format":"macos","count":try store.count()]
         case "list": return try selected(args,store:store).map(frameObject)
         case "get": return try frameObject(required(args,store:store))
         case "retrieve": return try store.retrieve(args["query"] as? String ?? "",since:date(args,"since"),app:args["app"] as? String).map(frameObject)
+        case "index-candidates": return try (args["id"] is String ? [required(args,store:store)] : Array(store.pendingIndexFrames().prefix(args["limit"] as? Int ?? 100))).map(frameObject)
         case "apps": return try store.appNames(demo:false,trash:false,since:nil)
         case "sessions": return try object(store.sessions())
         case "transcript": return try object(store.transcript(args["id"] as? String ?? ""))
@@ -119,7 +152,15 @@ enum NativeCoreCLI {
             for session in try store.sessions() where sessionIDs.contains(session.id) {
                 for path in [session.videoPath,session.systemAudioPath,session.microphoneAudioPath].compactMap({$0}) { _ = try CleanupFiles.ownedURL(path,root:root) }
             }
-            try store.export(to:destination,frames:frames);return ["destination":destination.path,"count":frames.count,"format":"macos"]
+            let staging = URL(fileURLWithPath:destination.path+".partial-"+UUID().uuidString)
+            defer {try? FileManager.default.removeItem(at:staging)}
+            try store.export(to:staging,frames:frames)
+            if FileManager.default.fileExists(atPath:destination.path) {
+                guard (try? FileManager.default.contentsOfDirectory(atPath:destination.path).isEmpty)==true else {throw CoreCLIError(code:"conflict",message:"Export destination changed; it was preserved.")}
+                guard rmdir(destination.path)==0 else {throw CoreCLIError(code:"conflict",message:"Export destination changed; it was preserved.")}
+            }
+            try FileManager.default.moveItem(at:staging,to:destination)
+            return ["destination":destination.path,"count":frames.count,"format":"macos"]
         case "check": return ["integrity":try store.cliIntegrity()]
         case "compact": try store.compactIndex();return ["compacted":true]
         case "cleanup-preview","cleanup":
@@ -127,7 +168,7 @@ enum NativeCoreCLI {
             if operation == "cleanup-preview" { return ["count":plan.frameIDs.count,"bytes":plan.bytes,"ids":plan.frameIDs.sorted(),"keepStarred":plan.keepStarred] }
             guard args["confirmed"] as? Bool == true else { throw CoreCLIError(code:"confirmation_required",message:"Permanent cleanup requires --yes.") }
             return cleanupResult(try store.clearStorage(plan))
-        case "index-offline":
+        case "index-offline","index-one":
             let frames = args["id"] != nil && !(args["id"] is NSNull) ? [try required(args,store:store)] : Array(try store.pendingIndexFrames().prefix(args["limit"] as? Int ?? 100))
             for var frame in frames {
                 let source = try CleanupFiles.ownedURL(frame.imagePath,root:store.root)
@@ -144,7 +185,7 @@ enum NativeCoreCLI {
                 process.standardOutput = FileHandle.nullDevice;process.standardError = FileHandle.nullDevice
                 var environment = ProcessInfo.processInfo.environment;environment["OMP_THREAD_LIMIT"] = "2";process.environment = environment
                 try process.run()
-                let deadline = DispatchWorkItem { if process.isRunning { process.terminate() } };DispatchQueue.global().asyncAfter(deadline:.now()+60,execute:deadline)
+                let deadline = DispatchWorkItem { if process.isRunning { kill(process.processIdentifier,SIGKILL) } };DispatchQueue.global().asyncAfter(deadline:.now()+60,execute:deadline)
                 process.waitUntilExit();deadline.cancel()
                 guard process.terminationStatus == 0 else { throw CoreCLIError(code:"ocr_failed",message:"Tesseract failed; check the engine and installed languages.") }
                 frame.regions = LocalOCR.parse(try String(contentsOf:output.appendingPathExtension("tsv"),encoding:.utf8),width:image.width,height:image.height)

@@ -42,6 +42,7 @@ internal sealed class AppRuntime
     private string? captureError;
     public AppRuntime()
     {
+        LocalInference.ShareWithCLI = true;
         var ownership = new LibraryLease(AppPaths.DataRoot);
         Directory.CreateDirectory(AppPaths.DataRoot);
         var path = Path.Combine(AppPaths.DataRoot, "settings.json");
@@ -87,14 +88,18 @@ internal sealed class AppRuntime
                 foreach (var frame in frames) Capture.Retry(frame);
                 return new { accepted = true, count = frames.Count, owner = "desktop" };
             }
+            case "config-set":
+                var updated=LibrarySettings.Update(Store.Root,args.Text("key")??"",args.Text("value")??"",false);
+                Save(updated.Deserialize<AppSettings>(Wire.Json)!,args.Text("key")=="retention-days");return updated;
+            case "index-one": return await Capture.IndexOne(args.Text("id")??"",args.Text("language")??"eng",lifetime.Token);
             case "optimize":
                 if (!StorageService.IsOptimizing && cliOptimization is not { IsCompleted: false })
                     cliOptimization = Task.Run(async () => { try { cliTaskError = null; await StorageService.Optimize(Store, new Progress<string>(), lifetime.Token); } catch (Exception e) { cliTaskError = e.Message; } finally { LibraryChanged?.Invoke(); } });
                 return new { accepted = true, owner = "desktop" };
             default:
-                if (!LibraryCommands.Writes(operation)) throw new RecallException("unsupported", "Unsupported desktop operation.");
-                if (operation is "compact" or "cleanup" && StorageService.IsOptimizing) throw new RecallException("busy", "Storage optimization is already running.");
-                var result = operation is "compact" or "cleanup"
+                if (!LibraryCommands.Exclusive(operation)) throw new RecallException("unsupported", "Unsupported desktop operation.");
+                if (operation is "compact" or "cleanup" or "export" && StorageService.IsOptimizing) throw new RecallException("busy", "Storage optimization is already running.");
+                var result = operation is "compact" or "cleanup" or "export"
                     ? await StorageService.Maintain(() => Task.Run(() => LibraryCommands.Execute(Store, operation, args)))
                     : await Task.Run(() => LibraryCommands.Execute(Store, operation, args));
                 HasMemories = Store.Count > 0; LibraryChanged?.Invoke(); Changed?.Invoke();
@@ -110,7 +115,7 @@ internal sealed class AppRuntime
             File.Move(file + ".tmp", file, true);
         }
     }
-    public void Save(AppSettings settings)
+    public void Save(AppSettings settings,bool applyRetention = true)
     {
         settings.Shortcuts.Validate();
         lock (settingsGate)
@@ -124,7 +129,7 @@ internal sealed class AppRuntime
             key.SetValue("Recall", $"\"{Environment.ProcessPath}\" --background");
         else
             key.DeleteValue("Recall", false);
-        Store.Retain(settings.RetentionDays);
+        if(applyRetention)Store.Retain(settings.RetentionDays);
         Recording.Rotate();
         Changed?.Invoke();
     }
