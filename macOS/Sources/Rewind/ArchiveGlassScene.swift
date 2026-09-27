@@ -71,6 +71,18 @@ private final class ArchiveRecordControl: SCNNode {
     private struct ShapeKey:Equatable { let width:CGFloat;let height:CGFloat;let aspect:CGFloat }
     private var shapeKeys:[String:ShapeKey] = [:]
     private var informationAspects:[String:CGFloat] = [:]
+    private var dayLabelKeys:[String] = []
+    private let footerLoader=ArchiveFooterLoader()
+    var pendingFooterCount:Int {footerLoader.pendingCount}
+    var inFlightFooterCount:Int {footerLoader.inFlightCount}
+    var maximumFooterConcurrency:Int {footerLoader.maximumConcurrency}
+    func waitForFooters() async {await footerLoader.waitUntilIdle()}
+    private var sheetGeometries:[String:(SCNGeometry,SCNGeometry,SCNGeometry)] = [:]
+    private lazy var actionGeometry:SCNPlane = {
+        let plane=SCNPlane(width:0.48,height:0.26),material=SCNMaterial()
+        material.lightingModel = .constant;material.diffuse.contents=NSColor.white.withAlphaComponent(0.001)
+        material.writesToDepthBuffer=false;plane.materials=[material];return plane
+    }()
     private(set) var shapeUpdateCount = 0
     private(set) var positionUpdateCount = 0
     private(set) var surfaceBuildCount = 0
@@ -80,6 +92,15 @@ private final class ArchiveRecordControl: SCNNode {
     private var navigationTarget:Double?
     private var navigationMotion = ArchiveMotionSpring(value:0)
     private var maxScroll:CGFloat = 0
+    private var minScroll:CGFloat = 0
+    private var dataWindow:ArchiveWindow?
+    private var windowEpoch:Int?
+    private var windowKeys:[String] = []
+    private var retainedFrames:[MemoryFrame] = []
+    private var retainedImages:[String:NSImage] = [:]
+    private var virtualBucket:Int?
+    var onWindowDemand:((Double)->Void)?
+    var residentNodeCount:Int {nodes.count}
     var recordIDs:Set<String> { Set(framesByID.keys) }
     var renderedCardCount:Int { nodes.count-blankIDs.count }
     var blankCardCount:Int { blankIDs.count }
@@ -127,7 +148,7 @@ private final class ArchiveRecordControl: SCNNode {
         frameClock.archive = self
     }
 
-    func update(frames:[MemoryFrame],images:[String:NSImage],appearance:OverlayAppearance,selected:String?,size:CGSize,reduced:Bool,day:Date? = nil,timelinePosition:Date? = nil) {
+    func update(frames:[MemoryFrame],images:[String:NSImage],appearance:OverlayAppearance,selected:String?,size:CGSize,reduced:Bool,day:Date? = nil,timelinePosition:Date? = nil,window:ArchiveWindow? = nil) {
         let resized = viewport != size
         reducedMotion = reduced;viewport = size
         verticalSpan = 9*2.22/max(1,size.width/max(1,size.height))
@@ -138,9 +159,16 @@ private final class ArchiveRecordControl: SCNNode {
         let isNight = appearance == .deepNight
         scene.fogColor = isNight ? NSColor(red:0.04,green:0.05,blue:0.07,alpha:1):NSColor(red:0.90,green:0.89,blue:0.86,alpha:1)
         let center = Calendar.current.startOfDay(for:day ?? frames.max(by: { $0.timestamp < $1.timestamp })?.timestamp ?? Date())
+        let suppliedWindow=window?.columns.isEmpty == false ? window:nil
+        let nextWindowKeys=suppliedWindow?.columns.map { "\($0.day)|\($0.startIndex)|\($0.totalCount)|\($0.origin)" } ?? []
+        if let suppliedWindow,windowEpoch != suppliedWindow.epoch {
+            scrollOffset=CGFloat(suppliedWindow.focusRow ?? 0);navigationTarget=nil
+            windowEpoch=suppliedWindow.epoch;virtualBucket=nil
+        }
+        dataWindow=suppliedWindow;retainedFrames=frames;retainedImages=images
         let keys = frames.map { "\($0.id)|\($0.imagePath)|\($0.starred)|\($0.regions.count)|\($0.ocrKey ?? "")" }
-        if keys != frameKeys || isNight != night || anchorDay != center {
-            frameKeys = keys;night = isNight;anchorDay = center
+        if keys != frameKeys || nextWindowKeys != windowKeys || isNight != night || anchorDay != center || virtualBucket == nil {
+            frameKeys = keys;windowKeys=nextWindowKeys;night = isNight;anchorDay = center
             reconcile(frames:frames,images:images)
         }
         updateImages(images)
@@ -159,6 +187,7 @@ private final class ArchiveRecordControl: SCNNode {
                 }
             }
             currentID = selected
+            footerLoader.prioritize(selected:selected,center:Double(scrollOffset))
             if reduced { advance(dt:1,immediate:true) } else { wake() }
         }
         if let currentID,let node = nodes[currentID] { shape(node,id:currentID,progress:Float(extractions[currentID]?.spring.value ?? 0)) }
@@ -176,8 +205,9 @@ private final class ArchiveRecordControl: SCNNode {
     }
 
     private func navigateArchive(to date:Date?) {
-        guard date != navigationDate || navigationRevision != layoutRevision else { return }
-        navigationDate = date;navigationRevision = layoutRevision
+        let revision=dataWindow?.epoch ?? layoutRevision
+        guard date != navigationDate || navigationRevision != revision else { return }
+        navigationDate = date;navigationRevision = revision
         guard let date,let column = dayColumns.first(where:{ Calendar.current.isDate($0.day,inSameDayAs:date) }),!column.records.isEmpty else {
             navigationTarget = nil;return
         }
@@ -190,9 +220,9 @@ private final class ArchiveRecordControl: SCNNode {
                 row = Double(index)+records[index].timestamp.timeIntervalSince(date)/max(0.001,span);break
             }
         }
-        let depth = row-(column.lane == 0 ? 0:column.lane < 0 ? 3.5:1.5)
+        let depth = row+Double(column.origin+column.startIndex)-(column.lane == 0 ? 0:column.lane < 0 ? 3.5:1.5)
         navigationMotion = ArchiveMotionSpring(value:Double(scrollOffset),velocity:navigationMotion.velocity)
-        navigationTarget = max(0,min(Double(maxScroll),depth))
+        navigationTarget = max(Double(minScroll),min(Double(maxScroll),depth))
         crestTarget = depth;acrossTarget = Double(column.lane)
         hoveredID = records.min(by:{ abs($0.timestamp.timeIntervalSince(date)) < abs($1.timestamp.timeIntervalSince(date)) })?.id
         if reducedMotion { advance(dt:1,immediate:true) } else { wake() }
@@ -200,33 +230,59 @@ private final class ArchiveRecordControl: SCNNode {
 
     /// Reconcile by record ID. Loading thumbnails or starring a record must
     /// never replace its moving root node or restart an extraction.
-    private func reconcile(frames:[MemoryFrame],images:[String:NSImage]) {
+    private func reconcile(frames:[MemoryFrame],images:[String:NSImage],placeView:Bool = true) {
         SCNTransaction.begin();SCNTransaction.disableActions = true
         defer { SCNTransaction.commit() }
         let rack:SCNNode
         if let existing = scene.rootNode.childNode(withName:"racks",recursively:false) { rack = existing }
         else { rack = SCNNode();rack.name = "racks";scene.rootNode.addChildNode(rack) }
         layoutRevision += 1;layoutUpdateCount += 1
-        dayColumns = ArchiveDayLayout.columns(frames:frames,around:anchorDay ?? Date())
-        framesByID = Dictionary(uniqueKeysWithValues:dayColumns.flatMap(\.records).map { ($0.id,$0) })
-        if let hoveredID,framesByID[hoveredID] == nil { self.hoveredID = nil }
-        let rowCount = max(20,dayColumns.map { $0.records.count }.max() ?? 0)
-        var entries:[(String,MemoryFrame?,Int,Double)] = []
+        let updates=Dictionary(uniqueKeysWithValues:frames.map {($0.id,$0)})
+        dayColumns=dataWindow?.columns.map { column in
+            ArchiveDayColumn(day:column.day,lane:column.lane,records:column.records.map {updates[$0.id] ?? $0},startIndex:column.startIndex,totalCount:column.totalCount,origin:column.origin)
+        } ?? ArchiveDayLayout.columns(frames:frames,around:anchorDay ?? Date())
+        let oldFrames=framesByID
+        framesByID=Dictionary(uniqueKeysWithValues:dayColumns.flatMap(\.records).map {($0.id,$0)})
+        let rowCount=max(20,dayColumns.map {$0.origin+$0.totalCount}.max() ?? 0)
+        minScroll=CGFloat(min(0,dayColumns.map(\.origin).min() ?? 0))
+        maxScroll=max(17,CGFloat(dayColumns.map {Double($0.origin+$0.totalCount-1)-($0.lane == 0 ? 0:$0.lane < 0 ? 3.5:1.5)}.max() ?? 0))
+        scrollOffset=max(minScroll,min(scrollOffset,maxScroll))
+        let bucket=Int(floor(Double(scrollOffset)/8))*8
+        virtualBucket=bucket
+        var entries:[(String,MemoryFrame?,Int,Double)]=[]
         blankIDs.removeAll()
         for column in dayColumns {
-            for row in -2..<(rowCount+2) {
-                let frame = column.records.indices.contains(row) ? column.records[row]:nil
-                let id = frame?.id ?? "blank:\(column.day.timeIntervalSince1970):\(row)"
-                if frame == nil { blankIDs.insert(id) }
+            let lower=max(column.origin-2,bucket-24)
+            let upper=min(max(rowCount,column.origin+20)+2,lower+ArchiveDayLayout.renderedRows)
+            guard lower < upper else {continue}
+            for row in lower..<upper {
+                let index=row-column.origin-column.startIndex
+                let frame=column.records.indices.contains(index) ? column.records[index]:nil
+                let id=frame?.id ?? "blank:\(column.day.timeIntervalSince1970):\(row)"
+                if frame == nil {blankIDs.insert(id)}
                 entries.append((id,frame,column.lane,Double(row)))
             }
         }
+        // Keep the open sheet and at most one returning sheet even if a newer
+        // metadata page arrives. Identity and native footer actions stay intact.
+        let protected=([currentID].compactMap {$0}+extractions.keys.sorted()).reduce(into:[String]()) { if !$0.contains($1),$0.count < 2 {$0.append($1)} }
+        for id in protected where !entries.contains(where:{$0.0 == id}) {
+            if let frame=oldFrames[id],let slot=slots[id] {
+                framesByID[id]=frame
+                let row=slot.depth+(slot.lane == 0 ? 0:slot.lane < 0 ? 3.5:1.5)
+                entries.append((id,frame,slot.lane,row))
+            }
+        }
+        if let hoveredID,!entries.contains(where:{$0.0 == hoveredID}) {self.hoveredID=nil}
+        for pin in dataWindow?.pins ?? [] where !entries.contains(where:{$0.0 == pin.frame.id}) && protected.contains(pin.frame.id) {
+            framesByID[pin.frame.id]=pin.frame
+            entries.append((pin.frame.id,pin.frame,pin.lane,Double(pin.row)))
+        }
         let ids = Set(entries.map { $0.0 })
+        footerLoader.retain(ids)
         for id in Array(nodes.keys) where !ids.contains(id) {
             nodes.removeValue(forKey:id)?.removeFromParentNode();positions[id] = nil;slots[id] = nil;heights[id] = nil;depths[id] = nil;extractions[id] = nil;surfaceKeys[id] = nil;imageAspects[id] = nil;imageKeys[id] = nil;shapeKeys[id] = nil;informationAspects[id] = nil
         }
-        maxScroll = max(0,CGFloat(rowCount)-3)
-        scrollOffset = min(scrollOffset,maxScroll)
         for (id,frame,lane,row) in entries {
             let depth = row-(lane == 0 ? 0:lane < 0 ? 3.5:1.5)
             let slot = Slot(lane:lane,depth:depth,x:CGFloat(lane)*(lane < 0 ? 5.65:6.25),z:CGFloat(depth)-5)
@@ -242,6 +298,9 @@ private final class ArchiveRecordControl: SCNNode {
             let surface = makeSheet(frame:frame,image:image,side:lane != 0,lane:lane)
             imageKeys[id] = image.map(ObjectIdentifier.init)
             if let node = nodes[id] {
+                if let previous=node.childNode(withName:"information",recursively:false)?.geometry?.firstMaterial {
+                    surface.childNode(withName:"information",recursively:false)?.geometry?.materials=[previous]
+                }
                 node.childNodes.forEach { $0.removeFromParentNode() }
                 for child in surface.childNodes { child.removeFromParentNode();node.addChildNode(child) }
             } else {
@@ -254,8 +313,9 @@ private final class ArchiveRecordControl: SCNNode {
             }
             if let node = nodes[id] { shape(node,id:id,progress:Float(extractions[id]?.spring.value ?? 0)) }
         }
+        footerLoader.prioritize(selected:currentID,center:Double(scrollOffset))
         updateDayLabels()
-        placeCamera()
+        if placeView {placeCamera()}
         if reducedMotion { advance(dt:1,immediate:true) } else { wake() }
     }
 
@@ -368,11 +428,13 @@ private final class ArchiveRecordControl: SCNNode {
     func scroll(by delta:CGFloat,horizontal:CGFloat = 0,precise:Bool) {
         guard currentID == nil,extractions.isEmpty else { return }
         navigationTarget = nil
-        let next = min(maxScroll,max(0,scrollOffset+delta*(precise ? 0.018:0.42)))
+        let next = min(maxScroll,max(minScroll,scrollOffset+delta*(precise ? 0.018:0.42)))
         let nextHorizontal = min(8,max(-8,horizontalOffset+horizontal*(precise ? 0.018:0.42)))
         guard next != scrollOffset || nextHorizontal != horizontalOffset else { return }
         hover(nil)
         scrollOffset = next;horizontalOffset = nextHorizontal
+        if virtualBucket != Int(floor(Double(next)/8))*8 {reconcile(frames:retainedFrames,images:retainedImages,placeView:false)}
+        onWindowDemand?(Double(next))
         crestTarget = Double(next)+Double(delta)*(precise ? 0.025:0.16)
         acrossTarget = Double(nextHorizontal)*0.12
         let duration:Double = reducedMotion ? 0:precise ? 0.12:0.28
@@ -423,6 +485,10 @@ private final class ArchiveRecordControl: SCNNode {
     func setActive(_ active:Bool) {
         guard active != isActive else { return }
         isActive = active
+        if active {
+            footerLoader.resume()
+            for (id,node) in nodes {shape(node,id:id,progress:Float(extractions[id]?.spring.value ?? 0))}
+        } else {footerLoader.stop()}
         if active { wake() } else { stopMotion() }
     }
 
@@ -529,11 +595,17 @@ private final class ArchiveRecordControl: SCNNode {
         if let frame = framesByID[id],let information = node.childNode(withName:"information",recursively:false) {
             let footer = progress > 0 ? open.footer:ArchiveCardMetrics.make(width:5.35,height:6.5,aspect:aspect).footer
             let informationAspect = footer.width/footer.height
-            if informationAspects[id] != informationAspect {
-                informationAspects[id] = informationAspect;informationTextureBuildCount += 1
-                information.geometry?.firstMaterial?.diffuse.contents = Self.informationTexture(frame,night:night,aspect:informationAspect)
+            let key="\(surfaceKeys[id] ?? "")|\(frame.title)|\(frame.timestamp)|\(informationAspect)"
+            if isActive,!footerLoader.contains(id:id,key:key) {
+                informationAspects[id]=informationAspect;informationTextureBuildCount += 1
+                footerLoader.request(ArchiveFooterRequest(id:id,key:key,frame:frame,night:night,aspect:informationAspect,row:slots[id]?.depth ?? 0)) { [weak self,weak information] prepared in
+                    guard let self,self.isActive,let information,self.nodes[id]?.childNode(withName:"information",recursively:false) === information else {return}
+                    information.geometry?.materials=[prepared.material]
+                    self.onPresentationChanged?()
+                }
             }
         }
+
         for control in node.childNodes.compactMap({ $0 as? ArchiveRecordControl }) { control.isHidden = progress <= 0.98 }
         let key = ShapeKey(width:width,height:height,aspect:aspect)
         guard shapeKeys[id] != key else { return }
@@ -564,12 +636,15 @@ private final class ArchiveRecordControl: SCNNode {
         }
     }
     private func updateDayLabels() {
+        let keys=dayColumns.map {"\($0.day)|\($0.totalCount)|\($0.origin)|\(night)"}
+        guard keys != dayLabelKeys else {return}
+        dayLabelKeys=keys
         scene.rootNode.childNode(withName:"dates",recursively:false)?.removeFromParentNode()
         let labels = SCNNode();labels.name = "dates";scene.rootNode.addChildNode(labels)
         let isNight = night
         for column in dayColumns {
             let image = NSImage(size:NSSize(width:800,height:80),flipped:false) { _ in
-                let label = column.day.recallFormatted(.dateTime.month(.twoDigits).day(.twoDigits))+"  ·  "+(column.records.isEmpty ? "No memories":"\(column.records.count) memories")
+                let label = column.day.recallFormatted(.dateTime.month(.twoDigits).day(.twoDigits))+"  ·  "+(column.totalCount == 0 ? "No memories":"\(column.totalCount) memories")
                 (label as NSString).draw(at:NSPoint(x:12,y:22),withAttributes:[.font:NSFont.monospacedSystemFont(ofSize:27,weight:.medium),.foregroundColor:isNight ? NSColor.white:NSColor.darkGray])
                 return true
             }
@@ -583,18 +658,28 @@ private final class ArchiveRecordControl: SCNNode {
     private func makeSheet(frame:MemoryFrame?,image:NSImage?,side:Bool,lane:Int)->SCNNode {
         let width:CGFloat = 5.35,height:CGFloat = 6.5
         let root = SCNNode()
-        let glass = SCNBox(width:width,height:height,length:0.065,chamferRadius:0.022)
-        let front = SCNMaterial();front.lightingModel = .physicallyBased
-        front.diffuse.contents = Self.glassTexture(night:night,side:side,lane:lane)
-        front.transparency = side ? 0.50:0.58;front.transparencyMode = .dualLayer
-        front.metalness.contents = 0.04;front.roughness.contents = side ? 0.27:0.16
-        front.specular.contents = NSColor.white;front.fresnelExponent = 4.0
-        front.writesToDepthBuffer = false
-        let edge = SCNMaterial();edge.lightingModel = .physicallyBased
-        edge.diffuse.contents = night ? NSColor(white:0.6,alpha:0.7):NSColor(red:0.78,green:0.82,blue:0.84,alpha:0.48)
-        edge.metalness.contents = 0.12;edge.roughness.contents = 0.12;edge.transparency = 0.5;edge.writesToDepthBuffer = false
-        glass.materials = [front,edge,front,edge,edge,edge]
-        let body = SCNNode(geometry:glass);body.name = "glass";root.addChildNode(body)
+        let geometryKey="\(night)|\(lane)"
+        if sheetGeometries[geometryKey] == nil {
+            let glass = SCNBox(width:width,height:height,length:0.065,chamferRadius:0.022)
+            let front = SCNMaterial();front.lightingModel = .physicallyBased
+            front.diffuse.contents = Self.glassTexture(night:night,side:side,lane:lane)
+            front.transparency = side ? 0.50:0.58;front.transparencyMode = .dualLayer
+            front.metalness.contents = 0.04;front.roughness.contents = side ? 0.27:0.16
+            front.specular.contents = NSColor.white;front.fresnelExponent = 4.0
+            front.writesToDepthBuffer = false
+            let edge = SCNMaterial();edge.lightingModel = .physicallyBased
+            edge.diffuse.contents = night ? NSColor(white:0.6,alpha:0.7):NSColor(red:0.78,green:0.82,blue:0.84,alpha:0.48)
+            edge.metalness.contents = 0.12;edge.roughness.contents = 0.12;edge.transparency = 0.5;edge.writesToDepthBuffer = false
+            glass.materials = [front,edge,front,edge,edge,edge]
+            let rim = SCNBox(width:0.026,height:height-0.025,length:0.075,chamferRadius:0.012)
+            let highlight = SCNMaterial();highlight.lightingModel = .constant
+            highlight.diffuse.contents = NSColor(white:0.88,alpha:0.48);highlight.emission.contents = NSColor.black;highlight.roughness.contents = 0.08;highlight.metalness.contents = 0.25
+            rim.materials = [highlight]
+            let top = SCNBox(width:width,height:0.016,length:0.075,chamferRadius:0.007);top.materials = [highlight]
+            sheetGeometries[geometryKey]=(glass,rim,top)
+        }
+        let shared=sheetGeometries[geometryKey]!
+        let body = SCNNode(geometry:shared.0);body.name = "glass";root.addChildNode(body)
         if frame != nil {
             let art = SCNPlane(width:4.87,height:3.0),material = SCNMaterial();material.lightingModel = .constant
             // Actual source pixels, without an opaque portrait canvas or tint.
@@ -609,18 +694,11 @@ private final class ArchiveRecordControl: SCNNode {
             info.materials = [material]
             let information = SCNNode(geometry:info);information.name = "information";root.addChildNode(information)
             for action in ["star","copy","rewind","close"] {
-                let region = SCNPlane(width:0.48,height:0.26),material = SCNMaterial();material.lightingModel = .constant
-                material.diffuse.contents = NSColor.white.withAlphaComponent(0.001);material.writesToDepthBuffer = false;region.materials = [material]
-                let control = ArchiveRecordControl();control.geometry = region;control.recordID = frame.id;control.action = action;root.addChildNode(control)
+                let control = ArchiveRecordControl();control.geometry = actionGeometry;control.recordID = frame.id;control.action = action;root.addChildNode(control)
             }
         }
-        let rim = SCNBox(width:0.026,height:height-0.025,length:0.075,chamferRadius:0.012)
-        let highlight = SCNMaterial();highlight.lightingModel = .constant
-        highlight.diffuse.contents = NSColor(white:0.88,alpha:0.48);highlight.emission.contents = NSColor.black;highlight.roughness.contents = 0.08;highlight.metalness.contents = 0.25
-        rim.materials = [highlight]
-        let rimNode = SCNNode(geometry:rim);rimNode.name = "rim";root.addChildNode(rimNode)
-        let top = SCNBox(width:width,height:0.016,length:0.075,chamferRadius:0.007);top.materials = [highlight]
-        let topNode = SCNNode(geometry:top);topNode.name = "top-edge";root.addChildNode(topNode)
+        let rimNode=SCNNode(geometry:shared.1);rimNode.name="rim";root.addChildNode(rimNode)
+        let topNode=SCNNode(geometry:shared.2);topNode.name="top-edge";root.addChildNode(topNode)
         if frame == nil { root.enumerateChildNodes { child,_ in child.categoryBitMask = 2 };root.categoryBitMask = 2 }
         return root
     }
@@ -639,34 +717,7 @@ private final class ArchiveRecordControl: SCNNode {
         textureCache[key] = image; return image
     }
     static func informationTexture(_ frame:MemoryFrame,night:Bool,aspect:CGFloat)->NSImage {
-        NSImage(size:NSSize(width:190*aspect,height:190),flipped:false) { rect in
-            (night ? NSColor(white:0.075,alpha:0.96):NSColor(white:0.98,alpha:0.94)).setFill();rect.fill()
-            let ink = night ? NSColor(white:0.98,alpha:1):NSColor(white:0.10,alpha:1)
-            let paragraph = NSMutableParagraphStyle();paragraph.lineBreakMode = .byTruncatingTail
-            func text(_ value:String,x:CGFloat,y:CGFloat,width:CGFloat,size:CGFloat,bold:Bool = false) {
-                (value as NSString).draw(in:NSRect(x:x,y:y,width:width,height:size*1.6),withAttributes:[.font:NSFont.systemFont(ofSize:size,weight:bold ? .semibold:.regular),.foregroundColor:ink,.paragraphStyle:paragraph])
-            }
-            text(frame.title.isEmpty ? frame.appName:frame.title,x:rect.width*0.016,y:119,width:rect.width*0.53,size:34,bold:true)
-            text(frame.timeLabel,x:rect.width*0.60,y:121,width:rect.width*0.38,size:29)
-            for button in ArchiveFooterLayout.buttons(in:rect.size) {
-                let label:String,symbol:String
-                switch button.action {
-                case "star":label = frame.starred ? "Starred":"Star";symbol = frame.starred ? "star.fill":"star"
-                case "copy":label = "Copy Text";symbol = "doc.on.doc"
-                case "rewind":label = "Rewind";symbol = "arrow.up.right"
-                default:label = "Collapse";symbol = "arrow.up.left.and.arrow.down.right"
-                }
-                let path = NSBezierPath(roundedRect:button.rect,xRadius:button.rect.height*0.28,yRadius:button.rect.height*0.28)
-                (night ? NSColor.white.withAlphaComponent(0.09):NSColor.white.withAlphaComponent(0.68)).setFill();path.fill()
-                ink.withAlphaComponent(0.24).setStroke();path.lineWidth = 1.5;path.stroke()
-                let attributes:[NSAttributedString.Key:Any] = [.font:NSFont.systemFont(ofSize:31,weight:.medium),.foregroundColor:ink]
-                let labelSize = (label as NSString).size(withAttributes:attributes)
-                let left = button.rect.midX-(labelSize.width+48)/2
-                Self.footerSymbol(symbol,ink:ink)?.draw(in:NSRect(x:left,y:button.rect.midY-16,width:32,height:32))
-                (label as NSString).draw(at:NSPoint(x:left+48,y:button.rect.midY-labelSize.height/2),withAttributes:attributes)
-            }
-            return true
-        }
+        ArchiveInformationRenderer.informationTexture(frame,night:night,aspect:aspect)
     }
     static func footerSymbol(_ name:String,ink:NSColor)->NSImage? {
         NSImage(systemSymbolName:name,accessibilityDescription:nil)?.withSymbolConfiguration(
@@ -850,6 +901,8 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
     let onRecordAction:(String,String)->Void
     var onHoverRecord:((String?)->Void)? = nil
     var onViewportChange:((ArchiveViewportRecords)->Void)? = nil
+    var window:ArchiveWindow? = nil
+    var onWindowDemand:((Double)->Void)? = nil
     func makeCoordinator()->ArchiveGlassScene { ArchiveGlassScene() }
     func makeNSView(context:Context)->SCNView {
         let view = ArchiveSceneView(frame:.zero)
@@ -863,6 +916,7 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
         view.preferredFramesPerSecond = 60
         view.rendersContinuously = false;view.isPlaying = false
         view.onViewportChange = onViewportChange
+        context.coordinator.onWindowDemand=onWindowDemand
         view.onSelect = onSelect
         view.onHover = { [weak coordinator = context.coordinator] id in coordinator?.hover(id);onHoverRecord?(id) }
         view.onPointer = { [weak coordinator = context.coordinator] near,far,id in coordinator?.pointer(rayNear:near,rayFar:far,recordID:id) }
@@ -875,9 +929,10 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
     }
     static func dismantleNSView(_ view:SCNView,coordinator:ArchiveGlassScene) {
         (view as? ArchiveSceneView)?.cancelPendingInteraction()
-        coordinator.stopMotion();coordinator.onPresentationChanged = nil
+        coordinator.setActive(false);coordinator.stopMotion();coordinator.onPresentationChanged = nil
     }
     func updateNSView(_ view:SCNView,context:Context) {
+        context.coordinator.onWindowDemand=onWindowDemand
         context.coordinator.setActive(active)
         view.isHidden = !active
         guard active else { (view as? ArchiveSceneView)?.cancelPendingInteraction();return }
@@ -889,7 +944,7 @@ struct ArchiveGlassRenderer: NSViewRepresentable {
             guard let (id,action) = coordinator?.action(at:hit) else { return false }
             onRecordAction(id,action);return true
         }
-        context.coordinator.update(frames:frames,images:images,appearance:appearance,selected:selected,size:size,reduced:reduced,day:day,timelinePosition:timelinePosition)
+        context.coordinator.update(frames:frames,images:images,appearance:appearance,selected:selected,size:size,reduced:reduced,day:day,timelinePosition:timelinePosition,window:window)
         (view as? ArchiveSceneView)?.refreshViewport()
     }
 }

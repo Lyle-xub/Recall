@@ -130,7 +130,7 @@ final class MemoryStore: @unchecked Sendable {
             let end = calendar.date(byAdding:.day,value:1,to:column.day)!
             let ordering = time == nil ? "time DESC,id":"ABS(time-?),time DESC,id"
             var parameters:[Any?] = [column.day.timeIntervalSince1970,end.timeIntervalSince1970]
-            if let time { parameters.append(time.timeIntervalSince1970) };parameters.append(ArchiveDayLayout.recordsPerDay)
+            if let time { parameters.append(time.timeIntervalSince1970) };parameters.append(ArchiveDayLayout.pageSize)
             result += try jsonRows("""
                 SELECT json FROM (
                     SELECT json,time,id,ROW_NUMBER() OVER (
@@ -141,6 +141,63 @@ final class MemoryStore: @unchecked Sendable {
                 """,parameters,as:MemoryFrame.self)
         }
         return result
+    }
+    /// Count, anchor rank and rows share one short WAL snapshot. Coordinates
+    /// follow stable record anchors, never SQLite rowids (VACUUM may change them).
+    func archiveWindow(_ request:ArchiveWindowQuery,calendar:Calendar = .current)throws->ArchiveWindow {
+        try synchronized {
+            try execute("BEGIN DEFERRED")
+            do {
+                var result=ArchiveWindow(epoch:request.epoch,focusRow:request.row)
+                var center=request.row
+                let days=ArchiveDayLayout.columns(frames:[],around:request.day,calendar:calendar)
+                // Resolve the central timeline target before reading neighboring
+                // columns, so all five windows cover the same world coordinate.
+                for column in days.sorted(by:{abs($0.lane) < abs($1.lane)}) {
+                    let end=calendar.date(byAdding:.day,value:1,to:column.day)!
+                    let values:[Any?]=[column.day.timeIntervalSince1970,end.timeIntervalSince1970]
+                    let rows="""
+                        WITH duplicates AS (
+                            SELECT json,time,id,ROW_NUMBER() OVER (
+                                PARTITION BY json_extract(json,'$.imagePath') ORDER BY time DESC,id
+                            ) AS duplicate FROM frames
+                            WHERE time>=? AND time<? AND demo=0 AND deleted IS NULL
+                              AND COALESCE(json_extract(json,'$.imagePath'),'')<>''
+                        ), records AS (
+                            SELECT json,time,id,ROW_NUMBER() OVER (ORDER BY time DESC,id)-1 AS ordinal
+                            FROM duplicates WHERE duplicate=1
+                        )
+                        """
+                    let count=try jsonRows(rows+" SELECT COUNT(*) FROM records",values,as:Int.self).first ?? 0
+                    var origin=0
+                    if request.near == nil,let anchor=request.anchors.first(where:{$0.day == column.day}) {
+                        var rank:Int?,resolvedAnchor=anchor
+                        for candidate in request.anchors where candidate.day == column.day {
+                            if let found=try jsonRows(rows+" SELECT ordinal FROM records WHERE id=?",values+[candidate.id],as:Int.self).first {rank=found;resolvedAnchor=candidate;break}
+                        }
+                        // A deleted/merged anchor leaves its chronological insertion
+                        // point as the fallback; it cannot retain a stale identity.
+                        let position=try rank ?? jsonRows(rows+" SELECT COUNT(*) FROM records WHERE time>? OR (time=? AND id<?)",values+[anchor.timestamp.timeIntervalSince1970,anchor.timestamp.timeIntervalSince1970,anchor.id],as:Int.self).first ?? 0
+                        origin=resolvedAnchor.row-position
+                    }
+                    if let time=request.near,column.lane == 0 {
+                        let rank=try jsonRows(rows+" SELECT ordinal FROM records ORDER BY ABS(time-?),time DESC,id LIMIT 1",values+[time.timeIntervalSince1970],as:Int.self).first ?? 0
+                        center=Double(rank);result.focusRow=center
+                    }
+                    let start=max(0,min(max(0,count-ArchiveDayLayout.windowSize),Int(center)-origin-ArchiveDayLayout.windowSize/2))
+                    let frames=try jsonRows(rows+" SELECT json FROM records ORDER BY ordinal LIMIT ? OFFSET ?",values+[ArchiveDayLayout.windowSize,start],as:MemoryFrame.self)
+                    result.columns.append(ArchiveDayColumn(day:column.day,lane:column.lane,records:frames,startIndex:start,totalCount:count,origin:origin))
+                }
+                for pin in request.pins.prefix(2) {
+                    if let frame=try jsonRows("SELECT json FROM frames WHERE id=? AND deleted IS NULL AND demo=0",[pin.frame.id],as:MemoryFrame.self).first {
+                        var current=pin;current.frame=frame;result.pins.append(current)
+                    }
+                }
+                result.columns.sort {$0.lane < $1.lane}
+                try execute("COMMIT")
+                return result
+            } catch {try? execute("ROLLBACK");throw error}
+        }
     }
     func frames(query: String = "", app: String? = nil, starred: Bool = false, trash: Bool = false, since: Date? = nil, until: Date? = nil, demo: Bool? = nil, limit: Int = 500, offset: Int = 0, ascending: Bool = false) throws -> [MemoryFrame] {
         var conditions = [trash ? "deleted IS NOT NULL" : "deleted IS NULL"]

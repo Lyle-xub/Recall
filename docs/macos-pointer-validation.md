@@ -78,8 +78,16 @@ Linux 153, Mac 194, and 85 shared-core assertions per platform. Mac also passed
 15 native library integration tests.
 
 [Native run 36288107654](https://github.com/Lyle-xub/Recall/actions/runs/36288107654)
-passed its complete hosted Swift test step and the Windows desktop build. The Mac
-distribution build runs after those tests and compiles its bundled OCR dependencies.
+passed its complete hosted Swift test step and the Windows desktop build, but the
+Mac distribution step failed while `actool` compiled the layered icon: its asset
+runtime crashed on the macOS 15 host. Commit `52a55dd` moves the native desktop
+build to macOS 26 with the same Xcode 26.2 selection. The separate CLI workflow
+continues to test macOS 15 compatibility.
+
+[Native rerun 36289366102](https://github.com/Lyle-xub/Recall/actions/runs/36289366102)
+passed both desktop jobs, including the full Swift suite, Mac icon compilation,
+distribution packaging and uploaded artifacts. This closes the earlier packaging
+failure; it was separate from the repaired pointer scheduling.
 
 ## Reproduce the automated checks
 

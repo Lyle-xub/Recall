@@ -84,7 +84,7 @@ final class BackgroundPerformanceTests:XCTestCase {
         XCTAssertTrue(view.isHidden)
         let count = scene.layoutUpdateCount
         let frame = MemoryFrame(timestamp:Date(),appName:"New saved frame",bundleID:"test",title:"",imagePath:"missing.png",text:"",regions:[])
-        model.archiveFrames = [frame]
+        try model.store.save(frame);model.reload()
         try await Task.sleep(for:.milliseconds(120))
         XCTAssertEqual(scene.layoutUpdateCount,count,"Background captures must not rebuild a hidden 3D scene")
         model.interfaceVisibilityChanged(true)

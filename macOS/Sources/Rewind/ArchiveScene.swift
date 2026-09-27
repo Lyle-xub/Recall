@@ -82,7 +82,7 @@ struct ArchiveStackView: View {
         GeometryReader { geo in
             ZStack {
                 ArchiveGlassRenderer(frames:frames,images:images,appearance:model.settings.appearance,
-                    selected:focusedID,day:model.archiveDay,timelinePosition:model.archiveTimelinePosition,regions:focusedID.flatMap { recognizedRegions[$0] } ?? [],size:geo.size,reduced:reduceMotion,active:active,onSelect:toggle,onRecordAction:recordAction,onHoverRecord:{ imageLoader.hover(focusedID == nil ? $0:nil) },onViewportChange:{ imageLoader.updateViewport($0) })
+                    selected:focusedID,day:model.archiveDay,timelinePosition:model.archiveTimelinePosition,regions:focusedID.flatMap { recognizedRegions[$0] } ?? [],size:geo.size,reduced:reduceMotion,active:active,onSelect:toggle,onRecordAction:recordAction,onHoverRecord:{ imageLoader.hover(focusedID == nil ? $0:nil) },onViewportChange:{ imageLoader.updateViewport($0) },window:model.archiveWindow,onWindowDemand:{model.requestArchiveWindow(at:$0)})
                     .accessibilityRepresentation {
                         VStack {
                             ForEach(frames) { frame in
@@ -140,8 +140,9 @@ struct ArchiveStackView: View {
                 guard let pixels = await MemoryImagePipeline.previews.image(at:model.store.root.appendingPathComponent(frame.imagePath),maxPixels:1600),
                       !Task.isCancelled,model.archiveExtractionID == id else { return }
                 imageLoader.showDetail(pixels,for:frame.imagePath)
-                focusedID = id
+                model.pinArchiveRecord(id);focusedID = id
             }
+            .onChange(of:focusedID) { _,id in model.pinArchiveRecord(id) }
             .onChange(of:frames.map(\.id)) { _,ids in
                 requestImages()
                 if let focusedID,!ids.contains(focusedID) { self.focusedID = nil }
@@ -162,7 +163,8 @@ struct ArchiveStackView: View {
     }
     private func toggle(_ id:String?) {
         model.cancelArchiveExtraction()
-        focusedID = focusedID == id ? nil:id
+        let next=focusedID == id ? nil:id
+        model.pinArchiveRecord(next);focusedID=next
     }
     private func recordAction(_ id:String,_ action:String) {
         guard let frame = frames.first(where: { $0.id == id }) else { return }

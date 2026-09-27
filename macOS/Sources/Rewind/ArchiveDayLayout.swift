@@ -3,13 +3,23 @@ import CoreGraphics
 
 /// Calendar arithmetic, rather than 86,400-second offsets, keeps local days
 /// intact through daylight-saving changes. Blank slots have no record identity.
-struct ArchiveDayColumn {
+struct ArchiveDayColumn:Sendable {
     let day:Date
     let lane:Int
     let records:[MemoryFrame]
+    let startIndex:Int
+    let totalCount:Int
+    let origin:Int
+    init(day:Date,lane:Int,records:[MemoryFrame],startIndex:Int = 0,totalCount:Int? = nil,origin:Int = 0) {
+        self.day=day;self.lane=lane;self.records=records;self.startIndex=startIndex
+        self.totalCount=totalCount ?? records.count;self.origin=origin
+    }
+    func row(of id:String)->Int? {records.firstIndex { $0.id == id }.map {origin+startIndex+$0}}
 }
 enum ArchiveDayLayout {
-    static let recordsPerDay = 48
+    static let pageSize = 48
+    static let windowSize = pageSize*2
+    static let renderedRows = 52
     static func columns(frames:[MemoryFrame],around anchor:Date,calendar:Calendar = .current)->[ArchiveDayColumn] {
         let center = calendar.startOfDay(for:anchor)
         let grouped = Dictionary(grouping:frames.filter { !$0.demo && $0.deletedAt == nil }) { calendar.startOfDay(for:$0.timestamp) }
@@ -18,7 +28,7 @@ enum ArchiveDayLayout {
             var seen = Set<String>()
             let records = (grouped[day] ?? []).sorted { $0.timestamp == $1.timestamp ? $0.id < $1.id:$0.timestamp > $1.timestamp }
                 .filter { seen.insert($0.imagePath).inserted }
-            return ArchiveDayColumn(day:day,lane:lane,records:Array(records.prefix(recordsPerDay)))
+            return ArchiveDayColumn(day:day,lane:lane,records:records)
         }
     }
 }

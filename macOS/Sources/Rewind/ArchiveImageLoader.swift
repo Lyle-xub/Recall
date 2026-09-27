@@ -15,6 +15,7 @@ struct ArchiveViewportRecords:Equatable {
     private var costs:[String:Int] = [:]
     private var recent:[String] = []
     private var detailPaths:[String] = []
+    private var detailCosts:[String:Int] = [:]
     private var paths = Set<String>()
     private var pathsByID:[String:String] = [:]
     private(set) var viewport = ArchiveViewportRecords()
@@ -29,7 +30,10 @@ struct ArchiveViewportRecords:Equatable {
     private let decode:Decode
     private(set) var publicationCount = 0
     private(set) var decodeCount = 0
-    private let budget = 96*1024*1024
+    static let memoryBudget = 96*1024*1024
+    private let budget = memoryBudget
+    var cachedBytes:Int {costs.values.reduce(0,+)+detailCosts.values.reduce(0,+)}
+    var cachedImageCount:Int {thumbnails.count+detailCosts.count}
 
     init(decode:Decode? = nil) {
         self.decode = decode ?? { url in
@@ -47,6 +51,7 @@ struct ArchiveViewportRecords:Equatable {
             paths = newPaths
             thumbnails = thumbnails.filter { paths.contains($0.key) }
             costs = costs.filter { paths.contains($0.key) }
+            detailCosts=detailCosts.filter {paths.contains($0.key)}
             recent.removeAll { !paths.contains($0) };detailPaths.removeAll { !paths.contains($0) }
             failed.formIntersection(paths)
             let retained = images.filter { paths.contains($0.key) }
@@ -102,31 +107,58 @@ struct ArchiveViewportRecords:Equatable {
         if changed { images = next;publicationCount += 1 }
     }
     private func trimCache() {
-        var bytes = costs.values.reduce(0,+)
-        let protected = wanted.union(nearby).union(detailPaths)
-        var removed = Set<String>()
-        for path in recent where bytes > budget && !protected.contains(path) {
-            bytes -= costs.removeValue(forKey:path) ?? 0
-            thumbnails[path] = nil;removed.insert(path)
+        let protected=wanted.union(nearby).union(detailPaths)
+        var removed=Set<String>()
+        for path in recent where cachedBytes > budget && !protected.contains(path) {
+            costs[path]=nil;thumbnails[path]=nil;detailCosts[path]=nil;removed.insert(path)
         }
         if !removed.isEmpty {
-            recent.removeAll { removed.contains($0) }
-            images = images.filter { !removed.contains($0.key) }
+            recent.removeAll {removed.contains($0)}
+            images=images.filter {!removed.contains($0.key)}
         }
+        // Protected viewport/detail entries are still subject to the byte cap.
+        // Downsample the thumbnail cohort together instead of evicting visible
+        // cards into a decode/evict loop or allowing an unbounded exception.
+        let thumbnailBytes=costs.values.reduce(0,+)
+        let available=max(1,budget-detailCosts.values.reduce(0,+))
+        guard thumbnailBytes > available else {return}
+        var next=images
+        for (path,cost) in costs {
+            guard let old=thumbnails[path],let pixels=old.cgImage(forProposedRect:nil,context:nil,hints:nil) else {continue}
+            let maximum=max(4,Int(Double(cost)*Double(available)/Double(thumbnailBytes)))
+            let small=Self.limit(pixels,to:maximum)
+            let replacement=NSImage(cgImage:small,size:NSSize(width:small.width,height:small.height))
+            thumbnails[path]=replacement;costs[path]=small.bytesPerRow*small.height
+            if next[path] === old {next[path]=replacement}
+        }
+        images=next
+    }
+    private static func limit(_ pixels:CGImage,to maximum:Int)->CGImage {
+        guard pixels.bytesPerRow*pixels.height > maximum else {return pixels}
+        let scale=sqrt(Double(maximum)/Double(pixels.bytesPerRow*pixels.height))*0.97
+        let width=max(1,Int(Double(pixels.width)*scale)),height=max(1,Int(Double(pixels.height)*scale))
+        guard let context=CGContext(data:nil,width:width,height:height,bitsPerComponent:8,bytesPerRow:width*4,space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue) else {return pixels}
+        context.interpolationQuality = .high
+        context.draw(pixels,in:CGRect(x:0,y:0,width:width,height:height))
+        return context.makeImage() ?? pixels
     }
     func showDetail(_ pixels:CGImage,for path:String) {
         guard active,paths.contains(path) else { return }
+        let pixels=Self.limit(pixels,to:budget/4)
         detailPaths.removeAll { $0 == path };detailPaths.append(path)
         var next = images,changed = false
         if CGFloat(pixels.width) > (next[path]?.size.width ?? 0) {
             next[path] = NSImage(cgImage:pixels,size:NSSize(width:pixels.width,height:pixels.height))
+            detailCosts[path]=pixels.bytesPerRow*pixels.height
             changed = true
         }
         while detailPaths.count > 2 {
-            let old = detailPaths.removeFirst()
+            let old = detailPaths.removeFirst();detailCosts[old]=nil
             if let thumbnail = thumbnails[old],next[old] !== thumbnail { next[old] = thumbnail;changed = true }
+            else if thumbnails[old] == nil {next[old]=nil;changed=true}
         }
         if changed { images = next;publicationCount += 1 }
+        trimCache()
     }
     /// Pointer changes remain local to the loader: no SwiftUI invalidation,
     /// accessibility-tree rebuild or texture upload while sweeping the rack.
