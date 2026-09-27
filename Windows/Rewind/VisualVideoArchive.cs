@@ -30,6 +30,7 @@ public sealed class VisualVideoWriter : IDisposable
     public long DurationTicks { get; private set; }
     public string Codec { get; private set; } = "";
     public string? Diagnostic { get; private set; }
+    internal string TransformDiagnostic { get; private set; } = "";
     internal int EncodedWidth => (Width + 1) & ~1;
     internal int EncodedHeight => (Height + 1) & ~1;
 
@@ -89,6 +90,7 @@ public sealed class VisualVideoWriter : IDisposable
             parameters.SetUINT32(NativeVideo.Gop, 60);
             parameters.SetUINT32(NativeVideo.BFrames, 0);
             writer.SetInputMediaType(stream, input, parameters);
+            TransformDiagnostic = NativeVideo.DisableFrameRateConversion(writer, stream);
             writer.BeginWriting();
         }
         finally { NativeVideo.Release(parameters); NativeVideo.Release(input); NativeVideo.Release(output); NativeVideo.Release(attributes); }
@@ -371,11 +373,59 @@ public static class VisualVideoReader
     }
 }
 
+// The Windows 8 extension appends one method to the eleven-method sink writer
+// vtable. This exposes the automatically inserted RGB-to-YUV video processor.
+[ComImport, Guid("588d72ab-5bc1-496a-8714-b70617141b25"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IVisualSinkWriterEx
+{
+    void AddStream(IMFMediaType type, out int stream);
+    void SetInputMediaType(int stream, IMFMediaType type, IMFAttributes parameters);
+    void BeginWriting();
+    void WriteSample(int stream, IMFSample sample);
+    void SendStreamTick(int stream, long timestamp);
+    void PlaceMarker(int stream, IntPtr context);
+    void NotifyEndOfSegment(int stream);
+    void Flush(int stream);
+    void DoFinalize();
+    void GetServiceForStream(int stream, ref Guid service, ref Guid iid, out IntPtr value);
+    void GetStatistics(int stream, MF_SINK_WRITER_STATISTICS statistics);
+    [PreserveSig] int GetTransformForStream(int stream, int transformIndex, out Guid category, out IMFTransform transform);
+}
+
 internal static class NativeVideo
 {
     internal static readonly Guid Rgb32 = new("00000016-0000-0010-8000-00aa00389b71"), H264 = new("34363248-0000-0010-8000-00aa00389b71"), Hevc = new("43564548-0000-0010-8000-00aa00389b71");
     internal static readonly Guid FrameSize = new("1652c33d-d6b2-4012-b834-72030849a37d"), FrameRate = new("c459a2e8-3d2c-4e44-b132-fee5156c7bb0"), Aspect = new("c6376a1e-8d0a-4027-be45-6d9a0ad39bb6"), Interlace = new("e2724bb8-e676-4806-b4b2-a8d6efb44ccd"), Stride = new("644b4e48-1e02-4516-b0eb-c01ca9d49ac6");
     internal static readonly Guid VideoProcessing = new("fb394f3d-ccf1-42ee-bbb3-f9b845d5681d"), RateControl = new("1c0608e9-370c-4710-8a58-cb6181c42423"), Quality = new("fcbf57a3-7ea5-4b0c-9644-69b40c39c391"), Gop = new("95f31b26-95a4-41aa-9303-246a7fc6eef1"), BFrames = new("8d390aac-dc5c-4200-b57f-814d04babab2");
+    private static readonly Guid DisableFrc = new("2c0afa19-7a97-4d5a-9ee8-16d4fc518d8c");
+    internal static string DisableFrameRateConversion(IMFSinkWriter writer, int stream)
+    {
+        var extended = (IVisualSinkWriterEx)writer;
+        var observations = new List<string>();
+        for (int index = 0; index < 16; index++)
+        {
+            var result = extended.GetTransformForStream(stream, index, out var category, out var transform);
+            if (result < 0) { observations.Add($"end=0x{result:X8}"); break; }
+            IMFAttributes? attributes = null;
+            try
+            {
+                if (category == MediaFoundationTransformCategories.VideoProcessor || category == MediaFoundationTransformCategories.VideoEffect)
+                {
+                    transform.GetAttributes(out attributes);
+                    // Without this the sink writer's color converter converts
+                    // variable source times to the nominal 1 fps output rate.
+                    // Set before BeginWriting: preserve every forced card sample.
+                    attributes.SetUINT32(DisableFrc, 1);
+                    attributes.GetUINT32(DisableFrc, out var disabled);
+                    if (disabled != 1) throw new InvalidOperationException("The video processor could not preserve capture timestamps.");
+                    observations.Add($"transform={index},category={category},frameRateConversion=disabled");
+                }
+                else observations.Add($"transform={index},category={category}");
+            }
+            finally { Release(attributes); Release(transform); }
+        }
+        return string.Join("; ", observations);
+    }
     private static readonly object startupGate = new();
     private static bool started;
     internal static void Startup() { lock (startupGate) { if (!started) { MediaFoundationApi.Startup(); started = true; } } }

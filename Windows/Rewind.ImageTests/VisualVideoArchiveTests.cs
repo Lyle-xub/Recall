@@ -37,6 +37,7 @@ internal static class VisualVideoArchiveTests
         // injection verifies fallback without depending on runner GPU hardware.
         using (var writer = new VisualVideoWriter(path, width, height, true, () => false))
         {
+            Console.WriteLine("NATIVE VIDEO TRANSFORMS " + writer.TransformDiagnostic);
             Check(writer.Codec == "h264" && writer.Diagnostic?.Contains("H.264") == true, "HEVC fallback must report the actual compatible codec.");
             redTime = writer.Append(red, 0);
             blueTime = writer.Append(blue, 13_750_000);
