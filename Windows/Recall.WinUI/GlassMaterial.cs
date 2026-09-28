@@ -133,12 +133,16 @@ internal static class GlassMaterial
     {
         // Reset all tuning values before applying a command's overrides, including
         // retained toolbar brushes that survive page navigation in validation.
-        brush.BlurAmount = compact ? 12 : 14; brush.RefThickness = compact ? 6 : 8; brush.RefFactor = 1.16;
+        // Toolbar controls in both archive presentations share the same optical
+        // stack: native backdrop blur underneath, then a wider refractive rim.
+        // The blur remains unchanged while the thicker lens band makes motion at
+        // the edge readable against both the timeline and the Rhine rack.
+        brush.BlurAmount = compact ? 12 : 14; brush.RefThickness = compact ? 9 : 8; brush.RefFactor = compact ? 1.24 : 1.16;
         brush.RefDispersion = .28; brush.DispersionRange = .62;
         brush.RefFresnelRange = compact ? 22 : 28; brush.RefFresnelHardness = 18; brush.RefFresnelFactor = 16;
         brush.GlareAngle = -58; brush.GlareRange = compact ? 24 : 30; brush.GlareHardness = 18;
         brush.GlareFactor = 18; brush.GlareOppositeFactor = 7; brush.GlareConvergence = 24;
-        brush.ShapeRoundness = 4.6; brush.Magnification = 1.006;
+        brush.ShapeRoundness = 4.6; brush.Magnification = compact ? 1.010 : 1.006;
         brush.TintR = brush.TintG = brush.TintB = dark ? 48 : 250;
         brush.TintA = dark ? compact ? .16 : .24 : compact ? .18 : .25;
         brush.LumaCompression = dark ? .78 : .84;
@@ -166,6 +170,12 @@ internal static class GlassMaterial
             if (reference.TryGetTarget(out var surface) && surface.Owner == owner && surface.DesktopSurface != included)
             { surface.DesktopSurface = included; }
     }
+    internal static void SetTintOpacity(FrameworkElement owner, double? opacity)
+    {
+        foreach (var reference in surfaces)
+            if (reference.TryGetTarget(out var surface) && surface.Owner == owner && surface.TintOpacity != opacity)
+            { surface.TintOpacity = opacity; surface.Update(); }
+    }
     public static void SetDark(bool dark)
     {
         surfaces.RemoveAll(reference => !reference.TryGetTarget(out _));
@@ -191,6 +201,7 @@ internal static class GlassMaterial
         internal bool DesktopOnly = desktopOnly;
         internal bool Enabled = true;
         internal Color? Accent = accent;
+        internal double? TintOpacity;
         RecallGlassBrush? glass;
         readonly SolidColorBrush fallback = new();
         void Assign(Brush brush)
@@ -221,7 +232,9 @@ internal static class GlassMaterial
             }
             var scale = (float)(Owner.XamlRoot?.RasterizationScale ?? 1);
             if (glass != null && glass.DpiScale != scale) Disconnect();
-            glass ??= Create(); glass.DpiScale = scale; Apply(glass, Design.Dark, Owner.ActualHeight <= 100); Override(glass);
+            glass ??= Create(); glass.DpiScale = scale; Apply(glass, Design.Dark, Owner.ActualHeight <= 100);
+            if (TintOpacity is double opacity) glass.TintA = opacity;
+            Override(glass);
             glass.AccentTint = Accent;
             if (Accent is Color tint) { glass.TintR = tint.R; glass.TintG = tint.G; glass.TintB = tint.B; glass.TintA = .6; }
             glass.RefreshSource();
