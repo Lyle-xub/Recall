@@ -15,11 +15,15 @@ internal static class Design
     public static readonly Color Blue = Color.FromArgb(255, 92, 151, 235);
     static readonly SolidColorBrush inkBrush = new(Ink), mutedBrush = new(Muted);
     public static readonly SolidColorBrush GlassBrush = new(Color.FromArgb(104, 255, 255, 255));
-    public static readonly FontFamily BodyFont = new("Segoe UI Variable Text");
-    public static readonly FontFamily DisplayFont = new("Segoe UI Variable Display");
-    public static readonly FontFamily SmallFont = new("Segoe UI Variable Small");
+    // Inter's metrics and neutral shapes are much closer to San Francisco than
+    // Segoe UI, and the bundled variable font keeps every Windows installation
+    // on the same typography. DirectWrite still falls back for CJK glyphs.
+    public static readonly FontFamily BodyFont = new("ms-appx:///Assets/Fonts/InterVariable.ttf#Inter Variable");
+    public static readonly FontFamily DisplayFont = BodyFont;
+    public static readonly FontFamily SmallFont = BodyFont;
     public static readonly LinearGradientBrush ArchiveBrush = new() { StartPoint = new(0,0), EndPoint = new(1,1), GradientStops = { new() { Offset = 0, Color = Color.FromArgb(45,250,249,244) }, new() { Offset = .35, Color = Color.FromArgb(16,223,228,228) }, new() { Offset = 1, Color = Color.FromArgb(46,132,151,169) } } };
     public static readonly LinearGradientBrush RimBrush = new() { StartPoint = new(0, 0), EndPoint = new(.8, 1), GradientStops = { new() { Offset = 0, Color = Color.FromArgb(210,255,255,255) }, new() { Offset = .48, Color = Color.FromArgb(30,70,80,100) }, new() { Offset = 1, Color = Color.FromArgb(100,255,255,255) } } };
+    public static readonly SolidColorBrush ArchiveRimBrush = new(Color.FromArgb(42, 255, 255, 255));
     public static void SetDark(bool dark)
     {
         Dark = dark; inkBrush.Color = Ink; mutedBrush.Color = Muted;
@@ -34,6 +38,7 @@ internal static class Design
         RimBrush.GradientStops[0].Color = dark ? Color.FromArgb(68,230,240,255) : Color.FromArgb(190,255,255,255);
         RimBrush.GradientStops[1].Color = Color.FromArgb(dark ? (byte)34 : (byte)28,30,40,60);
         RimBrush.GradientStops[2].Color = Color.FromArgb(dark ? (byte)38 : (byte)115,230,240,255);
+        ArchiveRimBrush.Color = dark ? Color.FromArgb(30,220,230,244) : Color.FromArgb(38,255,255,255);
         if (System.Windows.Forms.SystemInformation.HighContrast) foreach (var stop in RimBrush.GradientStops) stop.Color = Ink;
     }
     public static readonly AcrylicBrush PopupBrush = new() { TintColor = Microsoft.UI.Colors.White, TintOpacity = .38, TintLuminosityOpacity = .65, FallbackColor = Color.FromArgb(255,235,237,240) };
@@ -157,7 +162,7 @@ internal static class Design
           </Grid>
         </ControlTemplate>
         """);
-    public static TextBlock Text(string text, double size = 15, bool strong = false, Color? color = null) => new() { Text = text, FontFamily = size >= 23 ? DisplayFont : size <= 12 ? SmallFont : BodyFont, FontSize = size, FontWeight = strong ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal, Foreground = Brush(color ?? Ink), TextWrapping = TextWrapping.Wrap, TextLineBounds = TextLineBounds.Full, VerticalAlignment = VerticalAlignment.Center };
+    public static TextBlock Text(string text, double size = 15, bool strong = false, Color? color = null) => new() { Text = text, FontFamily = size >= 23 ? DisplayFont : size <= 12 ? SmallFont : BodyFont, FontSize = size, FontWeight = strong ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal, CharacterSpacing = size >= 23 ? -12 : 0, Foreground = Brush(color ?? Ink), TextWrapping = TextWrapping.Wrap, TextLineBounds = TextLineBounds.Full, VerticalAlignment = VerticalAlignment.Center };
     public static StackPanel Stack(double spacing = 12, params UIElement[] children)
     {
         var p = new StackPanel { Spacing = spacing };

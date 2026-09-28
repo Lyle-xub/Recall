@@ -67,8 +67,8 @@ static class RhineMotionTests
             }
             return count;
         }
-        assert(VisibleRows(RhineGeometry.RowPitch) >= VisibleRows(1) + 2,
-            "Tighter row pitch exposes more real screenshot cards without changing card size");
+        assert(Math.Abs(RhineGeometry.RowPitch - 1) < 1e-6 && VisibleRows(RhineGeometry.RowPitch) == VisibleRows(1),
+            "Rhine uses the same one-unit rack pitch as the macOS archive scene");
         var origin = new Vector3(1, 2, 3); var destination = new Vector3(10, 12, 14);
         assert(Vector3.Distance(RhineGeometry.Extract(origin, destination, 0), origin) < .001, "Collapse returns to its original card position");
         assert(Vector3.Distance(RhineGeometry.Extract(origin, destination, 1), destination) < .001, "Extraction ends at its safe-area center");

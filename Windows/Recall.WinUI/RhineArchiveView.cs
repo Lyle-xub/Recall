@@ -244,7 +244,7 @@ internal sealed class RhineArchiveView : Grid
         Children.Add(wall);
         foreach (var label in new[] { collectionText, statusText })
         {
-            label.CharacterSpacing = 150; label.VerticalAlignment = VerticalAlignment.Center;
+            label.CharacterSpacing = 180; label.VerticalAlignment = VerticalAlignment.Center;
             label.TextWrapping = TextWrapping.NoWrap; label.TextTrimming = TextTrimming.CharacterEllipsis;
             label.MaxLines = 1; label.IsHitTestVisible = false;
         }
@@ -309,7 +309,7 @@ internal sealed class RhineArchiveView : Grid
             button.PointerExited += (_, _) => button.Background = Design.Brush(Microsoft.UI.Colors.Transparent);
             return button;
         }
-        dayControls = Design.Row(12, DayArrow("\uE76B", "Previous day", -1), dayText, dayHint,
+        dayControls = Design.Row(16, DayArrow("\uE76B", "Previous day", -1), dayText, dayHint,
             DayArrow("\uE76C", "Next day", 1));
         // A 30 px arrow plus 3 px inset and 1 px rim makes a 38 px pill.
         // Its one 19 px glass radius matches that actual edge; arrows are plain.
@@ -476,7 +476,7 @@ internal sealed class RhineArchiveView : Grid
         foreach (var (lane, entries) in columns)
             for (var row = 0; row < entries.Length; row++) positions[entries[row].Id] = (lane,row);
         return new(frames,columns,positions,$"LOCAL COLLECTION · {apps.Count:N0} APPS / {frames.Count:N0} MEMORIES",
-            Math.Max(28,columns.Values.Max(items => items.Length)),SameFrames(previous,frames));
+            Math.Max(52,columns.Values.Max(items => items.Length)),SameFrames(previous,frames));
     }
     static bool SameFrames(IReadOnlyList<ArchiveFrame> before, IReadOnlyList<ArchiveFrame> after)
     {
@@ -765,6 +765,7 @@ internal sealed class RhineArchiveView : Grid
             {
                 var text = Design.Text(label,12,true,Design.Dark ? Color.FromArgb(225,242,244,248) : Color.FromArgb(205,55,57,61));
                 text.FontFamily = new FontFamily("Cascadia Mono");
+                text.FontWeight = Microsoft.UI.Text.FontWeights.Medium;
                 text.TextWrapping = TextWrapping.NoWrap;
                 text.Width = 430; text.Height = 43;
                 var root = new Canvas { Width = 0, Height = 0, IsHitTestVisible = false };
@@ -783,7 +784,7 @@ internal sealed class RhineArchiveView : Grid
     {
         var depth = RhineGeometry.Depth(row,lane);
         var root = new Canvas { Width = 0, Height = 0 };
-        var rimScale = frame == null ? .42 : 1;
+        var rimScale = frame == null ? .80 : 1;
         var glass = new Border { Width = 535, Height = 650, Background = palettes[lane], BorderBrush = new LinearGradientBrush { StartPoint = new(0,0), EndPoint = new(.7,1), GradientStops = { new() { Offset = 0, Color = Color.FromArgb((byte)(210*rimScale),255,255,255) }, new() { Offset = .45, Color = Color.FromArgb((byte)(142*rimScale),246,249,250) }, new() { Offset = 1, Color = Color.FromArgb((byte)(54*rimScale),179,193,203) } } }, BorderThickness = new(frame == null ? 1.7 : 2.7,frame == null ? 1.4 : 2.2,0,0), CornerRadius = new(2) };
         var depthFog = new Border { Width = 535, Height = 650, CornerRadius = new(2),
             Background = Design.Brush(Design.Dark ? Color.FromArgb(255,15,18,24) : Color.FromArgb(255,230,228,221)),
@@ -934,10 +935,11 @@ internal sealed class RhineArchiveView : Grid
             {
                 if (realized.ContainsKey((lane, row))) continue;
                 var hasImage = row >= 0 && row < columns[lane].Length;
-                // Keep only a short glass tail around real records. Hundreds of
-                // invisible placeholder sheets prolonged reduced-motion closes
-                // and made the Windows rack look like a wireframe model.
-                if (!hasImage && (row < -2 || row > columns[lane].Length + 1)) continue;
+                // The macOS archive keeps a long translucent tail behind sparse
+                // columns. It is a large part of the Rhine silhouette, especially
+                // on the empty right side of the scene.
+                var blankTail = Math.Max(0, 52 - columns[lane].Length);
+                if (!hasImage && (row < -2 || row > columns[lane].Length + blankTail)) continue;
                 var depth = RhineGeometry.Depth(row,lane);
                 var h = RhineGeometry.Height(lane, depth, crest.Value, across.Value);
                 var position = new Vector3(lane * (lane < 0 ? 5.65f : 6.25f), (float)h, (float)depth - 5);
@@ -964,7 +966,7 @@ internal sealed class RhineArchiveView : Grid
         }
         return pending.Count > created;
     }
-    const int WallImageEdge = 192, ExpandedImageEdge = 1200;
+    const int WallImageEdge = 320, ExpandedImageEdge = 1200;
     const long MaxRetainedImageBytes = 160_000_000;
     static long EstimatedBytes(int edge) => (long)edge * edge * 5 / 2;
     static long BitmapBytes(BitmapImage? bitmap) => bitmap is null ? 0 : (long)bitmap.PixelWidth * bitmap.PixelHeight * 4;
@@ -1496,23 +1498,25 @@ internal sealed class RhineArchiveView : Grid
             var visible = center.X + extentX > -80 && center.X - extentX < ActualWidth + 80 && center.Y + extentY > -80 && center.Y - extentY < ActualHeight + 80;
             var visibility = visible ? Visibility.Visible : Visibility.Collapsed;
             if (s.Root.Visibility != visibility) { s.Root.Visibility = visibility; if (visible && !imageTimer.IsRunning) imageTimer.Start(); }
-            // Native SceneKit fog blends toward a warm neutral, rather than making
-            // distant screenshots transparent and revealing other screenshots through them.
+            // SceneKit softens distant sheets, but it does not lay an opaque veil
+            // over the near rack. Keep the neutral fog on the far side only so
+            // actual screenshots and their footer remain legible at the crest.
             var blend = s == extracted ? (float)extraction.Value : 0;
-            var focusError = Math.Abs(s.Distance - 33.5f);
-            var depthHaze = Math.Clamp((focusError - 2.0f) / 13.5f, 0, .82f) * (1-blend);
             var farFog = Math.Clamp((s.Distance - 36f) / 13f, 0, .88f) * (1-blend);
-            var sceneHaze = Math.Max(depthHaze * .70f, farFog * .88f);
-            var depthFogOpacity = sceneHaze * (Design.Dark ? .72f : .78f);
+            var sceneHaze = farFog * .78f;
+            var depthFogOpacity = sceneHaze * (Design.Dark ? .46f : .52f);
             if (Math.Abs(s.DepthFogOpacity-depthFogOpacity) > .002f)
             { s.DepthFogVisual!.Opacity = depthFogOpacity; s.DepthFogOpacity = depthFogOpacity; }
-            var glassOpacity = (s.Frame == null ? .24f : .76f) * (1-sceneHaze*.64f) + blend*.24f;
+            // RhineTone already contains macOS' material transparency folded
+            // into each color stop. Present it at full strength here; applying
+            // another partial opacity washed the empty right-hand rack white.
+            var glassOpacity = (s.Frame == null ? 1f : .96f) * (1-sceneHaze*.45f) + blend*.04f;
             if (Math.Abs(s.GlassOpacity-glassOpacity) > .002f)
             { s.GlassVisual.Opacity = glassOpacity; s.GlassOpacity = glassOpacity; }
             if (s.Frame != null)
             {
-                var fog = Math.Max(farFog, depthHaze*.34f);
-                var imageOpacity = (Design.Dark ? .92f : 1) * (1-farFog*.22f);
+                var fog = farFog;
+                var imageOpacity = (Design.Dark ? .78f : 1) * (1-farFog*.10f);
                 if (Math.Abs(s.ImageOpacity-imageOpacity) > .002) { s.ImageVisual!.Opacity = imageOpacity; s.ImageOpacity = imageOpacity; }
                 if (Math.Abs(s.FogOpacity-fog) > .002) { s.FogVisual!.Opacity = fog; s.FogOpacity = fog; }
             }

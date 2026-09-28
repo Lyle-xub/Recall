@@ -133,17 +133,17 @@ internal static class GlassMaterial
     {
         // Reset all tuning values before applying a command's overrides, including
         // retained toolbar brushes that survive page navigation in validation.
-        brush.BlurAmount = 10; brush.RefThickness = 3; brush.RefFactor = 1.12;
-        brush.RefDispersion = .05; brush.DispersionRange = .3;
-        brush.RefFresnelRange = 20; brush.RefFresnelHardness = 30; brush.RefFresnelFactor = 1;
-        brush.GlareAngle = -65; brush.GlareRange = 18; brush.GlareHardness = 25;
-        brush.GlareFactor = .8; brush.GlareOppositeFactor = .35; brush.GlareConvergence = 35;
-        brush.ShapeRoundness = 2; brush.Magnification = 1;
-        brush.TintR = brush.TintG = brush.TintB = dark ? 55 : 255;
-        brush.TintA = dark ? compact ? .36 : .62 : compact ? .34 : .46;
-        brush.LumaCompression = dark ? compact ? .6 : .4 : .5;
-        brush.ColorSaturation = dark ? 1.35 : 1.18;
-        brush.LumaOffset = (dark ? compact ? 69 : 72 : compact ? 110 : 107) / 255.0;
+        brush.BlurAmount = compact ? 12 : 14; brush.RefThickness = compact ? 6 : 8; brush.RefFactor = 1.16;
+        brush.RefDispersion = .28; brush.DispersionRange = .62;
+        brush.RefFresnelRange = compact ? 22 : 28; brush.RefFresnelHardness = 18; brush.RefFresnelFactor = 16;
+        brush.GlareAngle = -58; brush.GlareRange = compact ? 24 : 30; brush.GlareHardness = 18;
+        brush.GlareFactor = 18; brush.GlareOppositeFactor = 7; brush.GlareConvergence = 24;
+        brush.ShapeRoundness = 4.6; brush.Magnification = 1.006;
+        brush.TintR = brush.TintG = brush.TintB = dark ? 48 : 250;
+        brush.TintA = dark ? compact ? .16 : .24 : compact ? .18 : .25;
+        brush.LumaCompression = dark ? .78 : .84;
+        brush.ColorSaturation = dark ? 1.22 : 1.10;
+        brush.LumaOffset = (dark ? compact ? 26 : 30 : compact ? 24 : 28) / 255.0;
         brush.FallbackColor = dark ? Color.FromArgb(255, 45, 48, 54) : Color.FromArgb(255, 235, 237, 240);
     }
     internal static void SetAccent(FrameworkElement owner, Color? accent)
@@ -159,6 +159,12 @@ internal static class GlassMaterial
         foreach (var reference in surfaces)
             if (reference.TryGetTarget(out var surface) && surface.Owner == owner && surface.DesktopOnly != desktopOnly)
             { surface.DesktopOnly = desktopOnly; surface.Update(); }
+    }
+    internal static void SetDesktopSurface(FrameworkElement owner, bool included)
+    {
+        foreach (var reference in surfaces)
+            if (reference.TryGetTarget(out var surface) && surface.Owner == owner && surface.DesktopSurface != included)
+            { surface.DesktopSurface = included; }
     }
     public static void SetDark(bool dark)
     {
@@ -180,7 +186,7 @@ internal static class GlassMaterial
     sealed class Surface(FrameworkElement owner, double radius, Color? accent, bool desktopOnly, bool desktopSurface, double glassOpacity)
     {
         public FrameworkElement Owner { get; } = owner;
-        public bool DesktopSurface { get; } = desktopSurface;
+        public bool DesktopSurface { get; internal set; } = desktopSurface;
         public double Radius => Owner is Control control ? control.CornerRadius.TopLeft : Owner is Border border ? border.CornerRadius.TopLeft : radius;
         internal bool DesktopOnly = desktopOnly;
         internal bool Enabled = true;
@@ -209,7 +215,7 @@ internal static class GlassMaterial
                 Assign(new LinearGradientBrush
                 {
                     StartPoint = new(0, 0), EndPoint = new(1, 1),
-                    GradientStops = { new() { Color = Color.FromArgb(22,255,255,255), Offset = 0 }, new() { Color = Color.FromArgb(3,255,255,255), Offset = .55 }, new() { Color = Color.FromArgb(12,255,255,255), Offset = 1 } }
+                    GradientStops = { new() { Color = Color.FromArgb(14,255,255,255), Offset = 0 }, new() { Color = Color.FromArgb(2,255,255,255), Offset = .55 }, new() { Color = Color.FromArgb(7,255,255,255), Offset = 1 } }
                 });
                 return;
             }

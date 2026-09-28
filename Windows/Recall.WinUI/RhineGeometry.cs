@@ -66,9 +66,8 @@ internal static class RhineTone
 /// critically damped motion match macOS ArchiveRidgeMotion/ArchiveGlassScene.
 internal static class RhineGeometry
 {
-    // Rows are slightly closer than the original one-unit rack pitch. This
-    // exposes more real photographs in the viewport without shrinking cards.
-    public const float RowPitch = .82f;
+    // Match ArchiveGlassScene's one-world-unit rack pitch on macOS.
+    public const float RowPitch = 1f;
     public static float Depth(int row, int lane) => (row - (lane == 0 ? 0 : lane < 0 ? 3.5f : 1.5f)) * RowPitch;
     public static float LastScroll(int rows) => Math.Max(0, rows - 2) * RowPitch;
     public const float ArtBaseWidth = 495, FooterBaseHeight = 54;
@@ -101,14 +100,14 @@ internal static class RhineGeometry
         // Plane(), then projected at viewportWidth / 19.98 pixels per world
         // unit. Reserve the actual controls before choosing the card size.
         var localPerPixel = 19.98f * 100 / Math.Max(1, viewportWidth);
-        var availableHeight = Math.Max(1, viewportHeight - topInset - bottomInset - 24);
+        var availableHeight = Math.Max(1, viewportHeight - topInset - bottomInset);
         var maxHeight = availableHeight * localPerPixel;
         var maxWidth = Math.Max(1, viewportWidth * .88f) * localPerPixel;
         var artWidth = Math.Max(1, Math.Min(maxWidth - 2 * CardInset,
             (maxHeight - 2 * CardInset - ContentGap) / (1 / aspect + FooterBaseHeight / ArtBaseWidth)));
-        const float macPresentationScale = .82f;
-        return ((artWidth + 2 * CardInset) * macPresentationScale,
-            (artWidth / aspect + FooterBaseHeight * artWidth / ArtBaseWidth + 2 * CardInset + ContentGap) * macPresentationScale);
+        const float presentationScale = 1f;
+        return ((artWidth + 2 * CardInset) * presentationScale,
+            (artWidth / aspect + FooterBaseHeight * artWidth / ArtBaseWidth + 2 * CardInset + ContentGap) * presentationScale);
     }
 
     public static float ExpandedCenterShift(float topInset, float bottomInset) =>

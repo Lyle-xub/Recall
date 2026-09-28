@@ -104,55 +104,27 @@ float RoundedRectSDF(float2 p, float2 center, float2 half0, float cr, float n)
     return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
 }
 
-// Closed-form gradient of RoundedRectSDF = the limit of Studio's 4-tap finite-
-// difference normal. Corner region -> isotropic superellipse gradient; flat faces
-// -> axis-aligned outward gradient (a flat face's normal IS axis-aligned, and flat
-// faces barely refract, so precision there is irrelevant). Scaled to Studio's
-// magnitude convention (grad / res.y * sqrt2 * 1000). O(1), no SDF re-taps.
-float2 AnalyticNormal(float2 fragCoord, float2 center, float2 halfPx, float cr, float n, float2 res)
+// Rounded-rect analytical normal: flat faces remain perpendicular to the edge,
+// squircle corners follow the SDF gradient, and the deep medial axis rotates
+// smoothly instead of snapping by 90 degrees.
+float2 RoundedRectNormal(float2 fragCoord, float2 center, float2 halfPx,
+                         float cr, float n, float blend, float2 res)
 {
     float2 p = fragCoord - center;
     cr = min(cr, min(halfPx.x, halfPx.y));
-    float2 d = abs(p) - halfPx;
-    float2 grad;
-    if (d.x > -cr && d.y > -cr)
+    float2 cc = abs(p) - (halfPx - cr);
+    float2 local;
+    if (max(cc.x, cc.y) > 0.0)
     {
-        // corner: isotropic superellipse gradient about this corner's center
-        float2 cornerCenter = sign(p) * (halfPx - float2(cr, cr));
-        float2 q  = p - cornerCenter;
-        float2 aq = abs(q);
-        float S   = pow(aq.x, n) + pow(aq.y, n);
-        float k   = S > 1e-6 ? pow(S, 1.0 / n - 1.0) : 0.0;   // guard exact corner center
-        grad = sign(q) * pow(aq, float2(n - 1.0, n - 1.0)) * k;
+        float2 g = pow(max(cc, 0.0), float2(n - 1.0, n - 1.0));
+        local = g / max(length(g), 1e-6);
     }
     else
     {
-        // flat face: outward along the axis closest to its edge (the larger d)
-        grad = (d.x >= d.y) ? float2(sign(p.x), 0.0) : float2(0.0, sign(p.y));
+        float t = smoothstep(-blend, blend, cc.x - cc.y);
+        local = normalize(float2(t, 1.0 - t));
     }
-    return grad * (1.0 / res.y) * 1.414213562 * 1000.0;
-}
-
-// Smooth outward edge-normal — soft inverse-distance blend of the four edge
-// normals (left / right / top / bottom).  Unlike the analytic SDF gradient,
-// this rotates smoothly through corners and across the medial axis with no
-// branch-switch kinks, matching the reference shader's SmoothNormal.  tau
-// controls the blending radius (larger = wider smooth zone); here it scales
-// with the refraction band so the smoothing adapts to RefThickness.
-float2 SmoothNormal(float2 fragCoord, float2 center, float2 halfPx, float tau)
-{
-    float px = fragCoord.x - center.x;
-    float py = fragCoord.y - center.y;
-    float t = max(tau, 1e-3);
-    // Stable softmax: the original exponentials all underflowed to zero in
-    // large panels, creating a 0/0 normal and a visible rectangular NaN patch.
-    float4 distances = float4(halfPx.x + px, halfPx.x - px, halfPx.y - py, halfPx.y + py);
-    float nearest = min(min(distances.x, distances.y), min(distances.z, distances.w));
-    float4 weights = exp((nearest - distances) / t);
-    float wl = weights.x, wr = weights.y, wt = weights.z, wb = weights.w;
-    float w = wl + wr + wt + wb;
-    // outward normals: left→(-1,0) right→(+1,0) top→(0,+1) bottom→(0,-1)
-    return float2((wr - wl) / w, (wt - wb) / w);
+    return sign(p) * local * (1.0 / res.y) * 1.414213562 * 1000.0;
 }
 
 // Clamp a sampling UV to the content rect of the intermediate texture.
@@ -242,18 +214,7 @@ float4 LiquidGlassBody(float2 uv, float4 samplerDataExt, float4 samplerData)
         float edgeFactor = -1.0 * tan(thetaT - thetaI);
         if (nmerged >= RefThickness * dpr) edgeFactor = 0.0;
 
-        // Smooth outward normal (reference's SmoothNormal): soft inverse-distance
-        // blend of the four edge normals.  Unlike the analytic SDF gradient, this
-        // rotates smoothly through corners and across the medial axis — no
-        // branch-switch kinks that would make the refraction direction jump
-        // between adjacent pixels.  tau scales with RefThickness (matching the
-        // reference: wide band → wide smoothing zone).
-        float tau = RefThickness * dpr * 0.5;
-        float2 normal = SmoothNormal(fragCoord, center, halfPx, tau);
-        // Scale to match the original AnalyticNormal magnitude convention for
-        // glare (nLen used in saturate(g * nLen)).  The direction (safeN) is
-        // length-invariant.
-        normal *= (1.0 / res.y) * 1.414213562 * 1000.0;
+        float2 normal = RoundedRectNormal(fragCoord, center, halfPx, cr, n, 3.0 * dpr, res);
         float nLen = length(normal);
         // Refraction offset — always computed (no nmerged gate). The reference
         // shader computes offset = sign * Amount * pow(1-t, Power) unconditionally,
@@ -298,11 +259,14 @@ float4 LiquidGlassBody(float2 uv, float4 samplerDataExt, float4 samplerData)
             float2 spreadDir = osLen > 1e-10 ? offSpread / osLen : safeN * float2(res.y / res.x, 1.0);
             offSpread = spreadDir * minSpread;
         }
-        // chromatic dispersion: per-channel IOR spread, attenuated by DispersionRange.
+        // Spectral dispersion fades into the refraction zone and concentrates
+        // away from the lens axes, preventing a coloured cross through the centre.
         float depthInZone = nmerged / (RefThickness * dpr);
         float tt = saturate(depthInZone / max(DispersionRange, 0.001));
         float attenuation = 1.0 - smoothstep(0.0, 1.0, tt);
-        float disp = 0.02 * RefDispersion * attenuation;
+        float2 centeredCoord = fragCoord - center;
+        float posFactor = (centeredCoord.x * centeredCoord.y) / max(halfPx.x * halfPx.y, 1e-6);
+        float dispAmount = RefDispersion * attenuation * posFactor;
 
         // 8-tap box-average along the normal (footprint integral, ported from
         // LiquidGlassShader.cs). When off=0 (no refraction) offSpread=0 → all
@@ -320,27 +284,26 @@ float4 LiquidGlassBody(float2 uv, float4 samplerDataExt, float4 samplerData)
         }
         float4 blurredPixel = float4(accRgb / 8.0, accA / 8.0);
 
-        // Chromatic dispersion: re-sample R/B with IOR-scaled offset, each with
-        // a 3-tap box blur along the normal.  Single-point samples on a sharp
-        // backdrop can hit a wildly different colour than the 8-tap footprint
-        // average, creating per-pixel colour-fringing noise.  3 taps gives a
-        // basic antialiasing pass (6 extra samples total, up from 2).
-        if (abs(disp) >= 1e-6)
+        // Seven spectral positions yield a continuous fringe. Cap the footprint
+        // to the native blur so high-contrast content cannot turn into rainbow noise.
+        if (abs(dispAmount) >= 1e-6)
         {
-            float nr = 1.0 + disp;
-            float nb = 1.0 - disp;
-
-            // R channel (dispersed outward): 3-tap box blur
-            float rSum  = texture0.Sample(sampler0, ClampSamplingUv(zoomedUv + off * nr + offSpread * (-0.333), clampMin, clampMax)).r;
-                 rSum += texture0.Sample(sampler0, ClampSamplingUv(zoomedUv + off * nr, clampMin, clampMax)).r;
-                 rSum += texture0.Sample(sampler0, ClampSamplingUv(zoomedUv + off * nr + offSpread *  0.333, clampMin, clampMax)).r;
-            blurredPixel.r = rSum / 3.0;
-
-            // B channel (dispersed inward): 3-tap box blur
-            float bSum  = texture0.Sample(sampler0, ClampSamplingUv(zoomedUv + off * nb + offSpread * (-0.333), clampMin, clampMax)).b;
-                 bSum += texture0.Sample(sampler0, ClampSamplingUv(zoomedUv + off * nb, clampMin, clampMax)).b;
-                 bSum += texture0.Sample(sampler0, ClampSamplingUv(zoomedUv + off * nb + offSpread *  0.333, clampMin, clampMax)).b;
-            blurredPixel.b = bSum / 3.0;
+            float2 dispersedCoord = off * dispAmount;
+            float maxHalf = clamp(BlurAmount * 0.5, 2.0, 8.0) * dpr / res.y;
+            float dLen = length(dispersedCoord);
+            dispersedCoord *= min(1.0, maxHalf / max(dLen, 1e-8));
+            float2 base0 = zoomedUv + off;
+            float4 sRed = texture0.Sample(sampler0, ClampSamplingUv(base0 + dispersedCoord, clampMin, clampMax));
+            float4 sOrange = texture0.Sample(sampler0, ClampSamplingUv(base0 + dispersedCoord * (2.0 / 3.0), clampMin, clampMax));
+            float4 sYellow = texture0.Sample(sampler0, ClampSamplingUv(base0 + dispersedCoord * (1.0 / 3.0), clampMin, clampMax));
+            float4 sCyan = texture0.Sample(sampler0, ClampSamplingUv(base0 - dispersedCoord * (1.0 / 3.0), clampMin, clampMax));
+            float4 sBlue = texture0.Sample(sampler0, ClampSamplingUv(base0 - dispersedCoord * (2.0 / 3.0), clampMin, clampMax));
+            float4 sPurple = texture0.Sample(sampler0, ClampSamplingUv(base0 - dispersedCoord, clampMin, clampMax));
+            float3 dispersed;
+            dispersed.r = (sRed.r + sOrange.r + sYellow.r) / 3.5 + sPurple.r / 7.0;
+            dispersed.g = sOrange.g / 7.0 + (sYellow.g + blurredPixel.g + sCyan.g) / 3.5;
+            dispersed.b = (blurredPixel.b + sCyan.b + sBlue.b + sPurple.b) / 4.0;
+            blurredPixel.rgb = dispersed;
         }
         // Un-premultiply: the blurred backdrop is premultiplied alpha. Near
         // content/void boundaries the blur creates semi-transparent pixels

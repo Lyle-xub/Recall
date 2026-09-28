@@ -98,8 +98,8 @@ internal sealed class RecallGlassBrush : XamlCompositionBrushBase
                 var value = (double)GetType().GetProperty(parameter.Key)!.GetValue(this)!;
                 glass.Properties.InsertScalar(LiquidGlassEffect.EffectNameValue + "." + parameter.Key, (float)value);
             }
-        composite?.Properties.InsertColor("Veil.Color", AccentTint is Color tint ? Color.FromArgb(210, tint.R, tint.G, tint.B) : Design.Dark
-            ? Color.FromArgb(20, 255, 255, 255) : Color.FromArgb(14, 255, 255, 255));
+        composite?.Properties.InsertColor("Veil.Color", AccentTint is Color tint ? Color.FromArgb(190, tint.R, tint.G, tint.B) : Design.Dark
+            ? Color.FromArgb(10, 255, 255, 255) : Color.FromArgb(7, 255, 255, 255));
     }
     protected override void OnDisconnected() => Release();
     void Release()

@@ -48,7 +48,6 @@ internal sealed class RecallWindow : Window
         timeline = new(runtime, Preview);
         archive = new(runtime, OpenFrame);
         timeline.Committed += frame => { if (runtime.Settings.RhineLabMode && mode == "home" && frame != null) archive.Seek(frame, true); };
-        archive.ExpansionChanged += open => { if (open) archive.Focus(FocusState.Programmatic); SetToolbarVisible(mode is not ("settings" or "onboarding" or "usage")); UpdateArchiveSafeArea(); };
         archive.TimelineRequested += () => { timeline.SetActive(true); archive.SetTimeline(true); UpdateArchiveSafeArea(); };
         archive.DockSizeChanged += UpdateArchiveSafeArea;
         timeline.RegisterPropertyChangedCallback(UIElement.VisibilityProperty, (_, _) => UpdateArchiveSafeArea());
@@ -57,8 +56,23 @@ internal sealed class RecallWindow : Window
         topMenu = Design.Icon("\uE712", "Recall menu", () => { }, 56);
         topMenu.HorizontalAlignment = HorizontalAlignment.Right; topMenu.VerticalAlignment = VerticalAlignment.Top; topMenu.Margin = new(0, 16, 28, 0);
         topMenu.Flyout = MainMenu();
-        archiveClose = Design.Icon("\uE711", "Close Recall", () => _ = Hide(), 48);
+        archiveClose = Design.Icon("\uE711", "Close Recall", () =>
+        {
+            if (archive.IsExpanded) archive.Collapse();
+            else _ = Hide();
+        }, 56);
         archiveClose.HorizontalAlignment = HorizontalAlignment.Left; archiveClose.VerticalAlignment = VerticalAlignment.Top;
+        archive.ExpansionChanged += open =>
+        {
+            if (open) archive.Focus(FocusState.Programmatic);
+            SetToolbarVisible(mode is not ("settings" or "onboarding" or "usage"));
+            archiveClose.Visibility = Visibility.Visible;
+            topMenu.Visibility = Visibility.Visible;
+            archiveClose.Content = Design.Symbol(open ? "\uE72B" : "\uE711");
+            AutomationProperties.SetName(archiveClose, open ? "Back to archive" : "Close Recall");
+            StyleArchiveGlyph(archiveClose, 16);
+            UpdateArchiveSafeArea();
+        };
         BuildToolbar();
         root.PointerPressed += (_, e) => { if (ReferenceEquals(e.OriginalSource, root) || ReferenceEquals(e.OriginalSource, page)) { _ = Hide(); e.Handled = true; } };
         root.PointerMoved += (_, e) =>
@@ -122,7 +136,10 @@ internal sealed class RecallWindow : Window
     public void Show()
     {
         if (IsShown)
+        {
+            shell.Show();
             return;
+        }
         IsShown = true; root.IsHitTestVisible = true; shell.PrepareBackdrop(); SystemBackdrop = backdrop; backdrop.SetVisible(true);
         root.Opacity = 1;
         ElementCompositionPreview.GetElementVisual(root).Opacity = 1;
@@ -249,49 +266,76 @@ internal sealed class RecallWindow : Window
     {
         var top = mode != "home" || runtime.Settings.RhineLabMode || selected != null;
         var rhine = mode == "home" && runtime.Settings.RhineLabMode;
-        var scale = Math.Clamp(root.ActualWidth / 1979, .65, 1);
-        // At narrow widths reserve the fixed close/menu controls first. The
-        // archive search and all five actions then share the remaining span.
-        var compactRhine = rhine && root.ActualWidth <= 900;
-        var size = rhine ? Math.Min(84 * scale, Math.Max(40, root.ActualWidth * .06)) : 64;
-        actions.Spacing = rhine ? compactRhine ? Math.Min(20 * scale, 6 + Math.Max(0, root.ActualWidth - 640) * .025) : 20 * scale : 16;
-        var actionGap = rhine ? compactRhine ? Math.Min(20 * scale, 8 + Math.Max(0, root.ActualWidth - 640) * .0125) : 20 * scale : 16;
+        // The reference Mac window is 1512 points wide. Scale the complete
+        // 1020-point toolbar as one unit so its viewport proportions survive
+        // the narrower 1374-point Windows test desktop.
+        var rhineScale = rhine ? Math.Clamp(root.ActualWidth / 1512, .72, 1) : 1;
+        var compactRhine = rhine && root.ActualWidth < 1216;
+        var size = rhine ? 64 * rhineScale : 64;
+        actions.Spacing = rhine ? 16 * rhineScale : 16;
+        var actionGap = rhine ? 16 * rhineScale : 16;
         Color? toolbarTint = null;
         GlassMaterial.SetAccent(searchGlass, toolbarTint);
         GlassMaterial.SetDesktopSampling(searchGlass, rhine);
+        GlassMaterial.SetDesktopSurface(searchGlass, true);
         GlassMaterial.SetAccent(archiveClose, toolbarTint);
         GlassMaterial.SetDesktopSampling(archiveClose, rhine);
-        archiveClose.Translation = new(0,0,rhine ? 0 : 8);
+        GlassMaterial.SetDesktopSurface(archiveClose, true);
+        archiveClose.Translation = new(0,0,rhine ? 10 : 8);
         GlassMaterial.SetAccent(topMenu, toolbarTint);
         GlassMaterial.SetDesktopSampling(topMenu, rhine);
-        topMenu.Translation = new(0,0,rhine ? 0 : 8);
-        search.Translation = new(0,0,rhine ? 0 : 16);
+        GlassMaterial.SetDesktopSurface(topMenu, true);
+        topMenu.Translation = new(0,0,rhine ? 10 : 8);
+        search.Translation = new(0,0,rhine ? 12 : 16);
         foreach (var button in actions.Children.OfType<Button>())
         {
             button.Width = button.Height = size; button.CornerRadius = new(size / 2);
             GlassMaterial.SetAccent(button, toolbarTint);
             GlassMaterial.SetDesktopSampling(button, rhine);
-            button.Translation = new(0,0,rhine ? 0 : 8);
+            GlassMaterial.SetDesktopSurface(button, true);
+            button.Translation = new(0,0,rhine ? 10 : 8);
+            button.BorderBrush = Design.RimBrush;
+            button.BorderThickness = new(1);
+            if (button.Content is FontIcon glyph)
+            {
+                glyph.FontSize = rhine ? 20 * rhineScale : 21;
+                glyph.Foreground = Design.Brush(rhine
+                    ? Design.Dark ? Color.FromArgb(255,190,192,198) : Color.FromArgb(255,105,106,107)
+                    : Design.Ink);
+            }
         }
-        archiveClose.Margin = new(28, rhine ? 36 * scale / .65 : 16, 0, 0);
-        topMenu.Width = topMenu.Height = rhine ? archiveClose.Width : 56;
+        search.BorderBrush = Design.RimBrush;
+        search.BorderThickness = new(rhine ? 1 : 1.3);
+        archiveClose.BorderBrush = topMenu.BorderBrush = Design.RimBrush;
+        archiveClose.BorderThickness = topMenu.BorderThickness = new(1);
+        archiveClose.Width = archiveClose.Height = rhine ? 56 * rhineScale : 56;
+        archiveClose.CornerRadius = new(archiveClose.Width / 2);
+        archiveClose.Margin = new(28, rhine ? 36 : 16, 0, 0);
+        topMenu.Width = topMenu.Height = rhine ? 56 * rhineScale : 56;
         topMenu.CornerRadius = new(topMenu.Width / 2);
-        topMenu.Margin = new(0, rhine ? archiveClose.Margin.Top : 16, 28, 0);
+        topMenu.Margin = new(0, rhine ? 36 : 16, 28, 0);
+        if (rhine)
+        {
+            StyleArchiveGlyph(archiveClose, 16);
+            StyleArchiveGlyph(topMenu, 17);
+        }
+        else if (topMenu.Content is FontIcon menuGlyph)
+        {
+            menuGlyph.FontSize = 21;
+            menuGlyph.Foreground = Design.Brush(Design.Ink);
+        }
         LayoutNotice();
         var width = Math.Max(230, Math.Min(1020, root.ActualWidth - 196));
         var actionWidth = expanded ? 5 * size + 4 * actions.Spacing : 0.0;
-        var reservedSide = 28 + Math.Max(archiveClose.Width, topMenu.Width) + 8;
-        var rhineSearchWidth = Math.Clamp(root.ActualWidth * .412, 230, 860);
-        if (compactRhine && expanded)
-            rhineSearchWidth = Math.Min(rhineSearchWidth, Math.Max(230, root.ActualWidth - 2 * reservedSide - actionGap - actionWidth));
+        var rhineSearchWidth = Math.Max(230, 620 * rhineScale);
         var target = (Width: rhine ? rhineSearchWidth : expanded ? Math.Max(230, width - 400) : Math.Min(860, Math.Max(230, root.ActualWidth - 196)),
-            Height: rhine ? size : expanded ? 64.0 : 72.0, Top: rhine ? 52 * scale : top ? 11.0 : Math.Max(72, root.ActualHeight * .425 - 36), Actions: actionWidth);
+            Height: rhine ? size : expanded ? 64.0 : 72.0, Top: rhine ? 32.0 : top ? 11.0 : Math.Max(72, root.ActualHeight * .425 - 36), Actions: actionWidth);
         if (target == toolbarTarget) return;
         toolbarTarget = target;
         UpdateArchiveSafeArea();
         toolbarTimer?.Stop();
         search.MaxWidth = double.PositiveInfinity;
-        search.FontSize = rhine ? 26 * scale : expanded ? 20 : 23;
+        search.FontSize = rhine ? 20 * rhineScale : expanded ? 20 : 23;
         search.PlaceholderText = expanded ? "Search memories" : "Search anything you’ve seen, said, or heard";
         var from = (Width: search.ActualWidth, Height: search.ActualHeight, Top: toolbar.Margin.Top, Actions: actions.ActualWidth);
         void Apply(double p)
@@ -318,6 +362,14 @@ internal sealed class RecallWindow : Window
         };
         toolbarTimer.Start();
     }
+    void StyleArchiveGlyph(Button button, double macSize)
+    {
+        if (button.Content is not FontIcon glyph) return;
+        var scale = Math.Clamp(root.ActualWidth / 1512, .72, 1);
+        glyph.FontSize = macSize * scale;
+        glyph.Foreground = Design.Brush(Design.Dark
+            ? Color.FromArgb(255,190,192,198) : Color.FromArgb(255,105,106,107));
+    }
     void UpdateArchiveSafeArea()
     {
         if (root.ActualWidth <= 0 || root.ActualHeight <= 0) return;
@@ -330,7 +382,13 @@ internal sealed class RecallWindow : Window
             ? Math.Max(timeline.ActualHeight, timeline.Height) + 12
             : archive.DateDockReserve + 12;
         if (mode == "home" && runtime.Settings.RhineLabMode && archive.IsExpanded)
-            bottom = Math.Max(bottom,180);
+        {
+            // ArchiveViewportLayout uses 116/180 insets in the 972-point Mac
+            // reference window. Preserve those proportions on the shorter VM.
+            var referenceScale = root.ActualHeight / 972;
+            top = 116 * referenceScale;
+            bottom = Math.Max(bottom,180 * referenceScale);
+        }
         archiveSafeTop = top; archiveSafeBottom = bottom;
         archive.SetExpandedSafeArea(top, bottom);
     }
