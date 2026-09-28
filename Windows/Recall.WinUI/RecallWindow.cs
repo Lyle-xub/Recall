@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Hosting;
 using System.Numerics;
 using System.Diagnostics;
+using System.Runtime.InteropServices.WindowsRuntime;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 namespace Recall;
@@ -12,6 +13,7 @@ namespace Recall;
 internal sealed class RecallWindow : Window
 {
     readonly ClearBackdrop backdrop = new(); readonly AppRuntime runtime; readonly NativeShell shell; readonly Grid root = new(), page = new(); readonly TimelineView timeline;
+    readonly Image desktopScene = new() { Stretch = Stretch.Fill, IsHitTestVisible = false };
     readonly RhineArchiveView archive; readonly Button back, topMenu; readonly AccessibilityGrid toolbar = new(); readonly TextBox search = Design.Input("Search anything you’ve seen, said, or heard", height: 72, externalGlass: true); readonly StackPanel actions = new() { Orientation = Orientation.Horizontal, Spacing = 16 };
     readonly TextBlock notice = Design.Text("", 13, color: Design.Muted); readonly Microsoft.UI.Dispatching.DispatcherQueueTimer statusTimer;
     readonly Border noticeHost = new() { CornerRadius = new(16), Padding = new(16, 9, 16, 9), MaxWidth = 680, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Top, IsHitTestVisible = false };
@@ -140,6 +142,7 @@ internal sealed class RecallWindow : Window
             shell.Show();
             return;
         }
+        CaptureDesktopScene();
         IsShown = true; root.IsHitTestVisible = true; shell.PrepareBackdrop(); SystemBackdrop = backdrop; backdrop.SetVisible(true);
         root.Opacity = 1;
         ElementCompositionPreview.GetElementVisual(root).Opacity = 1;
@@ -151,6 +154,41 @@ internal sealed class RecallWindow : Window
         statusTimer.Start();
         Design.Spring(root, 20, .985f, response: .64);
         _ = RecordMaterialDiagnostics();
+    }
+    void CaptureDesktopScene()
+    {
+        // Capture only while Recall is hidden. The bitmap is transient and
+        // supplies the real desktop texture to LiquidGlassWinUI's in-window
+        // shader; it is never persisted, indexed or sent to a model.
+        try
+        {
+            var bounds = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position).Bounds;
+            using var bitmap = new System.Drawing.Bitmap(bounds.Width, bounds.Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+            using (var graphics = System.Drawing.Graphics.FromImage(bitmap))
+                graphics.CopyFromScreen(bounds.Location, System.Drawing.Point.Empty, bounds.Size);
+            var area = new System.Drawing.Rectangle(0, 0, bitmap.Width, bitmap.Height);
+            var locked = bitmap.LockBits(area, System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+            byte[] pixels;
+            try
+            {
+                var stride = Math.Abs(locked.Stride);
+                var source = new byte[stride * bitmap.Height];
+                System.Runtime.InteropServices.Marshal.Copy(locked.Scan0, source, 0, source.Length);
+                pixels = new byte[bitmap.Width * bitmap.Height * 4];
+                for (var y = 0; y < bitmap.Height; y++)
+                    Buffer.BlockCopy(source, (locked.Stride > 0 ? y : bitmap.Height - 1 - y) * stride,
+                        pixels, y * bitmap.Width * 4, bitmap.Width * 4);
+            }
+            finally { bitmap.UnlockBits(locked); }
+            var scene = new WriteableBitmap(bounds.Width, bounds.Height);
+            using (var stream = scene.PixelBuffer.AsStream()) stream.Write(pixels);
+            scene.Invalidate();
+            desktopScene.Source = scene;
+        }
+        catch (Exception error) when (error is System.Runtime.InteropServices.ExternalException or ArgumentException)
+        {
+            desktopScene.Source = null;
+        }
     }
     async Task RecordMaterialDiagnostics()
     {
@@ -195,6 +233,7 @@ internal sealed class RecallWindow : Window
             }
             finally { shell.Hide(); }
             root.Opacity = 0;
+            desktopScene.Source = null;
             queryCancellation?.Cancel(); archive.SetActive(false); timeline.SetActive(false);
             detail?.Dispose(); detail = null; page.Children.Clear();
             mode = "home"; selected = null; Collapse();
@@ -470,7 +509,7 @@ internal sealed class RecallWindow : Window
         // Reparenting a focused TextBox destroys the IME surface and flashes it.
         if (root.Children.Count == 0)
         {
-            root.Children.Add(archive); root.Children.Add(page);
+            root.Children.Add(desktopScene); root.Children.Add(archive); root.Children.Add(page);
             root.Children.Add(timeline); root.Children.Add(toolbar);
             root.Children.Add(back); root.Children.Add(archiveClose); root.Children.Add(noticeHost); root.Children.Add(topMenu);
         }
@@ -625,6 +664,7 @@ internal sealed class RecallWindow : Window
         else if (action == "collapse") archive.Collapse();
         else if (action == "expand-search") Expand();
         else if (action == "collapse-search") Collapse();
+        else if (action == "open-menu") topMenu.Flyout?.ShowAt(topMenu);
         else if (action == "timeline-zoom-in") timeline.ValidationZoom(true);
         else if (action == "timeline-zoom-out") timeline.ValidationZoom(false);
         else if (action == "open-first") archive.Open("parity-0-0");

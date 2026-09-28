@@ -45,6 +45,9 @@ internal static class Design
     static Style PopupStyle(Type type)
     {
         var style = new Style(type);
+        // A native popup owns a separate XAML root and otherwise follows the
+        // Windows app theme rather than Recall's current light/dark setting.
+        style.Setters.Add(new Setter(FrameworkElement.RequestedThemeProperty, Dark ? ElementTheme.Dark : ElementTheme.Light));
         // The native flyout host supplies the blurred scene behind this
         // transparent presenter; the XAML liquid brush adds the optical edge.
         style.Setters.Add(new Setter(Control.BackgroundProperty, Brush(Microsoft.UI.Colors.Transparent)));
@@ -80,10 +83,10 @@ internal static class Design
             {
                 popupPresenters++;
                 glassPopups.Add(presenter, new object());
-                // The native popup host supplies a live HostBackdrop below
-                // this XAML surface. The normal liquid brush adds its optical
-                // edge to that material inside the popup's compositor.
-                GlassMaterial.Attach(presenter, 18, desktopSurface: false);
+                presenter.RequestedTheme = Dark ? ElementTheme.Dark : ElementTheme.Light;
+                // The popup host samples the window's transient desktop scene;
+                // the same open-source brush performs the final refraction.
+                GlassMaterial.Attach(presenter, 18, desktopSurface: false, glassOpacity: Dark ? .38 : .22);
             }
             for (var i = 0; i < VisualTreeHelper.GetChildrenCount(element); i++) Visit(VisualTreeHelper.GetChild(element, i));
         }

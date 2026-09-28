@@ -4,8 +4,8 @@ using WUC = Windows.UI.Composition;
 namespace Recall;
 
 /// <summary>
-/// Supplies the native flyout host with a live backdrop. XAML's liquid brush
-/// then refracts this base within the flyout presenter.
+/// Supplies the native flyout host with a live, nearly neutral desktop source.
+/// The XAML LiquidGlassWinUI brush refracts it inside the presenter.
 /// </summary>
 internal sealed class PopupGlassBackdrop : SystemBackdrop
 {
@@ -68,16 +68,14 @@ internal sealed class PopupGlassBackdrop : SystemBackdrop
             }
             try
             {
-                // A WUC host brush samples behind each separate native popup.
-                // The MUC liquid brush on its presenter adds the optical edge.
                 var host = Own(compositor.CreateHostBackdropBrush());
-                var tint = Design.Dark ? .22f : .42f;
+                var tint = Design.Dark ? .18f : .28f;
                 var factory = Own(compositor.CreateEffectFactory(new ArithmeticCompositeEffect
                 {
                     Source1Amount = 1 - tint, Source2Amount = tint, MultiplyAmount = 0,
                     Source1 = new GaussianBlurEffect
                     {
-                        BlurAmount = 12, BorderMode = EffectBorderMode.Hard,
+                        BlurAmount = 8, BorderMode = EffectBorderMode.Hard,
                         Optimization = EffectOptimization.Balanced,
                         Source = new WUC.CompositionEffectSourceParameter("Host")
                     },

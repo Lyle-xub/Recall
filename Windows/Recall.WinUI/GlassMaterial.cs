@@ -130,32 +130,32 @@ internal static class GlassMaterial
         // ThinTinted is the upstream project's production tab-bar preset. Its
         // complete-body magnification is combined with the Magnified preset so
         // the centre and edge both visibly bend the live backdrop.
-        brush.BlurAmount = 1.93;
-        brush.BloomAmount = dark ? 1 : .88;
+        brush.BlurAmount = dark ? 2.6 : 4.0;
+        brush.BloomAmount = dark ? .58 : .22;
         brush.Brightness = 0;
         brush.Contrast = dark ? 1 : .98;
-        brush.DispersionRange = .39;
-        brush.Exposure = dark ? .84 : .86;
+        brush.DispersionRange = .32;
+        brush.Exposure = dark ? .9 : .98;
         brush.GlareAngle = -135;
         brush.GlareConvergence = 100;
         brush.GlareFactor = 71.52;
         brush.GlareHardness = 13;
         brush.GlareRange = 36.13;
-        brush.RefDispersion = 3.5;
-        brush.RefFactor = 1.31;
+        brush.RefDispersion = 1.2;
+        brush.RefFactor = 1.16;
         brush.RefFresnelFactor = 21.96;
         brush.RefFresnelHardness = 0;
         brush.RefFresnelRange = 57.84;
-        brush.RefThickness = 22.52;
-        brush.Magnification = 1.04;
-        brush.Saturation = dark ? 1 : 1.03;
+        brush.RefThickness = 12.5;
+        brush.Magnification = 1.015;
+        brush.Saturation = dark ? .96 : .92;
         brush.ShapeRoundness = 2;
-        brush.Temperature = dark ? 0 : .045;
-        brush.Vibrance = dark ? 0 : .04;
+        brush.Temperature = dark ? 0 : .02;
+        brush.Vibrance = dark ? 0 : .02;
         brush.TintR = dark ? 44 : LightTint.R;
         brush.TintG = dark ? 44 : LightTint.G;
         brush.TintB = dark ? 44 : LightTint.B;
-        brush.TintA = dark ? .42 : .40;
+        brush.TintA = dark ? .48 : .64;
     }
     internal static void SetAccent(FrameworkElement owner, Color? accent)
     {
