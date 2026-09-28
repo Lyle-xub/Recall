@@ -32,9 +32,6 @@
   <ItemGroup>
     <ProjectReference Include="../Recall.Ocr/Recall.Ocr.csproj"/>
     <ProjectReference Include="../../Core/Recall.Core.csproj"/>
-    <EmbeddedResource Include="Materials/Effects/Shaders/LiquidGlass.hlsl" />
-    <None Update="Materials/LICENSE" Link="licenses/RecallGlass/LICENSE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <None Update="Materials/NOTICE.md" Link="licenses/RecallGlass/NOTICE.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <!-- LiquidGlassWinUI’s native effect ABI is tied to this self-contained runtime. -->
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="[2.2.0]" />
     <PackageReference Include="LiquidGlassWinUI" Version="[1.0.3]" />

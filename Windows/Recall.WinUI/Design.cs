@@ -83,7 +83,7 @@ internal static class Design
                 // The native popup host supplies a live HostBackdrop below
                 // this XAML surface. The normal liquid brush adds its optical
                 // edge to that material inside the popup's compositor.
-                GlassMaterial.Attach(presenter, 18, desktopSurface: false, glassOpacity: .32);
+                GlassMaterial.Attach(presenter, 18, desktopSurface: false);
             }
             for (var i = 0; i < VisualTreeHelper.GetChildrenCount(element); i++) Visit(VisualTreeHelper.GetChild(element, i));
         }
@@ -268,7 +268,7 @@ internal static class Design
             if (attached || externalGlass) return;
             field.ApplyTemplate();
             if (VisualTreeHelper.GetChildrenCount(field) > 0 && VisualTreeHelper.GetChild(field, 0) is FrameworkElement root && root.FindName("GlassSurface") is Border surface)
-            { attached = true; GlassMaterial.Attach(surface, height / 2, desktopOnly: true); }
+            { attached = true; GlassMaterial.Attach(surface, height / 2); }
         };
         return field;
     }

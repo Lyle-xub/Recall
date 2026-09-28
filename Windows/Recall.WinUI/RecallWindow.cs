@@ -275,20 +275,16 @@ internal sealed class RecallWindow : Window
         actions.Spacing = rhine ? 16 * rhineScale : 16;
         var actionGap = rhine ? 16 * rhineScale : 16;
         Color? toolbarTint = null;
-        double? toolbarTintOpacity = rhine ? Design.Dark ? .30 : .40 : null;
         GlassMaterial.SetAccent(searchGlass, toolbarTint);
         GlassMaterial.SetDesktopSampling(searchGlass, false);
         GlassMaterial.SetDesktopSurface(searchGlass, true);
-        GlassMaterial.SetTintOpacity(searchGlass, toolbarTintOpacity);
         GlassMaterial.SetAccent(archiveClose, toolbarTint);
         GlassMaterial.SetDesktopSampling(archiveClose, false);
         GlassMaterial.SetDesktopSurface(archiveClose, true);
-        GlassMaterial.SetTintOpacity(archiveClose, toolbarTintOpacity);
         archiveClose.Translation = new(0,0,rhine ? 10 : 8);
         GlassMaterial.SetAccent(topMenu, toolbarTint);
         GlassMaterial.SetDesktopSampling(topMenu, false);
         GlassMaterial.SetDesktopSurface(topMenu, true);
-        GlassMaterial.SetTintOpacity(topMenu, toolbarTintOpacity);
         topMenu.Translation = new(0,0,rhine ? 10 : 8);
         search.Translation = new(0,0,rhine ? 12 : 16);
         foreach (var button in actions.Children.OfType<Button>())
@@ -297,7 +293,6 @@ internal sealed class RecallWindow : Window
             GlassMaterial.SetAccent(button, toolbarTint);
             GlassMaterial.SetDesktopSampling(button, false);
             GlassMaterial.SetDesktopSurface(button, true);
-            GlassMaterial.SetTintOpacity(button, toolbarTintOpacity);
             button.Translation = new(0,0,rhine ? 10 : 8);
             button.BorderBrush = Design.RimBrush;
             button.BorderThickness = new(1);
