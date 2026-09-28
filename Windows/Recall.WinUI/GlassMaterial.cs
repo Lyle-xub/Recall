@@ -154,6 +154,12 @@ internal static class GlassMaterial
     {
         foreach (var reference in surfaces) if (reference.TryGetTarget(out var surface) && surface.Owner == owner) { surface.Enabled = enabled; surface.Update(); }
     }
+    internal static void SetDesktopSampling(FrameworkElement owner, bool desktopOnly)
+    {
+        foreach (var reference in surfaces)
+            if (reference.TryGetTarget(out var surface) && surface.Owner == owner && surface.DesktopOnly != desktopOnly)
+            { surface.DesktopOnly = desktopOnly; surface.Update(); }
+    }
     public static void SetDark(bool dark)
     {
         surfaces.RemoveAll(reference => !reference.TryGetTarget(out _));
@@ -176,6 +182,7 @@ internal static class GlassMaterial
         public FrameworkElement Owner { get; } = owner;
         public bool DesktopSurface { get; } = desktopSurface;
         public double Radius => Owner is Control control ? control.CornerRadius.TopLeft : Owner is Border border ? border.CornerRadius.TopLeft : radius;
+        internal bool DesktopOnly = desktopOnly;
         internal bool Enabled = true;
         internal Color? Accent = accent;
         RecallGlassBrush? glass;
@@ -193,7 +200,7 @@ internal static class GlassMaterial
             {
                 Disconnect(); return;
             }
-            if (desktopOnly)
+            if (DesktopOnly)
             {
                 // Native text editing creates an intermediate composition surface
                 // while focused. Sampling that surface as an in-window backdrop

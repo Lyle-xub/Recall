@@ -256,12 +256,23 @@ internal sealed class RecallWindow : Window
         var size = rhine ? Math.Min(84 * scale, Math.Max(40, root.ActualWidth * .06)) : 64;
         actions.Spacing = rhine ? compactRhine ? Math.Min(20 * scale, 6 + Math.Max(0, root.ActualWidth - 640) * .025) : 20 * scale : 16;
         var actionGap = rhine ? compactRhine ? Math.Min(20 * scale, 8 + Math.Max(0, root.ActualWidth - 640) * .0125) : 20 * scale : 16;
-        Color? toolbarTint = rhine ? Design.Dark ? Color.FromArgb(255,38,42,49) : Color.FromArgb(255,247,246,240) : null;
+        Color? toolbarTint = null;
         GlassMaterial.SetAccent(searchGlass, toolbarTint);
+        GlassMaterial.SetDesktopSampling(searchGlass, rhine);
         GlassMaterial.SetAccent(archiveClose, toolbarTint);
+        GlassMaterial.SetDesktopSampling(archiveClose, rhine);
+        archiveClose.Translation = new(0,0,rhine ? 0 : 8);
         GlassMaterial.SetAccent(topMenu, toolbarTint);
+        GlassMaterial.SetDesktopSampling(topMenu, rhine);
+        topMenu.Translation = new(0,0,rhine ? 0 : 8);
+        search.Translation = new(0,0,rhine ? 0 : 16);
         foreach (var button in actions.Children.OfType<Button>())
-        { button.Width = button.Height = size; button.CornerRadius = new(size / 2); GlassMaterial.SetAccent(button, toolbarTint); }
+        {
+            button.Width = button.Height = size; button.CornerRadius = new(size / 2);
+            GlassMaterial.SetAccent(button, toolbarTint);
+            GlassMaterial.SetDesktopSampling(button, rhine);
+            button.Translation = new(0,0,rhine ? 0 : 8);
+        }
         archiveClose.Margin = new(28, rhine ? 36 * scale / .65 : 16, 0, 0);
         topMenu.Width = topMenu.Height = rhine ? archiveClose.Width : 56;
         topMenu.CornerRadius = new(topMenu.Width / 2);
@@ -318,6 +329,8 @@ internal sealed class RecallWindow : Window
         var bottom = timeline.Visibility == Visibility.Visible
             ? Math.Max(timeline.ActualHeight, timeline.Height) + 12
             : archive.DateDockReserve + 12;
+        if (mode == "home" && runtime.Settings.RhineLabMode && archive.IsExpanded)
+            bottom = Math.Max(bottom,180);
         archiveSafeTop = top; archiveSafeBottom = bottom;
         archive.SetExpandedSafeArea(top, bottom);
     }

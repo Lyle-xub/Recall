@@ -39,10 +39,10 @@ internal sealed class ControlBackdrop(WUC.Compositor compositor) : IDisposable
         {
             Source = new ArithmeticCompositeEffect
             {
-                Name = "Tone", Source1Amount = .74f, Source2Amount = .26f, MultiplyAmount = 0,
+                Name = "Tone", Source1Amount = .45f, Source2Amount = .55f, MultiplyAmount = 0,
                 Source1 = new SaturationEffect { Saturation = 1.18f, Source = new GaussianBlurEffect
                 {
-                    BlurAmount = 8, BorderMode = EffectBorderMode.Hard,
+                    BlurAmount = 18, BorderMode = EffectBorderMode.Hard,
                     Source = new WUC.CompositionEffectSourceParameter("Desktop")
                 } },
                 Source2 = new ColorSourceEffect { Name = "Tint", Color = Microsoft.UI.Colors.White }
@@ -52,7 +52,9 @@ internal sealed class ControlBackdrop(WUC.Compositor compositor) : IDisposable
         var effect = Own(factory.CreateBrush());
         effect.SetSourceParameter("Desktop", Own(compositor.CreateHostBackdropBrush()));
         effect.SetSourceParameter("Mask", Mask());
-        effect.Properties.InsertColor("Tint.Color", Design.Dark ? Color.FromArgb(255, 30, 33, 40) : Color.FromArgb(255, 250, 252, 255));
+        effect.Properties.InsertScalar("Tone.Source1Amount", Design.Dark ? .10f : .35f);
+        effect.Properties.InsertScalar("Tone.Source2Amount", Design.Dark ? .90f : .65f);
+        effect.Properties.InsertColor("Tint.Color", Design.Dark ? Color.FromArgb(255, 24, 27, 33) : Color.FromArgb(255, 250, 252, 255));
         return effect;
     }
     public void Dispose() { factory?.Dispose(); factory = null; }

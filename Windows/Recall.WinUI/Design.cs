@@ -31,9 +31,9 @@ internal static class Design
         PopupBrush.FallbackColor = GlassMaterial.FallbackColor;
         PopupBrush.AlwaysUseFallback = !GlassMaterial.TransparencyAvailable;
         GlassMaterial.SetDark(dark);
-        RimBrush.GradientStops[0].Color = dark ? Color.FromArgb(110,230,240,255) : Color.FromArgb(220,255,255,255);
-        RimBrush.GradientStops[1].Color = Color.FromArgb(dark ? (byte)65 : (byte)35,30,40,60);
-        RimBrush.GradientStops[2].Color = Color.FromArgb(dark ? (byte)60 : (byte)140,230,240,255);
+        RimBrush.GradientStops[0].Color = dark ? Color.FromArgb(68,230,240,255) : Color.FromArgb(190,255,255,255);
+        RimBrush.GradientStops[1].Color = Color.FromArgb(dark ? (byte)34 : (byte)28,30,40,60);
+        RimBrush.GradientStops[2].Color = Color.FromArgb(dark ? (byte)38 : (byte)115,230,240,255);
         if (System.Windows.Forms.SystemInformation.HighContrast) foreach (var stop in RimBrush.GradientStops) stop.Color = Ink;
     }
     public static readonly AcrylicBrush PopupBrush = new() { TintColor = Microsoft.UI.Colors.White, TintOpacity = .38, TintLuminosityOpacity = .65, FallbackColor = Color.FromArgb(255,235,237,240) };

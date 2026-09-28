@@ -106,8 +106,9 @@ internal static class RhineGeometry
         var maxWidth = Math.Max(1, viewportWidth * .88f) * localPerPixel;
         var artWidth = Math.Max(1, Math.Min(maxWidth - 2 * CardInset,
             (maxHeight - 2 * CardInset - ContentGap) / (1 / aspect + FooterBaseHeight / ArtBaseWidth)));
-        return (artWidth + 2 * CardInset,
-            artWidth / aspect + FooterBaseHeight * artWidth / ArtBaseWidth + 2 * CardInset + ContentGap);
+        const float macPresentationScale = .82f;
+        return ((artWidth + 2 * CardInset) * macPresentationScale,
+            (artWidth / aspect + FooterBaseHeight * artWidth / ArtBaseWidth + 2 * CardInset + ContentGap) * macPresentationScale);
     }
 
     public static float ExpandedCenterShift(float topInset, float bottomInset) =>

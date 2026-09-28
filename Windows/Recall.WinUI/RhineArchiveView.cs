@@ -36,7 +36,7 @@ internal sealed class RhineArchiveView : Grid
         public Border? FocusGlass;
         public required Visual GlassVisual;
         public Visual? FocusVisual;
-        public Visual? ArtVisual, FooterVisual, ImageVisual, FogVisual, ActionVisual;
+        public Visual? ArtVisual, FooterVisual, ImageVisual, FogVisual, DepthFogVisual, ActionVisual;
         public Grid? Art;
         public Image? Image;
         public Grid? Footer;
@@ -64,13 +64,23 @@ internal sealed class RhineArchiveView : Grid
         public BitmapImage? PendingImage;
         public int PendingEdge;
         public int ZIndex = -1;
-        public float DrawOpacity = -1, ImageOpacity = -1, FogOpacity = -1, ActionOpacity = -1;
+        public float DrawOpacity = -1, ImageOpacity = -1, FogOpacity = -1, DepthFogOpacity = -1,
+            GlassOpacity = -1, ActionOpacity = -1;
+    }
+    sealed class DayTag
+    {
+        public required Canvas Root;
+        public required TextBlock Text;
+        public required Visual Visual;
+        public int Lane;
+        public float Depth;
     }
     readonly AppRuntime runtime;
     readonly Action<MemoryFrame> rewind;
     readonly DecorativeWall wall = new() { IsHitTestVisible = false };
     readonly List<Sheet> sheets = [];
     readonly List<Sheet> drawOrder = [];
+    readonly Dictionary<int, DayTag> dayTags = [];
     // WinUI Canvas rejects very large ZIndex values; realized sheets remain
     // viewport-bounded and are ranked far below this decorative front layer.
     const int FrontCopyZIndex = 10_000;
@@ -465,7 +475,7 @@ internal sealed class RhineArchiveView : Grid
         var positions = new Dictionary<string,(int Lane,int Row)>(frames.Count,StringComparer.Ordinal);
         foreach (var (lane, entries) in columns)
             for (var row = 0; row < entries.Length; row++) positions[entries[row].Id] = (lane,row);
-        return new(frames,columns,positions,$"FIVE-DAY VIEW · {apps.Count:N0} APPS / {frames.Count:N0} MEMORIES",
+        return new(frames,columns,positions,$"LOCAL COLLECTION · {apps.Count:N0} APPS / {frames.Count:N0} MEMORIES",
             Math.Max(28,columns.Values.Max(items => items.Length)),SameFrames(previous,frames));
     }
     static bool SameFrames(IReadOnlyList<ArchiveFrame> before, IReadOnlyList<ArchiveFrame> after)
@@ -551,6 +561,7 @@ internal sealed class RhineArchiveView : Grid
         }
         records = prepared.Frames; columns = prepared.Columns; rows = prepared.Rows;
         collectionSummary = prepared.Summary;
+        RefreshDayTags();
         if (anchorId != null && prepared.Positions.TryGetValue(anchorId,out var newAnchor))
         {
             var shift = RhineGeometry.Depth(newAnchor.Row,newAnchor.Lane)-oldAnchorDepth;
@@ -614,8 +625,9 @@ internal sealed class RhineArchiveView : Grid
         dayControls.Spacing = ActualWidth >= 520 ? 12 : 5;
         if (collectionText.Text != collectionSummary) collectionText.Text = collectionSummary;
         var recording = runtime.Recording.State;
-        var status = recording.CaptureFaulted && recording.Requested ? "RHINE · RECORDING INTERRUPTED"
-            : recording.Requested ? "RHINE · PAUSED WHILE RECALL IS OPEN" : "RHINE · RECORDING OFF";
+        var appearance = Design.Dark ? "DARK MODE" : "LIGHT MODE";
+        var status = recording.CaptureFaulted && recording.Requested ? $"{appearance} · RECORDING INTERRUPTED"
+            : recording.Requested ? $"{appearance} · RECORDING PAUSED" : $"{appearance} · RECORDING OFF";
         if (statusText.Text != status) statusText.Text = status;
     }
     public void SetActive(bool value)
@@ -709,7 +721,7 @@ internal sealed class RhineArchiveView : Grid
     {
         var started = Stopwatch.GetTimestamp();
         imageLoads.Cancel(); imageLoads.Dispose(); imageLoads = new();
-        Stop(); imageTimer.Stop(); awaitingFirstImage = false; orderDirty = true; ReleaseFrontCopy(); wall.Children.Clear(); sheets.Clear(); drawOrder.Clear(); realized.Clear(); pendingImages.Clear(); extracted = hovered = null;
+        Stop(); imageTimer.Stop(); awaitingFirstImage = false; orderDirty = true; ReleaseFrontCopy(); wall.Children.Clear(); sheets.Clear(); drawOrder.Clear(); dayTags.Clear(); realized.Clear(); pendingImages.Clear(); extracted = hovered = null;
         seekTargetId = null; seekTargetRow = -1;
         ExpansionChanged?.Invoke(false);
         dragX = dragY = new(0); dragTargetX = dragTargetY = 0;
@@ -723,6 +735,7 @@ internal sealed class RhineArchiveView : Grid
         var initialDepth = Math.Min(8, Math.Max(0, columns[0].Length - 1)) * RhineGeometry.RowPitch;
         pan = new(panTarget = initialDepth); crest = new(crestTarget = initialDepth);
         palettes = Enumerable.Range(-2,5).ToDictionary(l => l, CreateGlass);
+        RefreshDayTags();
         darkAtBuild = Design.Dark;
         reduced = !Design.Motion; UpdateCaption(); Wake(); imageTimer.Start();
         builds++; lastBuildMs = (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency;
@@ -741,11 +754,40 @@ internal sealed class RhineArchiveView : Grid
         if (active && !imageTimer.IsRunning) imageTimer.Start();
         return sheet;
     }
+    void RefreshDayTags()
+    {
+        if (columns.Count == 0) return;
+        foreach (var lane in Enumerable.Range(-2,5))
+        {
+            var count = columns.TryGetValue(lane,out var entries) ? entries.Length : 0;
+            var label = $"{day.AddDays(lane):MM/dd}   ·   {(count == 0 ? "No memories" : $"{count} memories")}";
+            if (!dayTags.TryGetValue(lane,out var tag))
+            {
+                var text = Design.Text(label,12,true,Design.Dark ? Color.FromArgb(225,242,244,248) : Color.FromArgb(205,55,57,61));
+                text.FontFamily = new FontFamily("Cascadia Mono");
+                text.TextWrapping = TextWrapping.NoWrap;
+                text.Width = 430; text.Height = 43;
+                var root = new Canvas { Width = 0, Height = 0, IsHitTestVisible = false };
+                Canvas.SetLeft(text,-215); Canvas.SetTop(text,-21.5); root.Children.Add(text);
+                Canvas.SetZIndex(root,FrontCopyZIndex-1);
+                tag = new DayTag { Root = root, Text = text, Visual = ElementCompositionPreview.GetElementVisual(root), Lane = lane,
+                    Depth = RhineGeometry.Depth(0,lane) };
+                dayTags[lane] = tag; wall.Children.Add(root);
+            }
+            tag.Text.Text = label;
+            tag.Text.Foreground = Design.Brush(Design.Dark ? Color.FromArgb(225,242,244,248) : Color.FromArgb(205,55,57,61));
+            tag.Depth = RhineGeometry.Depth(0,lane);
+        }
+    }
     Sheet CreateSheet(int lane, int row, ArchiveFrame? frame)
     {
         var depth = RhineGeometry.Depth(row,lane);
         var root = new Canvas { Width = 0, Height = 0 };
-        var glass = new Border { Width = 535, Height = 650, Background = palettes[lane], BorderBrush = new LinearGradientBrush { StartPoint = new(0,0), EndPoint = new(.7,1), GradientStops = { new() { Offset = 0, Color = Color.FromArgb(235,255,255,255) }, new() { Offset = .45, Color = Color.FromArgb(180,246,249,250) }, new() { Offset = 1, Color = Color.FromArgb(65,179,193,203) } } }, BorderThickness = new(3.8,3,0,0), CornerRadius = new(2) };
+        var rimScale = frame == null ? .42 : 1;
+        var glass = new Border { Width = 535, Height = 650, Background = palettes[lane], BorderBrush = new LinearGradientBrush { StartPoint = new(0,0), EndPoint = new(.7,1), GradientStops = { new() { Offset = 0, Color = Color.FromArgb((byte)(210*rimScale),255,255,255) }, new() { Offset = .45, Color = Color.FromArgb((byte)(142*rimScale),246,249,250) }, new() { Offset = 1, Color = Color.FromArgb((byte)(54*rimScale),179,193,203) } } }, BorderThickness = new(frame == null ? 1.7 : 2.7,frame == null ? 1.4 : 2.2,0,0), CornerRadius = new(2) };
+        var depthFog = new Border { Width = 535, Height = 650, CornerRadius = new(2),
+            Background = Design.Brush(Design.Dark ? Color.FromArgb(255,15,18,24) : Color.FromArgb(255,230,228,221)),
+            IsHitTestVisible = false };
         Border? focusGlass = null, fog = null;
         Image? image = null;
         Grid? art = null, footer = null, heading = null;
@@ -776,8 +818,10 @@ internal sealed class RhineArchiveView : Grid
             footer.Children.Add(fog);
             root.Children.Add(focusGlass); root.Children.Add(art); root.Children.Add(footer);
         }
+        root.Children.Add(depthFog);
         var h = RhineGeometry.Height(lane, depth, crestTarget, acrossTarget);
-        var sheet = new Sheet { Root = root, Glass = glass, FocusGlass = focusGlass, GlassVisual = ElementCompositionPreview.GetElementVisual(glass), FocusVisual = focusGlass == null ? null : ElementCompositionPreview.GetElementVisual(focusGlass), ArtVisual = art == null ? null : ElementCompositionPreview.GetElementVisual(art), FooterVisual = footer == null ? null : ElementCompositionPreview.GetElementVisual(footer), ImageVisual = image == null ? null : ElementCompositionPreview.GetElementVisual(image), FogVisual = fog == null ? null : ElementCompositionPreview.GetElementVisual(fog), Art = art, Image = image, Footer = footer, Heading = heading, TitleText = titleText, DateText = dateText, FooterFog = fog, Visual = ElementCompositionPreview.GetElementVisual(root), Frame = frame, Lane = lane, Row = row, Depth = depth, Height = new(h), Position = new(lane * (lane < 0 ? 5.65f : 6.25f), (float)h, (float)depth - 5) };
+        var sheet = new Sheet { Root = root, Glass = glass, FocusGlass = focusGlass, GlassVisual = ElementCompositionPreview.GetElementVisual(glass), FocusVisual = focusGlass == null ? null : ElementCompositionPreview.GetElementVisual(focusGlass), ArtVisual = art == null ? null : ElementCompositionPreview.GetElementVisual(art), FooterVisual = footer == null ? null : ElementCompositionPreview.GetElementVisual(footer), ImageVisual = image == null ? null : ElementCompositionPreview.GetElementVisual(image), FogVisual = fog == null ? null : ElementCompositionPreview.GetElementVisual(fog), DepthFogVisual = ElementCompositionPreview.GetElementVisual(depthFog), Art = art, Image = image, Footer = footer, Heading = heading, TitleText = titleText, DateText = dateText, FooterFog = fog, Visual = ElementCompositionPreview.GetElementVisual(root), Frame = frame, Lane = lane, Row = row, Depth = depth, Height = new(h), Position = new(lane * (lane < 0 ? 5.65f : 6.25f), (float)h, (float)depth - 5) };
+        sheet.DepthFogVisual.Opacity = 0;
         if (sheet.FocusVisual != null) sheet.FocusVisual.Opacity = 0;
         Shape(sheet, 535, 650);
         return sheet;
@@ -889,6 +933,11 @@ internal sealed class RhineArchiveView : Grid
             for (var row = first; row <= last; row++)
             {
                 if (realized.ContainsKey((lane, row))) continue;
+                var hasImage = row >= 0 && row < columns[lane].Length;
+                // Keep only a short glass tail around real records. Hundreds of
+                // invisible placeholder sheets prolonged reduced-motion closes
+                // and made the Windows rack look like a wireframe model.
+                if (!hasImage && (row < -2 || row > columns[lane].Length + 1)) continue;
                 var depth = RhineGeometry.Depth(row,lane);
                 var h = RhineGeometry.Height(lane, depth, crest.Value, across.Value);
                 var position = new Vector3(lane * (lane < 0 ? 5.65f : 6.25f), (float)h, (float)depth - 5);
@@ -898,7 +947,7 @@ internal sealed class RhineArchiveView : Grid
                 var extentY = (Math.Abs(matrix.M12) * 535 + Math.Abs(matrix.M22) * 650) / 2;
                 if (center.X + extentX > -160 && center.X - extentX < ActualWidth + 160 &&
                     center.Y + extentY > -160 && center.Y - extentY < ActualHeight + 160)
-                    pending.Add((lane, row, row >= 0 && row < columns[lane].Length, Vector2.DistanceSquared(center, focus)));
+                    pending.Add((lane, row, hasImage, Vector2.DistanceSquared(center, focus)));
             }
         // Each sheet creates several XAML and Composition elements. Materialize
         // the front of the rack first, in small UI turns, instead of blocking a
@@ -906,7 +955,8 @@ internal sealed class RhineArchiveView : Grid
         pending.Sort((a, b) => a.HasImage == b.HasImage ? a.Distance.CompareTo(b.Distance) : a.HasImage ? -1 : 1);
         var started = Stopwatch.GetTimestamp();
         var created = 0;
-        while (created < Math.Min(2, pending.Count))
+        var turnLimit = reduced ? 8 : 2;
+        while (created < Math.Min(turnLimit, pending.Count))
         {
             if (created > 0 && (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency >= 3) break;
             EnsureSheet(pending[created].Lane, pending[created].Row);
@@ -914,7 +964,7 @@ internal sealed class RhineArchiveView : Grid
         }
         return pending.Count > created;
     }
-    const int WallImageEdge = 448, ExpandedImageEdge = 1200;
+    const int WallImageEdge = 192, ExpandedImageEdge = 1200;
     const long MaxRetainedImageBytes = 160_000_000;
     static long EstimatedBytes(int edge) => (long)edge * edge * 5 / 2;
     static long BitmapBytes(BitmapImage? bitmap) => bitmap is null ? 0 : (long)bitmap.PixelWidth * bitmap.PixelHeight * 4;
@@ -1057,6 +1107,7 @@ internal sealed class RhineArchiveView : Grid
         static void Transform(Visual v, float x, float y, float sx, float sy)
         { v.TransformMatrix = Matrix4x4.CreateScale(sx, sy, 1) * Matrix4x4.CreateTranslation(x, y, 0); }
         Transform(s.GlassVisual, -width / 2, -height / 2, width / 535, height / 650);
+        if (s.DepthFogVisual != null) Transform(s.DepthFogVisual, -width / 2, -height / 2, width / 535, height / 650);
         if (s.FocusVisual != null) Transform(s.FocusVisual, -width / 2, -height / 2, width / 535, height / 650);
         if (s.ArtVisual != null) Transform(s.ArtVisual, layout.ArtLeft, layout.ArtTop, layout.FooterScale, layout.FooterScale);
         if (s.FooterVisual != null) Transform(s.FooterVisual, layout.ArtLeft, layout.FooterTop,
@@ -1448,15 +1499,38 @@ internal sealed class RhineArchiveView : Grid
             // Native SceneKit fog blends toward a warm neutral, rather than making
             // distant screenshots transparent and revealing other screenshots through them.
             var blend = s == extracted ? (float)extraction.Value : 0;
+            var focusError = Math.Abs(s.Distance - 33.5f);
+            var depthHaze = Math.Clamp((focusError - 2.0f) / 13.5f, 0, .82f) * (1-blend);
+            var farFog = Math.Clamp((s.Distance - 36f) / 13f, 0, .88f) * (1-blend);
+            var sceneHaze = Math.Max(depthHaze * .70f, farFog * .88f);
+            var depthFogOpacity = sceneHaze * (Design.Dark ? .72f : .78f);
+            if (Math.Abs(s.DepthFogOpacity-depthFogOpacity) > .002f)
+            { s.DepthFogVisual!.Opacity = depthFogOpacity; s.DepthFogOpacity = depthFogOpacity; }
+            var glassOpacity = (s.Frame == null ? .24f : .76f) * (1-sceneHaze*.64f) + blend*.24f;
+            if (Math.Abs(s.GlassOpacity-glassOpacity) > .002f)
+            { s.GlassVisual.Opacity = glassOpacity; s.GlassOpacity = glassOpacity; }
             if (s.Frame != null)
             {
-                var fog = Math.Clamp((s.Distance - 33.5f) / 18, 0, .88f) * (1-blend);
-                var imageOpacity = (Design.Dark ? .78f : 1) * (1-fog);
+                var fog = Math.Max(farFog, depthHaze*.34f);
+                var imageOpacity = (Design.Dark ? .92f : 1) * (1-farFog*.22f);
                 if (Math.Abs(s.ImageOpacity-imageOpacity) > .002) { s.ImageVisual!.Opacity = imageOpacity; s.ImageOpacity = imageOpacity; }
                 if (Math.Abs(s.FogOpacity-fog) > .002) { s.FogVisual!.Opacity = fog; s.FogOpacity = fog; }
             }
-            var opacity = Math.Clamp((58-s.Distance)/22,.28f,1); opacity += (1-opacity)*blend;
+            var opacity = Math.Clamp((60-s.Distance)/24,s.Frame == null ? .08f : .18f,1); opacity += (1-opacity)*blend;
             if (Math.Abs(s.DrawOpacity-opacity) > .002) { s.Visual.Opacity = opacity; s.DrawOpacity = opacity; }
+        }
+        foreach (var tag in dayTags.Values)
+        {
+            var position = new Vector3(tag.Lane * (tag.Lane < 0 ? 5.65f : 6.25f),
+                (float)RhineGeometry.Height(tag.Lane,tag.Depth,crest.Value,across.Value)+3.65f-Math.Max(0,tag.Lane)*1.15f,
+                tag.Depth-5);
+            var matrix = RhineGeometry.Plane(position,cameraRotation,view,(float)ActualWidth,(float)ActualHeight);
+            matrix.M31 += (float)dragX.Value; matrix.M32 += (float)dragY.Value;
+            tag.Visual.TransformMatrix = RhineGeometry.Matrix(matrix);
+            var point = Vector2.Transform(Vector2.Zero,matrix);
+            tag.Root.Visibility = point.X > -280 && point.X < ActualWidth+280 && point.Y > -80 && point.Y < ActualHeight+80
+                ? Visibility.Visible : Visibility.Collapsed;
+            tag.Visual.Opacity = extracted == null ? .92f : .22f;
         }
         if (extracted is { } open)
         {

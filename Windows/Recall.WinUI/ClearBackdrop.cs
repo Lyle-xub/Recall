@@ -153,11 +153,11 @@ internal sealed class ClearBackdrop : SystemBackdrop
                 float Parameter(string name, float value) => GlassMaterial.ValidationParameters.TryGetValue(name, out var number) ? (float)number : value;
                 // The Mac reference's within-window material is not a desktop
                 // opacity recipe. A 10% source weight washed real desktops out.
-                var strength = Parameter("DesktopSource", Design.Dark ? .60f : full ? .60f : .64f);
+                var strength = Parameter("DesktopSource", Design.Dark ? .12f : full ? .35f : .64f);
                 desktopWeight = strength;
                 effect.Properties.InsertScalar("Tone.Source1Amount", strength);
                 effect.Properties.InsertScalar("Tone.Source2Amount", 1 - strength);
-                blurRadius = Parameter("DesktopBlur", full ? 22 : 12);
+                blurRadius = Parameter("DesktopBlur", full ? 30 : 14);
                 effect.Properties.InsertScalar("Blur.BlurAmount", blurRadius);
                 effect.Properties.InsertScalar("Saturation.Saturation", Parameter("DesktopSaturation", 1.1f));
                 var tint = (byte)Math.Clamp(Parameter("DesktopTint", Design.Dark ? 12 : full ? 245 : 255), 0, 255);
