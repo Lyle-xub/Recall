@@ -52,9 +52,9 @@ internal sealed class ControlBackdrop(WUC.Compositor compositor) : IDisposable
         var effect = Own(factory.CreateBrush());
         effect.SetSourceParameter("Desktop", Own(compositor.CreateHostBackdropBrush()));
         effect.SetSourceParameter("Mask", Mask());
-        effect.Properties.InsertScalar("Tone.Source1Amount", Design.Dark ? .55f : .50f);
-        effect.Properties.InsertScalar("Tone.Source2Amount", Design.Dark ? .45f : .50f);
-        effect.Properties.InsertColor("Tint.Color", Design.Dark ? Color.FromArgb(255, 24, 27, 33) : Color.FromArgb(255, 250, 249, 244));
+        effect.Properties.InsertScalar("Tone.Source1Amount", Design.Dark ? .55f : .56f);
+        effect.Properties.InsertScalar("Tone.Source2Amount", Design.Dark ? .45f : .44f);
+        effect.Properties.InsertColor("Tint.Color", Design.Dark ? Color.FromArgb(255, 24, 27, 33) : GlassMaterial.LightTint);
         return effect;
     }
     public void Dispose() { factory?.Dispose(); factory = null; }

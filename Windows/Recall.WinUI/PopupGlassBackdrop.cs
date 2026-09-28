@@ -71,7 +71,7 @@ internal sealed class PopupGlassBackdrop : SystemBackdrop
                 // A WUC host brush samples behind each separate native popup.
                 // The MUC liquid brush on its presenter adds the optical edge.
                 var host = Own(compositor.CreateHostBackdropBrush());
-                var tint = Design.Dark ? .22f : .46f;
+                var tint = Design.Dark ? .22f : .42f;
                 var factory = Own(compositor.CreateEffectFactory(new ArithmeticCompositeEffect
                 {
                     Source1Amount = 1 - tint, Source2Amount = tint, MultiplyAmount = 0,
@@ -83,7 +83,7 @@ internal sealed class PopupGlassBackdrop : SystemBackdrop
                     },
                     Source2 = new ColorSourceEffect
                     {
-                        Color = Design.Dark ? Color.FromArgb(255, 45, 48, 54) : Microsoft.UI.Colors.White
+                        Color = Design.Dark ? Color.FromArgb(255, 45, 48, 54) : GlassMaterial.LightTint
                     }
                 }));
                 var material = Own(factory.CreateBrush());

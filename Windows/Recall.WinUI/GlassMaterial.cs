@@ -14,9 +14,14 @@ internal static class GlassMaterial
     internal static event Action? PolicyChanged;
     internal static bool TransparencyAvailable => !ValidationFallback &&
         !System.Windows.Forms.SystemInformation.HighContrast && settings.AdvancedEffectsEnabled;
+    // The macOS reference uses a warm, nearly white glass body. Keep these
+    // colours shared by the in-window lens, host backdrop and native popups so
+    // overlapping surfaces do not drift toward different shades of grey.
+    internal static Color LightTint => Color.FromArgb(255, 255, 252, 246);
+    internal static Color LightBackdropTint => Color.FromArgb(255, 250, 248, 242);
     internal static Color FallbackColor => System.Windows.Forms.SystemInformation.HighContrast
         ? settings.GetColorValue(Windows.UI.ViewManagement.UIColorType.Background)
-        : Design.Dark ? Color.FromArgb(255, 45, 48, 54) : Color.FromArgb(255, 235, 237, 240);
+        : Design.Dark ? Color.FromArgb(255, 45, 48, 54) : Color.FromArgb(255, 244, 243, 239);
     internal static Color ContrastForeground => settings.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground);
     static GlassMaterial()
     {
@@ -126,8 +131,11 @@ internal static class GlassMaterial
         // complete-body magnification is combined with the Magnified preset so
         // the centre and edge both visibly bend the live backdrop.
         brush.BlurAmount = 1.93;
+        brush.BloomAmount = dark ? 1 : .88;
+        brush.Brightness = 0;
+        brush.Contrast = dark ? 1 : .98;
         brush.DispersionRange = .39;
-        brush.Exposure = dark ? .84 : .68;
+        brush.Exposure = dark ? .84 : .86;
         brush.GlareAngle = -135;
         brush.GlareConvergence = 100;
         brush.GlareFactor = 71.52;
@@ -140,9 +148,14 @@ internal static class GlassMaterial
         brush.RefFresnelRange = 57.84;
         brush.RefThickness = 22.52;
         brush.Magnification = 1.04;
+        brush.Saturation = dark ? 1 : 1.03;
         brush.ShapeRoundness = 2;
-        brush.TintR = brush.TintG = brush.TintB = dark ? 44 : 250;
-        brush.TintA = dark ? .42 : .54;
+        brush.Temperature = dark ? 0 : .045;
+        brush.Vibrance = dark ? 0 : .04;
+        brush.TintR = dark ? 44 : LightTint.R;
+        brush.TintG = dark ? 44 : LightTint.G;
+        brush.TintB = dark ? 44 : LightTint.B;
+        brush.TintA = dark ? .42 : .40;
     }
     internal static void SetAccent(FrameworkElement owner, Color? accent)
     {

@@ -31,7 +31,7 @@ internal static class Design
         ArchiveBrush.GradientStops[0].Color = dark ? Color.FromArgb(100,125,145,170) : Color.FromArgb(45,250,249,244);
         ArchiveBrush.GradientStops[1].Color = dark ? Color.FromArgb(60,40,50,65) : Color.FromArgb(16,223,228,228);
         ArchiveBrush.GradientStops[2].Color = dark ? Color.FromArgb(95,65,80,105) : Color.FromArgb(46,132,151,169);
-        PopupBrush.TintColor = dark ? Color.FromArgb(255,32,36,44) : Microsoft.UI.Colors.White;
+        PopupBrush.TintColor = dark ? Color.FromArgb(255,32,36,44) : GlassMaterial.LightTint;
         PopupBrush.FallbackColor = GlassMaterial.FallbackColor;
         PopupBrush.AlwaysUseFallback = !GlassMaterial.TransparencyAvailable;
         GlassMaterial.SetDark(dark);
@@ -41,7 +41,7 @@ internal static class Design
         ArchiveRimBrush.Color = dark ? Color.FromArgb(30,220,230,244) : Color.FromArgb(38,255,255,255);
         if (System.Windows.Forms.SystemInformation.HighContrast) foreach (var stop in RimBrush.GradientStops) stop.Color = Ink;
     }
-    public static readonly AcrylicBrush PopupBrush = new() { TintColor = Microsoft.UI.Colors.White, TintOpacity = .38, TintLuminosityOpacity = .65, FallbackColor = Color.FromArgb(255,235,237,240) };
+    public static readonly AcrylicBrush PopupBrush = new() { TintColor = Color.FromArgb(255,255,252,246), TintOpacity = .34, TintLuminosityOpacity = .65, FallbackColor = Color.FromArgb(255,244,243,239) };
     static Style PopupStyle(Type type)
     {
         var style = new Style(type);
