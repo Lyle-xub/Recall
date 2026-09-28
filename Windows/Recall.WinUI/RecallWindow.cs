@@ -519,6 +519,12 @@ internal sealed class RecallWindow : Window
         var theme = night ? ElementTheme.Dark : ElementTheme.Light;
         if (root.RequestedTheme != theme) root.RequestedTheme = theme;
         var rhine = runtime.Settings.RhineLabMode && mode == "home";
+        // Rhine already has a full-window host-backdrop blur. The transient
+        // desktop scene exists so local glass can refract the real desktop in
+        // timeline and page modes, but leaving that opaque scene above the
+        // host backdrop cancels Rhine's background blur. Rhine controls still
+        // refract the archive wall rendered beneath them.
+        desktopScene.Visibility = rhine ? Visibility.Collapsed : Visibility.Visible;
         archive.SetActive(rhine && IsShown);
         if (rhine) { Expand(); if (IsShown) _ = archive.Refresh(); }
         timeline.SetActive(mode == "home" && !rhine);
