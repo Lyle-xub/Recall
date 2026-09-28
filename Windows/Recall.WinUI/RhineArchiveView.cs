@@ -89,7 +89,9 @@ internal sealed class RhineArchiveView : Grid
     Dictionary<int, ArchiveFrame[]> columns = [];
     Dictionary<int, ImageBrush> palettes = [];
     readonly Microsoft.UI.Dispatching.DispatcherQueueTimer imageTimer;
-    const int MaxImageRequests = 4;
+    // Decode fewer wall images at once. Parallel decoders contend with the UI
+    // compositor and cause visible stalls while a dense rack is moving.
+    const int MaxImageRequests = 1;
     int imagePumpQueued;
     int pendingFlushQueued;
     bool awaitingFirstImage;
@@ -966,8 +968,8 @@ internal sealed class RhineArchiveView : Grid
         }
         return pending.Count > created;
     }
-    const int WallImageEdge = 320, ExpandedImageEdge = 1200;
-    const long MaxRetainedImageBytes = 160_000_000;
+    const int WallImageEdge = 256, ExpandedImageEdge = 1200;
+    const long MaxRetainedImageBytes = 96_000_000;
     static long EstimatedBytes(int edge) => (long)edge * edge * 5 / 2;
     static long BitmapBytes(BitmapImage? bitmap) => bitmap is null ? 0 : (long)bitmap.PixelWidth * bitmap.PixelHeight * 4;
     static long ImageBytes(Sheet sheet) => BitmapBytes(sheet.Image?.Source as BitmapImage) + BitmapBytes(sheet.PendingImage);
@@ -1368,7 +1370,9 @@ internal sealed class RhineArchiveView : Grid
     void Wake()
     {
         if (!active || ticking) return;
-        previous = Stopwatch.GetTimestamp(); ticking = true; motionClock.Change(0,16);
+        // A 24 ms simulation cadence stays visually continuous while leaving
+        // GPU/decoder time for video playback and other foreground apps.
+        previous = Stopwatch.GetTimestamp(); ticking = true; motionClock.Change(0,24);
     }
     void SetExpandedControlsVisible(bool visible)
     {
@@ -1487,7 +1491,8 @@ internal sealed class RhineArchiveView : Grid
                     RhineGeometry.Smooth(((float)extraction.Value - .3f) / .7f);
             if (s == extracted && extractTarget == 1 && extraction.Settled(1))
                 matrix = RhineGeometry.SnapFacingPlane(matrix, s.Layout, (float)(XamlRoot?.RasterizationScale ?? 1));
-            if (matrix != s.Matrix) { s.Matrix = matrix; s.Visual.TransformMatrix = RhineGeometry.Matrix(matrix); matrixWrites++; }
+            var matrixChanged = matrix != s.Matrix;
+            if (matrixChanged) s.Matrix = matrix;
             var previousSortDistance = s.SortDistance;
             s.Distance = -Vector3.Transform(s.Position, view).Z;
             s.SortDistance = s == extracted ? homeDistance : s.Distance;
@@ -1497,7 +1502,13 @@ internal sealed class RhineArchiveView : Grid
             var extentY = (Math.Abs(s.Matrix.M12) * s.Width + Math.Abs(s.Matrix.M22) * s.Size) / 2;
             var visible = center.X + extentX > -80 && center.X - extentX < ActualWidth + 80 && center.Y + extentY > -80 && center.Y - extentY < ActualHeight + 80;
             var visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            var becameVisible = visible && s.Root.Visibility != Visibility.Visible;
             if (s.Root.Visibility != visibility) { s.Root.Visibility = visibility; if (visible && !imageTimer.IsRunning) imageTimer.Start(); }
+            // Keep the mathematical pose for picking and culling, but do not
+            // submit transforms, fog and opacity changes for clipped sheets.
+            // They receive their current pose as soon as they enter the view.
+            if (!visible && s != extracted) continue;
+            if (matrixChanged || becameVisible) { s.Visual.TransformMatrix = RhineGeometry.Matrix(matrix); matrixWrites++; }
             // SceneKit softens distant sheets, but it does not lay an opaque veil
             // over the near rack. Keep the neutral fog on the far side only so
             // actual screenshots and their footer remain legible at the crest.

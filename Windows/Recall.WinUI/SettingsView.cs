@@ -8,6 +8,8 @@ internal sealed class SettingsView : Grid
     readonly AppRuntime runtime; readonly Func<AppSettings, Task> save; readonly AppSettings draft; readonly StackPanel sections = new() { Spacing = 16 }; readonly TextBlock message = Design.Text("Changes apply when you save.", 11, color: Design.Muted); readonly TextBlock subtitle = Design.Text("Choose what Recall remembers.", 12, color: Design.Muted); readonly Dictionary<string, PasswordBox> secrets = []; CancellationTokenSource? optimization;
     readonly Dictionary<string, Button> tabButtons = [];
     readonly ScrollViewer scroll;
+    readonly Button saveButton;
+    long saveRevision;
     public SettingsView(AppRuntime runtime, Func<AppSettings, Task> save, Action close)
     {
         this.runtime = runtime;
@@ -70,13 +72,32 @@ internal sealed class SettingsView : Grid
         var cancel = NativeButton("Cancel", close);
         Grid.SetColumn(cancel, 1);
         footer.Children.Add(cancel);
-        var apply = NativeButton("Save changes", async () => { try { draft.Shortcuts.Validate(); foreach (var item in secrets) SecretStore.Save(item.Key, item.Value.Password); await save(draft); message.Text = "Saved"; } catch (Exception ex) { message.Text = ex.Message; } }, true);
-        Grid.SetColumn(apply, 2);
-        footer.Children.Add(apply);
+        saveButton = NativeButton("Save changes", () => _ = SaveSettings(), true);
+        Grid.SetColumn(saveButton, 2);
+        footer.Children.Add(saveButton);
         var footerFrame = new Border { Child = footer, Padding = new(24, 16, 24, 16), BorderThickness = new(0, 1, 0, 0), BorderBrush = Design.Brush(Design.Dark ? Color.FromArgb(255, 58, 58, 58) : Color.FromArgb(255, 240, 240, 240)) };
         Grid.SetRow(footerFrame, 3);
         Children.Add(footerFrame);
         Unloaded += (_, _) => optimization?.Cancel();
+    }
+    internal object Diagnostics => new { message = message.Text, saveEnabled = saveButton.IsEnabled };
+    internal void ValidationSave() => _ = SaveSettings();
+    async Task SaveSettings()
+    {
+        var revision = ++saveRevision;
+        saveButton.IsEnabled = false;
+        message.Text = "Saving…";
+        try
+        {
+            draft.Shortcuts.Validate();
+            foreach (var item in secrets) SecretStore.Save(item.Key, item.Value.Password);
+            await save(draft);
+            message.Text = "Saved";
+            await Task.Delay(1800);
+            if (revision == saveRevision && IsLoaded) message.Text = "Changes apply when you save.";
+        }
+        catch (Exception ex) { message.Text = ex.Message; }
+        finally { if (revision == saveRevision && IsLoaded) saveButton.IsEnabled = true; }
     }
     static Button NativeButton(string title, Action click, bool primary = false)
     {

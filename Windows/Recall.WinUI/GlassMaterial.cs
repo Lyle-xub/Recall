@@ -9,6 +9,7 @@ internal static class GlassMaterial
     static readonly Windows.UI.ViewManagement.UISettings settings = new();
     static readonly Lazy<bool> compatibleRuntime = new(CheckRuntime);
     static string? compatibilityError;
+    static bool effectsReady;
     static Microsoft.UI.Dispatching.DispatcherQueue? dispatcher;
     internal static bool ValidationFallback;
     internal static event Action? PolicyChanged;
@@ -44,7 +45,13 @@ internal static class GlassMaterial
         catch (UnauthorizedAccessException) { compatibilityError = "The Composition runtime could not be verified."; }
         return false;
     }
-    internal static bool EffectsAvailable => TransparencyAvailable && compatibleRuntime.Value && string.IsNullOrEmpty(Error);
+    internal static bool EffectsAvailable => effectsReady && TransparencyAvailable && compatibleRuntime.Value && string.IsNullOrEmpty(Error);
+    internal static void ActivateEffects()
+    {
+        if (effectsReady) return;
+        effectsReady = true;
+        SetDark(Design.Dark);
+    }
     static void RefreshPolicy()
     {
         // System settings notifications arrive off the XAML thread.
@@ -188,6 +195,7 @@ internal static class GlassMaterial
     internal static object Diagnostics => new
     {
         advancedEffects = settings.AdvancedEffectsEnabled,
+        effectsReady,
         highContrast = System.Windows.Forms.SystemInformation.HighContrast,
         runtimeCompatible = compatibleRuntime.Value,
         validationFallback = ValidationFallback,

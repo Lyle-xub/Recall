@@ -12,8 +12,11 @@ namespace Recall;
 
 internal sealed class RecallWindow : Window
 {
+    const int SearchPageSize = 60;
     readonly ClearBackdrop backdrop = new(); readonly AppRuntime runtime; readonly NativeShell shell; readonly Grid root = new(), page = new(); readonly TimelineView timeline;
     readonly Image desktopScene = new() { Stretch = Stretch.Fill, IsHitTestVisible = false };
+    readonly Image desktopBlurScene = new() { Stretch = Stretch.Fill, IsHitTestVisible = false };
+    WriteableBitmap? desktopBlurSource, desktopTimelineBlurSource;
     readonly RhineArchiveView archive; readonly Button back, topMenu; readonly AccessibilityGrid toolbar = new(); readonly TextBox search = Design.Input("Search anything you’ve seen, said, or heard", height: 72, externalGlass: true); readonly StackPanel actions = new() { Orientation = Orientation.Horizontal, Spacing = 16 };
     readonly TextBlock notice = Design.Text("", 13, color: Design.Muted); readonly Microsoft.UI.Dispatching.DispatcherQueueTimer statusTimer;
     readonly Border noticeHost = new() { CornerRadius = new(16), Padding = new(16, 9, 16, 9), MaxWidth = 680, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Top, IsHitTestVisible = false };
@@ -31,8 +34,8 @@ internal sealed class RecallWindow : Window
     {
         this.runtime = runtime;
         Title = "Recall";
-        SystemBackdrop = backdrop;
         Content = root;
+        backdrop.SetVisible(false);
         root.Background = Design.Brush(Color.FromArgb(1, 255, 255, 255));
         Design.SetDark(runtime.Settings.DarkAppearance);
         root.RequestedTheme = runtime.Settings.DarkAppearance ? ElementTheme.Dark : ElementTheme.Light;
@@ -43,7 +46,7 @@ internal sealed class RecallWindow : Window
         GlassMaterial.Attach(noticeHost, 16);
         notice.RegisterPropertyChangedCallback(TextBlock.TextProperty, (_, _) => LayoutNotice());
         shell = new(this, Toggle, () => { var state = runtime.Recording.State; runtime.Recording.Request(state.CaptureFaulted || !state.Requested); UpdateStatus(); }, () => Navigate("settings"), Quit);
-        search.SizeChanged += (_, _) => Backdrop();
+        search.SizeChanged += (_, _) => { if (!GlassMaterial.EffectsAvailable) QueueBackdrop(); };
         var error = shell.Configure(runtime.Settings.Shortcuts, runtime.Settings.ShowTaskbarIcon);
         if (error != null)
             notice.Text = error;
@@ -96,13 +99,14 @@ internal sealed class RecallWindow : Window
         statusTimer.Tick += (_, _) => { if (IsShown) detail?.RefreshStatus(); };
         SizeChanged += (_, _) => LayoutToolbar();
         root.SizeChanged += (_, _) => { LayoutToolbar(); UpdateArchiveSafeArea(); Backdrop(); };
-        root.LayoutUpdated += (_, _) => { var started = Stopwatch.GetTimestamp(); QueueBackdrop(); layoutUpdates++; maxLayoutUpdatedMs = Math.Max(maxLayoutUpdatedMs, (Stopwatch.GetTimestamp()-started)*1000.0/Stopwatch.Frequency); };
-        LiquidMotion.LayoutChanged += () => { var started = Stopwatch.GetTimestamp(); try { root.UpdateLayout(); Backdrop(); } finally { maxLiquidLayoutMs = Math.Max(maxLiquidLayoutMs,(Stopwatch.GetTimestamp()-started)*1000.0/Stopwatch.Frequency); } };
+        // The liquid brushes follow compositor transforms on their own. Rebuilding
+        // the native graph on every layout/spring frame caused long UI stalls.
+        root.LayoutUpdated += (_, _) => layoutUpdates++;
         UpdateStatus();
     }
-    bool materialDesktop;
+    bool materialDesktop, nativeBackdropActive;
     long layoutUpdates, backdropUpdates;
-    double maxLayoutUpdatedMs, maxLiquidLayoutMs, maxBackdropMs;
+    double maxBackdropMs;
     Microsoft.UI.Dispatching.DispatcherQueueTimer? backdropLayoutTimer;
     void QueueBackdrop()
     {
@@ -121,19 +125,27 @@ internal sealed class RecallWindow : Window
     }
     void BackdropCore()
     {
-        if (!IsShown || root.ActualWidth <= 0)
+        if (!IsShown || !nativeBackdropActive || root.ActualWidth <= 0)
             return;
         if (mode == "material") { backdrop.Update(materialDesktop, root.ActualWidth, root.ActualHeight, new Rect(), [], GlassMaterial.DesktopSurfaces(root)); return; }
-        var p = search.TransformToVisual(root).TransformPoint(new(0, 0));
-        var rect = new Rect(p.X, p.Y, search.ActualWidth, search.ActualHeight);
+        var rect = new Rect();
         var circles = new List<Rect>();
-        if (expanded)
-            foreach (FrameworkElement item in actions.Children)
-            {
-                var point = item.TransformToVisual(root).TransformPoint(new(0, 0));
-                circles.Add(new(point.X, point.Y, item.ActualWidth, item.ActualHeight));
-            }
-        backdrop.Update(mode != "home" || runtime.Settings.RhineLabMode, root.ActualWidth, root.ActualHeight, rect, circles, GlassMaterial.DesktopSurfaces(root));
+        var surfaces = new List<ControlBackdrop.Surface>();
+        // LiquidGlassWinUI already owns the normal control lenses. Build the
+        // duplicate native masks only when that effect has fallen back.
+        if (!GlassMaterial.EffectsAvailable)
+        {
+            var p = search.TransformToVisual(root).TransformPoint(new(0, 0));
+            rect = new Rect(p.X, p.Y, search.ActualWidth, search.ActualHeight);
+            if (expanded)
+                foreach (FrameworkElement item in actions.Children)
+                {
+                    var point = item.TransformToVisual(root).TransformPoint(new(0, 0));
+                    circles.Add(new(point.X, point.Y, item.ActualWidth, item.ActualHeight));
+                }
+            surfaces = GlassMaterial.DesktopSurfaces(root);
+        }
+        backdrop.Update(mode != "home" || runtime.Settings.RhineLabMode, root.ActualWidth, root.ActualHeight, rect, circles, surfaces);
     }
     public void Show()
     {
@@ -143,7 +155,8 @@ internal sealed class RecallWindow : Window
             return;
         }
         CaptureDesktopScene();
-        IsShown = true; root.IsHitTestVisible = true; shell.PrepareBackdrop(); SystemBackdrop = backdrop; backdrop.SetVisible(true);
+        IsShown = true; root.IsHitTestVisible = true; shell.PrepareBackdrop();
+        ConfigureNativeBackdrop();
         root.Opacity = 1;
         ElementCompositionPreview.GetElementVisual(root).Opacity = 1;
         runtime.SetInterfaceVisible(true);
@@ -153,7 +166,19 @@ internal sealed class RecallWindow : Window
         shell.Show();
         statusTimer.Start();
         Design.Spring(root, 20, .985f, response: .64);
+        _ = ActivateGlassAfterFirstFrame();
         _ = RecordMaterialDiagnostics();
+    }
+    async Task ActivateGlassAfterFirstFrame()
+    {
+        // Connecting the custom effect from a XAML Loaded callback can race
+        // WinUI's first composition commit on a populated library. Let the
+        // native fallback present the first frame, then connect all lenses on
+        // the UI thread after the visual tree is stable.
+        await Task.Delay(350);
+        if (!IsShown) return;
+        GlassMaterial.ActivateEffects();
+        ConfigureNativeBackdrop();
     }
     void CaptureDesktopScene()
     {
@@ -162,33 +187,89 @@ internal sealed class RecallWindow : Window
         // shader; it is never persisted, indexed or sent to a model.
         try
         {
-            var bounds = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position).Bounds;
+            var bounds = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position).WorkingArea;
             using var bitmap = new System.Drawing.Bitmap(bounds.Width, bounds.Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
             using (var graphics = System.Drawing.Graphics.FromImage(bitmap))
                 graphics.CopyFromScreen(bounds.Location, System.Drawing.Point.Empty, bounds.Size);
-            var area = new System.Drawing.Rectangle(0, 0, bitmap.Width, bitmap.Height);
-            var locked = bitmap.LockBits(area, System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
-            byte[] pixels;
-            try
-            {
-                var stride = Math.Abs(locked.Stride);
-                var source = new byte[stride * bitmap.Height];
-                System.Runtime.InteropServices.Marshal.Copy(locked.Scan0, source, 0, source.Length);
-                pixels = new byte[bitmap.Width * bitmap.Height * 4];
-                for (var y = 0; y < bitmap.Height; y++)
-                    Buffer.BlockCopy(source, (locked.Stride > 0 ? y : bitmap.Height - 1 - y) * stride,
-                        pixels, y * bitmap.Width * 4, bitmap.Width * 4);
-            }
-            finally { bitmap.UnlockBits(locked); }
-            var scene = new WriteableBitmap(bounds.Width, bounds.Height);
-            using (var stream = scene.PixelBuffer.AsStream()) stream.Write(pixels);
-            scene.Invalidate();
-            desktopScene.Source = scene;
+            desktopScene.Source = BitmapSource(bitmap);
+            using var blurred = BlurDesktop(bitmap);
+            desktopBlurSource = BitmapSource(blurred);
+            desktopTimelineBlurSource = BitmapSource(blurred, timelineMask: true);
+            desktopBlurScene.Source = desktopBlurSource;
         }
-        catch (Exception error) when (error is System.Runtime.InteropServices.ExternalException or ArgumentException)
+        catch (Exception error) when (error is System.Runtime.InteropServices.ExternalException or ArgumentException or OutOfMemoryException)
         {
             desktopScene.Source = null;
+            desktopBlurScene.Source = null;
+            desktopBlurSource = desktopTimelineBlurSource = null;
         }
+    }
+    static System.Drawing.Bitmap BlurDesktop(System.Drawing.Bitmap source)
+    {
+        // Produce one stable blurred texture while the overlay is hidden. This
+        // restores page blur without a full-screen per-frame shader and prevents
+        // stale pixels when a Rhine card moves away from a glass control.
+        const int factor = 18;
+        var smallWidth = Math.Max(1, source.Width / factor);
+        var smallHeight = Math.Max(1, source.Height / factor);
+        using var small = new System.Drawing.Bitmap(smallWidth, smallHeight, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+        using (var graphics = System.Drawing.Graphics.FromImage(small))
+        {
+            graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+            graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+            graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+            graphics.DrawImage(source, new System.Drawing.Rectangle(0, 0, smallWidth, smallHeight));
+        }
+        // The texture is already deliberately low-frequency. Keeping it at the
+        // window's usual logical resolution halves upload dimensions on a 200%
+        // display without changing the visible blur.
+        var result = new System.Drawing.Bitmap(Math.Max(1, source.Width / 2), Math.Max(1, source.Height / 2), System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+        using (var graphics = System.Drawing.Graphics.FromImage(result))
+        {
+            graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+            graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+            graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+            graphics.DrawImage(small, new System.Drawing.Rectangle(0, 0, result.Width, result.Height));
+        }
+        return result;
+    }
+    static WriteableBitmap BitmapSource(System.Drawing.Bitmap bitmap, bool timelineMask = false)
+    {
+        var area = new System.Drawing.Rectangle(0, 0, bitmap.Width, bitmap.Height);
+        var locked = bitmap.LockBits(area, System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+        byte[] pixels;
+        try
+        {
+            var stride = Math.Abs(locked.Stride);
+            var source = new byte[stride * bitmap.Height];
+            System.Runtime.InteropServices.Marshal.Copy(locked.Scan0, source, 0, source.Length);
+            pixels = new byte[bitmap.Width * bitmap.Height * 4];
+            for (var y = 0; y < bitmap.Height; y++)
+                Buffer.BlockCopy(source, (locked.Stride > 0 ? y : bitmap.Height - 1 - y) * stride,
+                    pixels, y * bitmap.Width * 4, bitmap.Width * 4);
+            if (timelineMask)
+                for (var y = 0; y < bitmap.Height; y++)
+                {
+                    var progress = Math.Clamp((y / Math.Max(1d, bitmap.Height - 1) - .66) / .34, 0, 1);
+                    var alpha = (byte)Math.Round(255 * GlassProfile.TimelineOpacity(progress));
+                    var row = y * bitmap.Width * 4;
+                    for (var x = 0; x < bitmap.Width; x++)
+                    {
+                        var pixel = row + x * 4;
+                        pixels[pixel] = (byte)(pixels[pixel] * alpha / 255);
+                        pixels[pixel + 1] = (byte)(pixels[pixel + 1] * alpha / 255);
+                        pixels[pixel + 2] = (byte)(pixels[pixel + 2] * alpha / 255);
+                        pixels[pixel + 3] = alpha;
+                    }
+                }
+        }
+        finally { bitmap.UnlockBits(locked); }
+        var scene = new WriteableBitmap(bitmap.Width, bitmap.Height);
+        using (var stream = scene.PixelBuffer.AsStream()) stream.Write(pixels);
+        scene.Invalidate();
+        return scene;
     }
     async Task RecordMaterialDiagnostics()
     {
@@ -228,12 +309,14 @@ internal sealed class RecallWindow : Window
                 finally
                 {
                     try { backdrop.SetVisible(false); }
-                    finally { SystemBackdrop = null; }
+                    finally { SystemBackdrop = null; nativeBackdropActive = false; }
                 }
             }
             finally { shell.Hide(); }
             root.Opacity = 0;
             desktopScene.Source = null;
+            desktopBlurScene.Source = null;
+            desktopBlurSource = desktopTimelineBlurSource = null;
             queryCancellation?.Cancel(); archive.SetActive(false); timeline.SetActive(false);
             detail?.Dispose(); detail = null; page.Children.Clear();
             mode = "home"; selected = null; Collapse();
@@ -387,7 +470,7 @@ internal sealed class RecallWindow : Window
             actions.Margin = new(actionGap * Math.Min(1, actions.Width / Math.Max(1,target.Actions)), 0, 0, 0);
             toolbar.Margin = new(24, Mix(from.Top, target.Top), 24, 0);
         }
-        if (immediate || compactRhine || !Design.Motion || !IsShown || !search.IsLoaded || from.Width < 1 || from.Height < 1) { Apply(1); actions.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed; return; }
+        if (immediate || compactRhine || !Design.Motion || !IsShown || !search.IsLoaded || from.Width < 1 || from.Height < 1) { Apply(1); actions.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed; QueueBackdrop(); return; }
         actions.Visibility = Visibility.Visible;
         var watch = System.Diagnostics.Stopwatch.StartNew();
         toolbarTimer = DispatcherQueue.CreateTimer(); toolbarTimer.Interval = TimeSpan.FromMilliseconds(16);
@@ -396,7 +479,7 @@ internal sealed class RecallWindow : Window
         {
             if (target != toolbarTarget) { timer.Stop(); return; }
             if (watch.Elapsed.TotalSeconds >= .9 || !IsShown || !Design.Motion)
-            { timer.Stop(); Apply(1); actions.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed; }
+            { timer.Stop(); Apply(1); actions.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed; Backdrop(); }
             else Apply(LiquidMotion.Progress(watch.Elapsed.TotalSeconds, .58, .64));
         };
         toolbarTimer.Start();
@@ -509,7 +592,7 @@ internal sealed class RecallWindow : Window
         // Reparenting a focused TextBox destroys the IME surface and flashes it.
         if (root.Children.Count == 0)
         {
-            root.Children.Add(desktopScene); root.Children.Add(archive); root.Children.Add(page);
+            root.Children.Add(desktopScene); root.Children.Add(desktopBlurScene); root.Children.Add(archive); root.Children.Add(page);
             root.Children.Add(timeline); root.Children.Add(toolbar);
             root.Children.Add(back); root.Children.Add(archiveClose); root.Children.Add(noticeHost); root.Children.Add(topMenu);
         }
@@ -519,12 +602,7 @@ internal sealed class RecallWindow : Window
         var theme = night ? ElementTheme.Dark : ElementTheme.Light;
         if (root.RequestedTheme != theme) root.RequestedTheme = theme;
         var rhine = runtime.Settings.RhineLabMode && mode == "home";
-        // Rhine already has a full-window host-backdrop blur. The transient
-        // desktop scene exists so local glass can refract the real desktop in
-        // timeline and page modes, but leaving that opaque scene above the
-        // host backdrop cancels Rhine's background blur. Rhine controls still
-        // refract the archive wall rendered beneath them.
-        desktopScene.Visibility = rhine ? Visibility.Collapsed : Visibility.Visible;
+        UpdateDesktopScenePresentation(rhine);
         archive.SetActive(rhine && IsShown);
         if (rhine) { Expand(); if (IsShown) _ = archive.Refresh(); }
         timeline.SetActive(mode == "home" && !rhine);
@@ -547,6 +625,33 @@ internal sealed class RecallWindow : Window
                 break;
             case "settings": Place(new SettingsView(runtime, ApplySettings, () => Navigate("home"))); break;
             case "usage": Place(new UsageView(runtime)); break;
+        }
+    }
+    void UpdateDesktopScenePresentation(bool rhine)
+    {
+        var classicHome = mode == "home" && !rhine;
+        desktopScene.Visibility = classicHome ? Visibility.Visible : Visibility.Collapsed;
+        desktopBlurScene.Visibility = Visibility.Visible;
+        desktopBlurScene.Source = classicHome ? desktopTimelineBlurSource : desktopBlurSource;
+        desktopBlurScene.Opacity = 1;
+        if (IsShown) ConfigureNativeBackdrop();
+    }
+    void ConfigureNativeBackdrop(bool force = false)
+    {
+        var sceneReady = desktopScene.Source != null && desktopBlurSource != null && desktopTimelineBlurSource != null;
+        var enabled = force || !sceneReady || !GlassMaterial.EffectsAvailable;
+        if (enabled == nativeBackdropActive) return;
+        nativeBackdropActive = enabled;
+        if (enabled)
+        {
+            SystemBackdrop = backdrop;
+            backdrop.SetVisible(true);
+            Backdrop();
+        }
+        else
+        {
+            backdrop.SetVisible(false);
+            SystemBackdrop = null;
         }
     }
     void SetToolbarVisible(bool visible)
@@ -599,6 +704,8 @@ internal sealed class RecallWindow : Window
     internal void ValidationMaterial(bool dark, bool desktop)
     {
         materialDesktop = desktop; mode = "material"; Design.SetDark(dark); root.RequestedTheme = dark ? ElementTheme.Dark : ElementTheme.Light;
+        desktopScene.Visibility = desktopBlurScene.Visibility = Visibility.Collapsed;
+        ConfigureNativeBackdrop(force: true);
         archive.SetActive(false); timeline.SetActive(false); page.Children.Clear();
         toolbar.Visibility = back.Visibility = topMenu.Visibility = noticeHost.Visibility = Visibility.Collapsed;
         root.Background = Design.Brush(Color.FromArgb(1, 255, 255, 255));
@@ -621,7 +728,7 @@ internal sealed class RecallWindow : Window
             safeArea = new { top = archiveSafeTop, bottom = root.ActualHeight - archiveSafeBottom,
                 left = 0d, right = root.ActualWidth } };
     }
-    internal object ValidationDiagnostics => new { shown = IsShown, buttons = actions.Children.OfType<FrameworkElement>().Select(x => new { label = Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(x), bounds = x.TransformToVisual(root).TransformBounds(new Rect(0,0,x.ActualWidth,x.ActualHeight)).ToString(), offset = x.ActualOffset.ToString(), opacity = x.Opacity, hitTestVisible = x.IsHitTestVisible }).ToArray(), mode, query = search.Text, appFilter, motion = new { enabled = Design.Motion, expanded, toolbarAnimating = toolbarTimer?.IsRunning ?? false, searchWidth = search.ActualWidth, targetWidth = toolbarTarget.Width }, chrome = ChromeDiagnostics(), uiThread = new { layoutUpdates, backdropUpdates, maxLayoutUpdatedMs, maxLiquidLayoutMs, maxBackdropMs }, recording = new { state = runtime.Recording.State, fake = runtime.ValidationCaptureDiagnostics }, native = shell.Diagnostics, glass = GlassMaterial.Diagnostics, popupGlass = PopupGlassBackdrop.Diagnostics, popupTree = Design.PopupDiagnostics, backdrop = backdrop.Diagnostics, rhine = archive.Diagnostics, timeline = timeline.Diagnostics, preview = page.Children.OfType<TimelinePreviewView>().FirstOrDefault()?.Diagnostics(root), notice = new { visible = noticeHost.Visibility == Visibility.Visible, bounds = noticeHost.TransformToVisual(root).TransformBounds(new Rect(0, 0, noticeHost.ActualWidth, noticeHost.ActualHeight)) }, media = detail?.Diagnostics, imageCache = MemoryImages.Diagnostics, ask = page.Children.OfType<AskView>().FirstOrDefault()?.Diagnostics };
+    internal object ValidationDiagnostics => new { shown = IsShown, buttons = actions.Children.OfType<FrameworkElement>().Select(x => new { label = Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(x), bounds = x.TransformToVisual(root).TransformBounds(new Rect(0,0,x.ActualWidth,x.ActualHeight)).ToString(), offset = x.ActualOffset.ToString(), opacity = x.Opacity, hitTestVisible = x.IsHitTestVisible }).ToArray(), mode, query = search.Text, appFilter, motion = new { enabled = Design.Motion, expanded, toolbarAnimating = toolbarTimer?.IsRunning ?? false, searchWidth = search.ActualWidth, targetWidth = toolbarTarget.Width }, chrome = ChromeDiagnostics(), uiThread = new { layoutUpdates, backdropUpdates, maxBackdropMs }, recording = new { state = runtime.Recording.State, fake = runtime.ValidationCaptureDiagnostics }, native = shell.Diagnostics, glass = GlassMaterial.Diagnostics, popupGlass = PopupGlassBackdrop.Diagnostics, popupTree = Design.PopupDiagnostics, backdrop = backdrop.Diagnostics, rhine = archive.Diagnostics, timeline = timeline.Diagnostics, preview = page.Children.OfType<TimelinePreviewView>().FirstOrDefault()?.Diagnostics(root), notice = new { visible = noticeHost.Visibility == Visibility.Visible, bounds = noticeHost.TransformToVisual(root).TransformBounds(new Rect(0, 0, noticeHost.ActualWidth, noticeHost.ActualHeight)) }, settings = page.Children.OfType<SettingsView>().FirstOrDefault()?.Diagnostics, media = detail?.Diagnostics, imageCache = MemoryImages.Diagnostics, ask = page.Children.OfType<AskView>().FirstOrDefault()?.Diagnostics };
     internal object? ValidationPreviewDiagnostics => page.Children.OfType<TimelinePreviewView>().FirstOrDefault()?.Diagnostics(root);
     internal object? ValidationMediaDiagnostics => detail?.Diagnostics;
     internal object ValidationArchiveDiagnostics => archive.Diagnostics;
@@ -671,6 +778,7 @@ internal sealed class RecallWindow : Window
         else if (action == "expand-search") Expand();
         else if (action == "collapse-search") Collapse();
         else if (action == "open-menu") topMenu.Flyout?.ShowAt(topMenu);
+        else if (action == "save-settings") page.Children.OfType<SettingsView>().FirstOrDefault()?.ValidationSave();
         else if (action == "timeline-zoom-in") timeline.ValidationZoom(true);
         else if (action == "timeline-zoom-out") timeline.ValidationZoom(false);
         else if (action == "open-first") archive.Open("parity-0-0");
@@ -744,7 +852,7 @@ internal sealed class RecallWindow : Window
         if (error != null)
             throw new InvalidOperationException(error);
         await Task.Run(() => runtime.Save(settings));
-        notice.Text = "Settings saved";
+        if (notice.Text == "Settings saved") notice.Text = "";
     }
     void Preview(MemoryFrame? frame)
     {
@@ -797,7 +905,7 @@ internal sealed class RecallWindow : Window
             var stars = starred;
             var deleted = trash;
             var since = searchSince;
-            var result = await Task.Run(() => (Frames: runtime.Store.Frames(query, filter, stars, deleted, since: since, limit: 180),
+            var result = await Task.Run(() => (Frames: runtime.Store.Frames(query, filter, stars, deleted, since: since, limit: SearchPageSize),
                 Apps: runtime.Store.AppNames().Select(name => (Name: name, Frame: runtime.Store.Frames("", name, limit: 1).FirstOrDefault())).ToArray()), ct);
             if (ct.IsCancellationRequested || mode != "search")
                 return;
@@ -835,22 +943,22 @@ internal sealed class RecallWindow : Window
             ScrollViewer.SetHorizontalScrollBarVisibility(grid, ScrollBarVisibility.Disabled);
             foreach (var frame in frames)
                 grid.Items.Add(ResultItem(frame));
-            if (frames.Count == 180)
+            if (frames.Count == SearchPageSize)
             {
-                int offset = 180;
+                int offset = SearchPageSize;
                 Button? more = null;
                 more = Design.Button("Load more memories", async () =>
                 {
                     more!.IsEnabled = false;
                     try
                     {
-                        var next = await Task.Run(() => runtime.Store.Frames(query, filter, stars, deleted, since: since, limit: 180, offset: offset));
+                        var next = await Task.Run(() => runtime.Store.Frames(query, filter, stars, deleted, since: since, limit: SearchPageSize, offset: offset));
                         if (quitting || mode != "search" || signature != lastSearchSignature)
                             return;
                         foreach (var f in next)
                             grid.Items.Add(ResultItem(f));
                         offset += next.Count;
-                        if (next.Count < 180)
+                        if (next.Count < SearchPageSize)
                             grid.Footer = null;
                     }
                     catch (Exception ex) { if (!quitting) notice.Text = ex.Message; }

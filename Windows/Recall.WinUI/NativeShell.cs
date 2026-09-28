@@ -86,7 +86,16 @@ internal sealed class NativeShell : IDisposable
         if (!hostBackdropEnabled) PrepareBackdrop();
         restoreWindow = NativeWindows.GetForegroundWindow();
         var screen = Forms.Screen.FromPoint(Forms.Cursor.Position);
-        var b = screen.Bounds;
+        // Keep the bottom timeline above a visible taskbar.
+        var b = screen.WorkingArea;
+        // An auto-hidden taskbar reports the full monitor as its working area,
+        // then covers the bottom controls as soon as the pointer reveals it.
+        // Reserve one taskbar row on the primary display in that configuration.
+        if (b == screen.Bounds && IsTaskbarAutoHidden())
+        {
+            var inset = (int)Math.Ceiling(52 * GetDpiForWindow(handle) / 96d);
+            b = new(b.X, b.Y, b.Width, Math.Max(1, b.Height - inset));
+        }
         SetWindowPos(handle, new nint(-1), b.X, b.Y, b.Width, b.Height, SwpShowWindow);
         ShowWindow(handle, 5);
         window.Activate();
@@ -166,6 +175,11 @@ internal sealed class NativeShell : IDisposable
         if (dc == 0 || !GetClientRect(handle, out var rect)) return false;
         return FillRect(dc, ref rect, GetStockObject(4)) != 0; // BLACK_BRUSH: zero-alpha RGB backing
     }
+    static bool IsTaskbarAutoHidden()
+    {
+        var data = new AppBarData { Size = (uint)Marshal.SizeOf<AppBarData>() };
+        return (SHAppBarMessage(4, ref data).ToUInt64() & 1) != 0; // ABM_GETSTATE / ABS_AUTOHIDE
+    }
     public static void SignalExisting()
     {
         var h = FindWindow(null, "Recall.Native.Overlay");
@@ -194,6 +208,7 @@ internal sealed class NativeShell : IDisposable
     }
     delegate nint WndProc(nint h, uint m, nint w, nint l);
     [StructLayout(LayoutKind.Sequential)] struct NativeRect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] struct AppBarData { public uint Size; public nint Window; public uint CallbackMessage; public uint Edge; public NativeRect Rect; public nint Parameter; }
     [StructLayout(LayoutKind.Sequential)] struct BlurBehind { public uint Flags; public int Enabled; public nint Region; public int TransitionOnMaximized; }
     [DllImport("dwmapi.dll")] static extern int DwmEnableBlurBehindWindow(nint h, ref BlurBehind blur);
     [DllImport("gdi32.dll")] static extern nint CreateRectRgn(int left, int top, int right, int bottom);
@@ -211,6 +226,7 @@ internal sealed class NativeShell : IDisposable
     [DllImport("user32.dll")] static extern bool IsWindowVisible(nint h);
     [DllImport("user32.dll")] static extern bool ShowWindow(nint h, int command);
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(nint h);
+    [DllImport("user32.dll")] static extern uint GetDpiForWindow(nint h);
     [DllImport("user32.dll")] static extern bool SetWindowDisplayAffinity(nint h, uint value);
     [DllImport("user32.dll")] static extern bool GetWindowDisplayAffinity(nint h, out uint value);
     [DllImport("user32.dll")] static extern bool RegisterHotKey(nint h, int id, uint modifiers, uint key);
@@ -219,4 +235,5 @@ internal sealed class NativeShell : IDisposable
     [DllImport("user32.dll")] static extern bool PostMessage(nint h, int message, nint w, nint l);
     [DllImport("dwmapi.dll")] static extern int DwmExtendFrameIntoClientArea(nint h, ref Margins margins);
     [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(nint h, int attr, ref int value, int size);
+    [DllImport("shell32.dll")] static extern UIntPtr SHAppBarMessage(uint message, ref AppBarData data);
 }

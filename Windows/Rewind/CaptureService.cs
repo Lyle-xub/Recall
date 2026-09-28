@@ -31,6 +31,7 @@ public sealed class CaptureService : IDisposable
     private readonly CancellationTokenSource lifetime = new();
     private readonly Task indexingWorker;
     private readonly VisualPromotionWorker visualPromotion;
+    private volatile bool interfaceVisible;
     private RecordingSession? stoppedSession;
     private readonly SemaphoreSlim ocrGate = new(1);
     public event Action<MemoryFrame>? FrameAdded;
@@ -42,6 +43,7 @@ public sealed class CaptureService : IDisposable
     public CaptureService(MemoryStore store)
     {
         this.store = store;
+        interfaceVisible = !Environment.GetCommandLineArgs().Any(argument => argument is "--background" or "--cli-service" or "--visual-parity" or "--smoke-test");
         visualPromotion = new VisualPromotionWorker((sessionId, token) =>
         {
             token.ThrowIfCancellationRequested();
@@ -51,7 +53,7 @@ public sealed class CaptureService : IDisposable
                 return VisualVideoReader.Verify(store.Root, reference, token);
             })) FrameAdded?.Invoke(frame);
             return Task.CompletedTask;
-        }, error => Error?.Invoke("Visual archive verification retained original captures. " + error.Message), lifetime.Token);
+        }, error => Error?.Invoke("Visual archive verification retained original captures. " + error.Message), lifetime.Token, () => interfaceVisible);
         // Discovery scans historical metadata only once at startup. Steady-state
         // OCR and segment completion signal their specific ready session IDs.
         foreach (var sessionId in store.UnfinishedVisualSessions()) visualPromotion.Request(sessionId);
@@ -74,6 +76,8 @@ public sealed class CaptureService : IDisposable
         {
             if (lifetime.IsCancellationRequested)
                 break;
+            try { while (interfaceVisible) await Task.Delay(200, lifetime.Token); }
+            catch (OperationCanceledException) { break; }
             try { await indexGate.WaitAsync(lifetime.Token); }
             catch (OperationCanceledException) { break; }
             try
@@ -150,6 +154,7 @@ public sealed class CaptureService : IDisposable
             finally { indexGate.Release(); }
         }
     }
+    public void SetInterfaceVisible(bool visible) => interfaceVisible = visible;
     public async Task<object> IndexOne(string id,string language,CancellationToken ct)
     {
         // Desktop capture uses one bundled bilingual model, with the same

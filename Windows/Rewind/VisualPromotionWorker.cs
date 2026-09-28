@@ -20,10 +20,12 @@ internal sealed class VisualPromotionWorker
     private readonly object gate = new();
     private readonly CancellationTokenSource cancellation;
     private readonly Task worker;
+    private readonly Func<bool> paused;
     private int stopping;
 
-    public VisualPromotionWorker(Func<string, CancellationToken, Task> promoteSession, Action<Exception> error, CancellationToken lifetime)
+    public VisualPromotionWorker(Func<string, CancellationToken, Task> promoteSession, Action<Exception> error, CancellationToken lifetime, Func<bool>? paused = null)
     {
+        this.paused = paused ?? (() => false);
         cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
         worker = Task.Run(async () =>
         {
@@ -33,6 +35,7 @@ internal sealed class VisualPromotionWorker
                     while (true)
                     {
                         cancellation.Token.ThrowIfCancellationRequested();
+                        while (this.paused()) await Task.Delay(200, cancellation.Token);
                         string session;
                         lock (gate)
                         {

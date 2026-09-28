@@ -35,6 +35,7 @@ internal sealed class AppRuntime
     private readonly UsageRecorder usage;
     private readonly Task usageWorker, speechWorker;
     private volatile bool sessionLocked, powerSuspended;
+    private volatile bool interfaceVisible;
     private bool Suspended => sessionLocked || powerSuspended;
     private readonly bool visualParity, validationFakeCapture;
     private readonly bool cliService;
@@ -56,6 +57,7 @@ internal sealed class AppRuntime
         var arguments = Environment.GetCommandLineArgs();
         cliService = arguments.Contains("--cli-service");
         visualParity = arguments.Contains("--visual-parity");
+        interfaceVisible = !cliService && !visualParity && !arguments.Contains("--background") && !arguments.Contains("--smoke-test");
         validationFakeCapture = visualParity && arguments.Contains("--validation-fake-capture");
         Directory.CreateDirectory(AppPaths.DataRoot);
         var path = Path.Combine(AppPaths.DataRoot, "settings.json");
@@ -72,6 +74,7 @@ internal sealed class AppRuntime
         HasMemories = Store.Count > 0;
         usage = new(Store);
         Capture = new(Store);
+        Capture.SetInterfaceVisible(interfaceVisible);
         Recording = new(async () =>
         {
             if (validationFakeCapture)
@@ -278,7 +281,13 @@ internal sealed class AppRuntime
             Settings.OnboardingComplete = true;
         Save(Settings);
     }
-    public void SetInterfaceVisible(bool visible) => Recording.SetVisible(Suspended || visible);
+    public void SetInterfaceVisible(bool visible)
+    {
+        var pauseBackgroundWork = Suspended || visible;
+        interfaceVisible = pauseBackgroundWork;
+        Capture.SetInterfaceVisible(pauseBackgroundWork);
+        Recording.SetVisible(pauseBackgroundWork);
+    }
     private void SessionSwitch(object sender, SessionSwitchEventArgs e)
     {
         if (e.Reason == SessionSwitchReason.SessionLock)
@@ -348,6 +357,7 @@ internal sealed class AppRuntime
         {
             await foreach (var session in speech.Reader.ReadAllAsync(lifetime.Token))
             {
+                while (interfaceVisible) await Task.Delay(200, lifetime.Token);
                 if (!Store.SpeechStatus(session.Id, RecognitionState.Working))
                 {
                     lock (queued)

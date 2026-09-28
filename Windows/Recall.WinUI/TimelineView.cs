@@ -4,7 +4,7 @@ namespace Recall;
 
 internal sealed class TimelineView : Grid
 {
-    readonly AppRuntime runtime; readonly Action<MemoryFrame?> preview; readonly Canvas track = new(); readonly TextBlock label = Design.Text("Now", 14, true), rangeLabel = Design.Text(TimelineMath.Duration(300), 14, true); readonly Border timePill; readonly Button zoomOut, zoomIn, rangeButton; readonly Microsoft.UI.Dispatching.DispatcherQueueTimer timer, settle;
+    readonly AppRuntime runtime; readonly Action<MemoryFrame?> preview; readonly Canvas track = new(); readonly TextBlock label = Design.Text("Now", 14, true), rangeLabel = Design.Text(TimelineMath.Duration(300), 14, true); readonly Border timePill; readonly Button zoomOut, zoomIn, rangeButton; readonly Microsoft.UI.Dispatching.DispatcherQueueTimer timer, settle, interactionRefresh, interactionPreview;
     public event Action<MemoryFrame?>? Committed;
     DateTimeOffset center = DateTimeOffset.Now; double span = 300; bool live = true, dragging, active; double startX; DateTimeOffset startTime; long revision; bool refreshing, refreshAgain, previewAgain;
     readonly LinearGradientBrush tint = new() { StartPoint = new(0, 0), EndPoint = new(0, 1), GradientStops = { new() { Color = Microsoft.UI.Colors.Transparent, Offset = 0 }, new() { Color = Color.FromArgb(20, 255, 255, 255), Offset = 1 } } };
@@ -18,6 +18,10 @@ internal sealed class TimelineView : Grid
             var date = center; var frame = await Task.Run(() => runtime.Store.At(date));
             if (active && !live && date == center) Committed?.Invoke(frame);
         };
+        interactionRefresh = DispatcherQueue.CreateTimer(); interactionRefresh.Interval = TimeSpan.FromMilliseconds(55); interactionRefresh.IsRepeating = false;
+        interactionRefresh.Tick += (_, _) => _ = Refresh();
+        interactionPreview = DispatcherQueue.CreateTimer(); interactionPreview.Interval = TimeSpan.FromMilliseconds(180); interactionPreview.IsRepeating = false;
+        interactionPreview.Tick += (_, _) => _ = Refresh(true);
         Height = 234; Visibility = Visibility.Collapsed;
         VerticalAlignment = VerticalAlignment.Bottom;
         Children.Add(new DesktopBlur(true));
@@ -65,10 +69,10 @@ internal sealed class TimelineView : Grid
         now.Margin = new(0, 0, 24, 32);
         Children.Add(now);
         track.PointerPressed += (_, e) => { if (e.Handled) return; dragging = true; live = false; startX = e.GetCurrentPoint(track).Position.X; startTime = center; track.CapturePointer(e.Pointer); e.Handled = true; };
-        track.PointerMoved += (_, e) => { if (!dragging) return; center = startTime.AddSeconds(-(e.GetCurrentPoint(track).Position.X - startX) / Math.Max(1, track.ActualWidth) * span); if (center > DateTimeOffset.Now) center = DateTimeOffset.Now; _ = Refresh(true); e.Handled = true; };
-        track.PointerReleased += (_, e) => { dragging = false; track.ReleasePointerCaptures(); _ = Refresh(true); e.Handled = true; };
+        track.PointerMoved += (_, e) => { if (!dragging) return; center = startTime.AddSeconds(-(e.GetCurrentPoint(track).Position.X - startX) / Math.Max(1, track.ActualWidth) * span); if (center > DateTimeOffset.Now) center = DateTimeOffset.Now; ScheduleInteraction(); e.Handled = true; };
+        track.PointerReleased += (_, e) => { dragging = false; track.ReleasePointerCaptures(); interactionRefresh.Stop(); interactionPreview.Stop(); _ = Refresh(true); e.Handled = true; };
         track.PointerCaptureLost += (_, _) => dragging = false;
-        PointerWheelChanged += (_, e) => { var delta = e.GetCurrentPoint(this).Properties.MouseWheelDelta; if ((InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0) Zoom(delta > 0 ? .8 : 1.25); else { live = false; center = center.AddSeconds(-delta / 120.0 * span / 18); if (center > DateTimeOffset.Now) center = DateTimeOffset.Now; _ = Refresh(true); } e.Handled = true; };
+        PointerWheelChanged += (_, e) => { var delta = e.GetCurrentPoint(this).Properties.MouseWheelDelta; if ((InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0) Zoom(delta > 0 ? .8 : 1.25); else { live = false; center = center.AddSeconds(-delta / 120.0 * span / 18); if (center > DateTimeOffset.Now) center = DateTimeOffset.Now; ScheduleInteraction(); } e.Handled = true; };
         PointerPressed += (_, e) => e.Handled = true;
         SizeChanged += (_, _) => _ = Refresh();
         Loaded += (_, _) => _ = Refresh();
@@ -76,7 +80,7 @@ internal sealed class TimelineView : Grid
         timer.Interval = TimeSpan.FromSeconds(2);
         timer.Tick += (_, _) => { if (Visibility != Visibility.Visible) return; if (live) center = DateTimeOffset.Now; _ = Refresh(); };
         Loaded += (_, _) => { if (active) timer.Start(); };
-        Unloaded += (_, _) => timer.Stop();
+        Unloaded += (_, _) => { timer.Stop(); interactionRefresh.Stop(); interactionPreview.Stop(); };
     }
     public bool IsLive => live;
     internal object Diagnostics => new { spanSeconds = span, rangeText = rangeLabel.Text, zoomOutEnabled = zoomOut.IsEnabled, zoomInEnabled = zoomIn.IsEnabled };
@@ -95,10 +99,15 @@ internal sealed class TimelineView : Grid
         }
         else
         {
-            timer.Stop(); settle.Stop(); Interlocked.Increment(ref revision); refreshAgain = previewAgain = false;
+            timer.Stop(); settle.Stop(); interactionRefresh.Stop(); interactionPreview.Stop(); Interlocked.Increment(ref revision); refreshAgain = previewAgain = false;
             if (!Design.Motion || !IsLoaded) { Visibility = Visibility.Collapsed; return; }
             _ = HideAfterFade(token);
         }
+    }
+    void ScheduleInteraction()
+    {
+        if (!interactionRefresh.IsRunning) interactionRefresh.Start();
+        interactionPreview.Stop(); interactionPreview.Start();
     }
     async Task HideAfterFade(int token)
     {
