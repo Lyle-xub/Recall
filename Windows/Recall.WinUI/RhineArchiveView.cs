@@ -160,8 +160,8 @@ internal sealed class RhineArchiveView : Grid
     bool darkAtBuild;
     string collectionSummary = "";
     long buildEndedAt;
-    double lastQueryMs, lastBuildMs, maxBuildMs, lastReconcileMs, firstImageMs, imageLoadTotalMs, maxImageLoadMs;
-    internal object Diagnostics => new { motionProfile = new { transitionDirection, lastTransitionMs, transitionFrames, transitionSlowFrames, transitionMaxUpdateMs, transitionMaxIntervalMs, transitionMaxQueueMs, transitionMaxClockIntervalMs, transitionClockTicks, framePending = Volatile.Read(ref frameQueued) != 0, matrixWrites, wallOffsetWrites, imageRequests, imagePumpRunning = imageTimer.IsRunning }, seekMotion = new { preparing = seekPreparing, pending = pendingExtraction?.Frame?.Id, travelFrames = lastSeekTravelFrames, travelMs = lastSeekTravelMs, expandedAfterArrival = lastSeekExpandedAfterArrival }, startup = new { builds, incrementalUpdates = reconciles, reusedSheets = lastReusedSheets, reusedImages = lastReusedImages, cacheHits = refreshCacheHits, queryCount = archiveQueryCount, lastReconcileMs, lastQueryMs, lastBuildMs, maxBuildMs, sheetCount = sheets.Count, evictedSheets, releasedImages, retainedImageBytes = sheets.Sum(ImageBytes), deferredImages = sheets.Count(s => s.PendingImage != null), firstImageMs, imagesLoadedSinceBuild, imageLoadTotalMs, maxImageLoadMs }, archive = ArchiveDiagnostics(), card = CardDiagnostics(), footer = FooterDiagnostics(), safeArea = new { top = expandedTopInset, bottom = (float)ActualHeight - expandedBottomInset, bottomInset = expandedBottomInset, timelineVisible = timeline, dockHeight = bottomDock.ActualHeight }, copyCount = frontCopy == null ? 0 : 1, active, ticking, dragTargetX, dragTargetY, pointerDown, reducedMotion = reduced, expandedActionsVisible = expandedControlsShown, extraction = extraction.Value, extractTarget, pointerMoves, hoverChanges, expansions, collapses, hovered = hovered?.Frame?.Id, extracted = extracted?.Frame?.Id, crestTarget, acrossTarget, imageCount = sheets.Count(s => s.Frame != null), visiblePhotoCards = sheets.Count(s => s.Frame != null && s.Root.Visibility == Visibility.Visible && NearViewport(s,0)), loadedImages = sheets.Count(s => s.Image?.Source != null), visibleLoadedImages = sheets.Count(s => s.Image?.Source != null && s.Root.Visibility == Visibility.Visible && NearViewport(s,0)), highResolutionImages = sheets.Count(s => s.ImageEdge == ExpandedImageEdge), failedImages = sheets.Count(s => s.Failed) };
+    double lastQueryMs, coldFirstRackMs, lastBuildMs, maxBuildMs, lastReconcileMs, firstImageMs, imageLoadTotalMs, maxImageLoadMs;
+    internal object Diagnostics => new { motionProfile = new { transitionDirection, lastTransitionMs, transitionFrames, transitionSlowFrames, transitionMaxUpdateMs, transitionMaxIntervalMs, transitionMaxQueueMs, transitionMaxClockIntervalMs, transitionClockTicks, framePending = Volatile.Read(ref frameQueued) != 0, matrixWrites, wallOffsetWrites, imageRequests, imagePumpRunning = imageTimer.IsRunning }, seekMotion = new { preparing = seekPreparing, pending = pendingExtraction?.Frame?.Id, travelFrames = lastSeekTravelFrames, travelMs = lastSeekTravelMs, expandedAfterArrival = lastSeekExpandedAfterArrival }, startup = new { builds, incrementalUpdates = reconciles, reusedSheets = lastReusedSheets, reusedImages = lastReusedImages, cacheHits = refreshCacheHits, queryCount = archiveQueryCount, coldFirstRackMs, lastReconcileMs, lastQueryMs, lastBuildMs, maxBuildMs, sheetCount = sheets.Count, evictedSheets, releasedImages, retainedImageBytes = sheets.Sum(ImageBytes), deferredImages = sheets.Count(s => s.PendingImage != null), firstImageMs, imagesLoadedSinceBuild, imageLoadTotalMs, maxImageLoadMs }, archive = ArchiveDiagnostics(), card = CardDiagnostics(), footer = FooterDiagnostics(), safeArea = new { top = expandedTopInset, bottom = (float)ActualHeight - expandedBottomInset, bottomInset = expandedBottomInset, timelineVisible = timeline, dockHeight = bottomDock.ActualHeight }, copyCount = frontCopy == null ? 0 : 1, active, ticking, dragTargetX, dragTargetY, pointerDown, reducedMotion = reduced, expandedActionsVisible = expandedControlsShown, extraction = extraction.Value, extractTarget, pointerMoves, hoverChanges, expansions, collapses, hovered = hovered?.Frame?.Id, extracted = extracted?.Frame?.Id, crestTarget, acrossTarget, imageCount = sheets.Count(s => s.Frame != null), visiblePhotoCards = sheets.Count(s => s.Frame != null && s.Root.Visibility == Visibility.Visible && NearViewport(s,0)), loadedImages = sheets.Count(s => s.Image?.Source != null), visibleLoadedImages = sheets.Count(s => s.Image?.Source != null && s.Root.Visibility == Visibility.Visible && NearViewport(s,0)), highResolutionImages = sheets.Count(s => s.ImageEdge == ExpandedImageEdge), failedImages = sheets.Count(s => s.Failed) };
     object ArchiveDiagnostics() => new { initialized = columns.Count != 0,
         indexedRecords = records.Count, maxRows = rows, seekTargetId, seekTargetRow,
         storeRevision = runtime.Store.ArchiveRevision, appliedArchiveRevision,
@@ -493,8 +493,26 @@ internal sealed class RhineArchiveView : Grid
         var previous = records.ToArray();
         PreparedArchive prepared;
         archiveQueryCount++;
-        try { prepared = await Task.Run(() => PrepareArchive(
-            runtime.Store.ArchiveIndex(nextDay, cancellation: queryToken), nextDay, previous, queryToken), queryToken); }
+        try
+        {
+            // On a cold open, make the selected day interactive first. The two
+            // neighbouring days on each side are reconciled after the UI has had
+            // a chance to present the initial rack.
+            if (columns.Count == 0 && anchor == null)
+            {
+                prepared = await Task.Run(() => PrepareArchive(
+                    runtime.Store.ArchiveIndex(nextDay,0,queryToken),nextDay,previous,queryToken),queryToken);
+                if (version != revision) return;
+                records = prepared.Frames; day = nextDay; Build(prepared);
+                coldFirstRackMs = (Stopwatch.GetTimestamp()-started)*1000.0/Stopwatch.Frequency;
+                await Task.Yield();
+                archiveQueryCount++;
+                prepared = await Task.Run(() => PrepareArchive(
+                    runtime.Store.ArchiveIndex(nextDay,cancellation: queryToken),nextDay,records,queryToken),queryToken);
+            }
+            else prepared = await Task.Run(() => PrepareArchive(
+                runtime.Store.ArchiveIndex(nextDay,cancellation: queryToken),nextDay,previous,queryToken),queryToken);
+        }
         catch (OperationCanceledException) { return; }
         if (version != revision) return;
         lastQueryMs = (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency;

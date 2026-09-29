@@ -17,6 +17,8 @@ internal sealed class DetailView : Grid, IDisposable
     bool manualRotationUsed;
     double matchedAspect;
     MediaPlayer? video; MediaPlayerElement? videoElement; MediaSource? videoSource; int playbackRevision, rotationSteps; string? playbackError, sourceOrientation; readonly List<(MediaPlayer Player, double Offset)> audio = []; readonly Microsoft.UI.Dispatching.DispatcherQueueTimer sync; List<TranscriptLine> lines = []; bool playing, refreshing, disposed;
+    RecordingSession? availableVideoSession; Task? videoPreparation; string? preparingSessionId, preparedSessionId; bool playRequested, mediaOpened;
+    long prepareStartedAt, playRequestedAt; double lastPrepareMs, clickToPlaybackMs, clickToFirstFrameMs;
     public DetailView(AppRuntime runtime, MemoryFrame frame, Action<MemoryFrame> open)
     {
         this.runtime = runtime;
@@ -76,7 +78,10 @@ internal sealed class DetailView : Grid, IDisposable
         controls.Children.Add(ActionIcon("\uE7C4", "Copy all recognized text", () => FrameSurface.ClipboardText(this.frame.Text)));
         controls.Children.Add(starButton);
         if (frame.SessionId is { } id && runtime.Store.Session(id) is { } session && File.Exists(runtime.Store.SafePath(session.VideoPath)))
+        {
+            availableVideoSession = session;
             controls.Children.Add(ActionIcon("\uE768", "Play video", () => Play(session)));
+        }
         speechStatus.Child = Design.Row(6, Design.Symbol("\uE720", 15), speechLabel);
         speechStatus.CornerRadius = new(16);
         speechStatus.Background = Design.Brush(Design.Dark ? Color.FromArgb(88, 65, 72, 85) : Color.FromArgb(105, 210, 215, 222));
@@ -134,6 +139,7 @@ internal sealed class DetailView : Grid, IDisposable
         sync = DispatcherQueue.CreateTimer();
         sync.Interval = TimeSpan.FromMilliseconds(250);
         sync.Tick += (_, _) => SyncAudio();
+        Loaded += (_, _) => { if (availableVideoSession is { } session) QueueVideoPreparation(session); };
         Unloaded += (_, _) => Dispose();
         RefreshStatus();
     }
@@ -417,13 +423,14 @@ internal sealed class DetailView : Grid, IDisposable
         }
     }
     internal object Diagnostics => new { playing, disposed, playbackError, hasPlayer = video != null, hasVideoElement = videoElement != null,
+        preparation = new { preparingSessionId, preparedSessionId, pending = videoPreparation is { IsCompleted: false }, mediaOpened, playRequested, lastPrepareMs, clickToPlaybackMs, clickToFirstFrameMs },
         transcriptVisible, transcriptLines = lines.Count, videoReady = videoSurface?.IsReady == true, posterVisible,
         mediaBounds = new { width = mediaShell.ActualWidth, height = mediaShell.ActualHeight, viewportWidth = mediaViewport.ActualWidth, viewportHeight = mediaViewport.ActualHeight },
         sourceOrientation, orientationCorrectionDegrees = orientationCorrection * 90, manualRotationDegrees = rotationSteps * 90, rotationDegrees = ((orientationCorrection + rotationSteps) % 4) * 90,
         orientationMatch, orientationMatchError = videoSurface?.MatchError, surface = videoSurface?.Diagnostics,
         position = video?.PlaybackSession.Position.TotalSeconds, duration = video?.PlaybackSession.NaturalDuration.TotalSeconds,
         width = video?.PlaybackSession.NaturalVideoWidth, height = video?.PlaybackSession.NaturalVideoHeight };
-    internal void ValidationPlay() { if (frame.SessionId is { } id && runtime.Store.Session(id) is { } session) Play(session); }
+    internal void ValidationPlay() { if (availableVideoSession is { } session) Play(session); else if (frame.SessionId is { } id && runtime.Store.Session(id) is { } stored) Play(stored); }
     internal void RotateVideo()
     {
         manualRotationUsed = true;
@@ -439,25 +446,53 @@ internal sealed class DetailView : Grid, IDisposable
         var notice = new Border { Child = text, Padding = new(16), CornerRadius = new(8), Background = Design.Brush(Design.Dark ? Color.FromArgb(255,43,43,43) : Color.FromArgb(255,245,245,245)), VerticalAlignment = VerticalAlignment.Bottom, Margin = new(16) };
         visual.Children.Add(notice);
     }
-    async void Play(RecordingSession session)
+    void Play(RecordingSession session)
     {
-        Stop(); ShowPoster(); playbackError = null; orientationCorrection = 0; orientationMatch = null; matchedAspect = 0; manualRotationUsed = false; videoCompleted = false;
-        session = runtime.Store.Session(session.Id) ?? session;
         if (session.EndedAt == null) { PlaybackNotice("This recording is still being finalized. Try Play video again shortly."); return; }
+        playbackError = null; videoCompleted = false; playRequested = true;
+        playRequestedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (preparedSessionId == session.Id && video != null)
+        {
+            StartPreparedPlayback();
+            return;
+        }
+        if (preparingSessionId == session.Id && videoPreparation is { IsCompleted: false })
+            return;
+        Stop(); ShowPoster(); playRequested = true; playRequestedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        orientationCorrection = 0; orientationMatch = null; matchedAspect = 0; manualRotationUsed = false;
+        QueueVideoPreparation(session);
+    }
+    void QueueVideoPreparation(RecordingSession session)
+    {
+        if (disposed || session.EndedAt == null || preparedSessionId == session.Id ||
+            preparingSessionId == session.Id && videoPreparation is { IsCompleted: false }) return;
         var revision = playbackRevision;
+        preparingSessionId = session.Id; prepareStartedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        videoPreparation = PrepareVideo(session,revision);
+    }
+    async Task PrepareVideo(RecordingSession session, int revision)
+    {
         try
         {
+            session = await Task.Run(() => runtime.Store.Session(session.Id)) ?? session;
+            if (disposed || revision != playbackRevision) return;
+            if (session.EndedAt == null)
+            {
+                if (playRequested) PlaybackNotice("This recording is still being finalized. Try Play video again shortly.");
+                return;
+            }
             var path = runtime.Store.SafePath(session.VideoPath);
             if (path == null || !File.Exists(path)) throw new FileNotFoundException("The recording file is no longer available.");
             var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
-            var properties = await file.Properties.GetVideoPropertiesAsync();
-            (byte[] Pixels, int Width, int Height)? stillReference = null;
-            try
+            var propertiesTask = file.Properties.GetVideoPropertiesAsync().AsTask();
+            var stillTask = Task.Run<(byte[] Pixels, int Width, int Height)?>(() =>
             {
-                var imagePath = frame.ImagePath;
-                stillReference = await Task.Run(() => LoadOrientationReference(runtime.Store, imagePath));
-            }
-            catch { /* An unavailable still leaves metadata and manual rotation intact. */ }
+                try { return LoadOrientationReference(runtime.Store,frame.ImagePath); }
+                catch { return null; }
+            });
+            await Task.WhenAll(propertiesTask,stillTask);
+            var properties = propertiesTask.Result;
+            var stillReference = stillTask.Result;
             var stillAspect = stillReference is { } still ? (double)still.Width / still.Height : 0;
             if (disposed || revision != playbackRevision) return;
             sourceOrientation = properties.Orientation.ToString();
@@ -481,7 +516,7 @@ internal sealed class DetailView : Grid, IDisposable
             surface.SetOrientation(rotationSteps, 0, rotationSteps);
             videoReadyHandler = () =>
             {
-                if (disposed || revision != playbackRevision || video != player || videoSurface != surface || videoHost != host || videoCompleted) return;
+                if (disposed || revision != playbackRevision || video != player || videoSurface != surface || videoHost != host || videoCompleted || !playRequested) return;
                 var playback = player.PlaybackSession;
                 if (playback.NaturalDuration > TimeSpan.Zero && playback.Position >= playback.NaturalDuration) return;
                 // The still remains on screen until the corrected first video frame exists.
@@ -489,6 +524,7 @@ internal sealed class DetailView : Grid, IDisposable
                 posterVisible = false;
                 FitMedia();
                 host.Opacity = 1; host.IsHitTestVisible = true;
+                if (playRequestedAt != 0) clickToFirstFrameMs = System.Diagnostics.Stopwatch.GetElapsedTime(playRequestedAt).TotalMilliseconds;
             };
             surface.Ready += videoReadyHandler;
             host.Children.Add(surface);
@@ -498,6 +534,7 @@ internal sealed class DetailView : Grid, IDisposable
             Design.Rounded(host, 22);
             videoHost = host;
             visual.Children.Add(host);
+            preparedSessionId = session.Id;
             player.MediaOpened += (sender, _) => DispatcherQueue.TryEnqueue(() =>
             {
                 if (disposed || revision != playbackRevision || video != sender) return;
@@ -508,21 +545,18 @@ internal sealed class DetailView : Grid, IDisposable
                     orientationCorrection = VideoOrientation.Correction(metadataDegrees, stillAspect, playback.NaturalVideoHeight > 0 ? (double)playback.NaturalVideoWidth / playback.NaturalVideoHeight : 0);
                     videoSurface?.SetOrientation(orientationCorrection + rotationSteps, matchedAspect, rotationSteps);
                     videoSurface?.ConfirmFallbackOrientation();
+                    mediaOpened = true;
+                    lastPrepareMs = System.Diagnostics.Stopwatch.GetElapsedTime(prepareStartedAt).TotalMilliseconds;
                     var duration = sender.PlaybackSession.NaturalDuration.TotalSeconds;
                     var seconds = frame.VisualTicks is { } sampleTicks ? TimeSpan.FromTicks(sampleTicks).TotalSeconds : Math.Max(0, (frame.Timestamp - session.StartedAt).TotalSeconds);
                     var seekTo = TimeSpan.FromSeconds(duration > 0 ? Math.Min(seconds, Math.Max(0, duration - .001)) : 0);
+                    if (!manualRotationUsed) videoSurface?.ArmOrientationMatch(seekTo);
                     if (seekTo > TimeSpan.FromMilliseconds(50))
                     {
-                        sender.PlaybackSession.SeekCompleted += (_, _) => DispatcherQueue.TryEnqueue(() =>
-                        {
-                            if (!disposed && revision == playbackRevision && video == sender && !manualRotationUsed)
-                                videoSurface?.ArmOrientationMatch(seekTo);
-                        });
                         sender.PlaybackSession.Position = seekTo;
                     }
-                    else if (!manualRotationUsed)
-                        videoSurface?.ArmOrientationMatch(seekTo);
-                    sender.Play(); playing = true; sync.Start(); UpdateTransport();
+                    if (playRequested) StartPreparedPlayback();
+                    else { sender.Pause(); UpdateTransport(); }
                 }
                 catch (Exception error) { playbackError = error.Message; PlaybackNotice("Video could not play. " + error.Message); }
             });
@@ -532,7 +566,8 @@ internal sealed class DetailView : Grid, IDisposable
                 DispatcherQueue.TryEnqueue(() =>
                 {
                     if (disposed || revision != playbackRevision || video != sender) return;
-                    playbackError = error; PlaybackNotice("Video could not play. " + error);
+                    playbackError = error;
+                    if (playRequested) PlaybackNotice("Video could not play. " + error);
                 });
             };
             player.MediaEnded += (_, _) => DispatcherQueue.TryEnqueue(() =>
@@ -547,7 +582,11 @@ internal sealed class DetailView : Grid, IDisposable
             {
                 if (disposed || revision != playbackRevision || video != player) return;
                 playing = player.PlaybackSession.PlaybackState == MediaPlaybackState.Playing;
-                if (playing) sync.Start();
+                if (playing)
+                {
+                    sync.Start();
+                    if (playRequestedAt != 0) clickToPlaybackMs = System.Diagnostics.Stopwatch.GetElapsedTime(playRequestedAt).TotalMilliseconds;
+                }
                 else { sync.Stop(); foreach (var track in audio) track.Player.Pause(); }
                 UpdateTransport();
             });
@@ -559,8 +598,21 @@ internal sealed class DetailView : Grid, IDisposable
         catch (Exception error)
         {
             if (disposed || revision != playbackRevision) return;
-            playbackError = error.Message; PlaybackNotice("Video could not play. " + error.Message);
+            playbackError = error.Message;
+            if (playRequested) PlaybackNotice("Video could not play. " + error.Message);
         }
+    }
+    void StartPreparedPlayback()
+    {
+        if (video == null || disposed) return;
+        playRequested = true; videoCompleted = false;
+        if (videoSurface?.IsReady == true && videoHost != null)
+        {
+            if (poster != null) { poster.Opacity = 0; poster.IsHitTestVisible = false; }
+            posterVisible = false; FitMedia(); videoHost.Opacity = 1; videoHost.IsHitTestVisible = true;
+            if (playRequestedAt != 0) clickToFirstFrameMs = System.Diagnostics.Stopwatch.GetElapsedTime(playRequestedAt).TotalMilliseconds;
+        }
+        video.Play(); playing = true; sync.Start(); UpdateTransport();
     }
     private static (byte[] Pixels, int Width, int Height) LoadOrientationReference(MemoryStore store, string path)
     {
@@ -638,7 +690,8 @@ internal sealed class DetailView : Grid, IDisposable
     }
     public void Stop()
     {
-        playbackRevision++; playing = false; sync.Stop();
+        playbackRevision++; playing = false; playRequested = false; mediaOpened = false; sync.Stop();
+        videoPreparation = null; preparingSessionId = preparedSessionId = null;
         if (videoSurface != null && videoReadyHandler != null) videoSurface.Ready -= videoReadyHandler;
         videoReadyHandler = null;
         videoSurface?.Dispose(); videoSurface = null;

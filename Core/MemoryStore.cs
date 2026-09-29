@@ -20,11 +20,13 @@ public sealed partial class MemoryStore : IDisposable
     private readonly object gate = new();
     private readonly object mediaGate = new();
     private long archiveRevision;
+    private long usageRevision;
     // This is a process-local generation, not a persisted SQLite change token.
     // Save covers Star/Trash/Restore/Recognition/ReplaceImage; Retain and
     // Cleanup are the direct frame writes. End-time and OCR-only writes do
     // not change ArchiveFrame's projection. Reading never scans the database.
     public long ArchiveRevision => Interlocked.Read(ref archiveRevision);
+    public long UsageRevision => Interlocked.Read(ref usageRevision);
     public void WithMediaLock(Action action)
     {
         lock (mediaGate)
@@ -429,7 +431,11 @@ public sealed partial class MemoryStore : IDisposable
         }
     }
     public List<TranscriptLine> Transcript(string id) => Rows<TranscriptLine>("SELECT json FROM transcripts WHERE session=$p0 ORDER BY time", id);
-    public void SaveUsage(AppInterval interval) => Execute("INSERT OR REPLACE INTO app_usage VALUES($p0,$p1,$p2,$p3)", interval.Id, Seconds(interval.Start), Seconds(interval.End), JsonSerializer.Serialize(interval));
+    public void SaveUsage(AppInterval interval)
+    {
+        Execute("INSERT OR REPLACE INTO app_usage VALUES($p0,$p1,$p2,$p3)", interval.Id, Seconds(interval.Start), Seconds(interval.End), JsonSerializer.Serialize(interval));
+        Interlocked.Increment(ref usageRevision);
+    }
     public List<AppInterval> Usage(DateTimeOffset start, DateTimeOffset end) => Rows<AppInterval>("SELECT json FROM app_usage WHERE end>$p0 AND start<$p1 ORDER BY start", Seconds(start), Seconds(end));
     public void Trash(MemoryFrame f)
     {
