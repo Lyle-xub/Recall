@@ -267,6 +267,8 @@ internal sealed class VisualParitySession
                     window.ValidationSeekArchive(Field("frameId") ?? throw new InvalidDataException("archive-seek requires frameId."));
                 else if (Field("action") == "archive-timeline-show")
                     window.ValidationShowArchiveTimeline();
+                else if (Field("action") == "archive-pointer-top")
+                    window.ValidationMoveArchivePointerToTop();
                 else if (Field("action") == "archive-timeline-commit")
                     await window.ValidationCommitArchiveTimeline(Field("frameId") ?? throw new InvalidDataException("archive-timeline-commit requires frameId."));
                 else window.ValidationAction(Field("action"));
@@ -292,6 +294,16 @@ internal sealed class VisualParitySession
                     { window.ValidationDrag(step); await Task.Delay(16); }
                 }
                 finally { window.ValidationEndDrag(); }
+            }
+            if (request.TryGetProperty("timelineDragSamples", out var timelineDrag))
+            {
+                window.ValidationBeginTimelineDrag();
+                try
+                {
+                    for (var step = 0; step < Math.Clamp(timelineDrag.GetInt32(),0,600); step++)
+                    { window.ValidationTimelineDrag(step); await Task.Delay(16); }
+                }
+                finally { await window.ValidationEndTimelineDrag(); }
             }
             if (measureSeconds > 0) await Task.Delay(TimeSpan.FromSeconds(measureSeconds));
             // Burst evidence defers PNG compression until the transition ends.

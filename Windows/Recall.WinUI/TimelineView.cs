@@ -1,13 +1,13 @@
 using Microsoft.UI.Input;
+using Microsoft.UI.Xaml.Hosting;
 using Windows.System;
 namespace Recall;
 
 internal sealed class TimelineView : Grid
 {
-    readonly AppRuntime runtime; readonly Action<MemoryFrame?> preview; readonly Canvas track = new(); readonly TextBlock label = Design.Text("Now", 14, true), rangeLabel = Design.Text(TimelineMath.Duration(300), 14, true); readonly Border timePill; readonly Button zoomOut, zoomIn, rangeButton; readonly Microsoft.UI.Dispatching.DispatcherQueueTimer timer, settle, interactionRefresh, interactionPreview;
+    readonly AppRuntime runtime; readonly Action<MemoryFrame?> preview; readonly Canvas track = new(), trackContent = new(); readonly Microsoft.UI.Composition.Visual trackContentVisual; readonly TextBlock label = Design.Text("Now", 14, true), rangeLabel = Design.Text(TimelineMath.Duration(300), 14, true); readonly Border timePill; readonly Button zoomOut, zoomIn, rangeButton; readonly Microsoft.UI.Dispatching.DispatcherQueueTimer timer, settle, interactionRefresh;
     public event Action<MemoryFrame?>? Committed;
-    public event Action? InteractionEnded;
-    DateTimeOffset center = DateTimeOffset.Now; double span = 300; bool live = true, dragging, active; double startX; DateTimeOffset startTime; long revision; int commitRevision; bool refreshing, refreshAgain, previewAgain;
+    DateTimeOffset center = DateTimeOffset.Now; double span = 300; bool live = true, dragging, active; double startX, startVisualX, interactionMoveMsTotal, interactionMoveMsMax; DateTimeOffset startTime; long revision, trackRebuilds, interactionStartRebuilds, interactionMoves, interactionQueries; int commitRevision; bool refreshing, refreshAgain, previewAgain;
     readonly LinearGradientBrush tint = new() { StartPoint = new(0, 0), EndPoint = new(0, 1), GradientStops = { new() { Color = Microsoft.UI.Colors.Transparent, Offset = 0 }, new() { Color = Color.FromArgb(20, 255, 255, 255), Offset = 1 } } };
     public TimelineView(AppRuntime runtime, Action<MemoryFrame?> preview)
     {
@@ -18,15 +18,10 @@ internal sealed class TimelineView : Grid
         {
             var date = center; var frame = await Task.Run(() => runtime.Store.At(date));
             if (active && !live && date == center)
-            {
                 Committed?.Invoke(frame);
-                InteractionEnded?.Invoke();
-            }
         };
-        interactionRefresh = DispatcherQueue.CreateTimer(); interactionRefresh.Interval = TimeSpan.FromMilliseconds(55); interactionRefresh.IsRepeating = false;
-        interactionRefresh.Tick += (_, _) => _ = Refresh();
-        interactionPreview = DispatcherQueue.CreateTimer(); interactionPreview.Interval = TimeSpan.FromMilliseconds(180); interactionPreview.IsRepeating = false;
-        interactionPreview.Tick += (_, _) => _ = Refresh(true);
+        interactionRefresh = DispatcherQueue.CreateTimer(); interactionRefresh.Interval = TimeSpan.FromMilliseconds(140); interactionRefresh.IsRepeating = false;
+        interactionRefresh.Tick += (_, _) => _ = CommitInteraction();
         Height = 234; Visibility = Visibility.Collapsed;
         VerticalAlignment = VerticalAlignment.Bottom;
         Children.Add(new DesktopBlur(true));
@@ -35,6 +30,8 @@ internal sealed class TimelineView : Grid
         track.VerticalAlignment = VerticalAlignment.Bottom;
         track.Margin = new(74, 0, 74, 8);
         track.Background = Design.Brush(Microsoft.UI.Colors.Transparent);
+        track.Children.Add(trackContent);
+        trackContentVisual = ElementCompositionPreview.GetElementVisual(trackContent);
         Children.Add(track);
         timePill = Design.Card(label, 22, 12);
         timePill.HorizontalAlignment = HorizontalAlignment.Center;
@@ -73,26 +70,51 @@ internal sealed class TimelineView : Grid
         now.VerticalAlignment = VerticalAlignment.Bottom;
         now.Margin = new(0, 0, 24, 32);
         Children.Add(now);
-        track.PointerPressed += (_, e) => { if (e.Handled) return; dragging = true; live = false; startX = e.GetCurrentPoint(track).Position.X; startTime = center; track.CapturePointer(e.Pointer); e.Handled = true; };
-        track.PointerMoved += (_, e) => { if (!dragging) return; center = startTime.AddSeconds(-(e.GetCurrentPoint(track).Position.X - startX) / Math.Max(1, track.ActualWidth) * span); if (center > DateTimeOffset.Now) center = DateTimeOffset.Now; ScheduleInteraction(); e.Handled = true; };
-        track.PointerReleased += (_, e) => { dragging = false; track.ReleasePointerCaptures(); _ = CommitInteraction(); e.Handled = true; };
+        track.PointerPressed += (_, e) => { if (e.Handled) return; BeginInteraction(e.GetCurrentPoint(track).Position.X); track.CapturePointer(e.Pointer); e.Handled = true; };
+        track.PointerMoved += (_, e) => { if (!dragging) return; MoveInteraction(e.GetCurrentPoint(track).Position.X); e.Handled = true; };
+        track.PointerReleased += (_, e) => { if (dragging) { dragging = false; track.ReleasePointerCaptures(); _ = CommitInteraction(); } e.Handled = true; };
         track.PointerCaptureLost += (_, _) => { if (!dragging) return; dragging = false; _ = CommitInteraction(); };
-        PointerWheelChanged += (_, e) => { var delta = e.GetCurrentPoint(this).Properties.MouseWheelDelta; if ((InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0) Zoom(delta > 0 ? .8 : 1.25); else { live = false; center = center.AddSeconds(-delta / 120.0 * span / 18); if (center > DateTimeOffset.Now) center = DateTimeOffset.Now; ScheduleInteraction(); } e.Handled = true; };
+        PointerWheelChanged += (_, e) =>
+        {
+            var delta = e.GetCurrentPoint(this).Properties.MouseWheelDelta;
+            if ((InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0) Zoom(delta > 0 ? .8 : 1.25);
+            else
+            {
+                live = false;
+                center = center.AddSeconds(-delta / 120.0 * span / 18);
+                if (center > DateTimeOffset.Now) center = DateTimeOffset.Now;
+                SetTrackShift(trackContentVisual.Offset.X + delta / 120.0 * track.ActualWidth / 18);
+                UpdateCenterLabel(center, span, false, updateToolTip: false);
+                ScheduleInteraction();
+            }
+            e.Handled = true;
+        };
         PointerPressed += (_, e) => e.Handled = true;
         SizeChanged += (_, _) => _ = Refresh();
         Loaded += (_, _) => _ = Refresh();
         timer = DispatcherQueue.CreateTimer();
         timer.Interval = TimeSpan.FromSeconds(2);
-        timer.Tick += (_, _) => { if (Visibility != Visibility.Visible) return; if (live) center = DateTimeOffset.Now; _ = Refresh(); };
+        timer.Tick += (_, _) =>
+        {
+            // A historical position is immutable. Re-querying usage and rebuilding
+            // its XAML tree every two seconds wastes the UI thread after scrubbing.
+            if (Visibility != Visibility.Visible || dragging || !live) return;
+            center = DateTimeOffset.Now;
+            _ = Refresh();
+        };
         Loaded += (_, _) => { if (active) timer.Start(); };
-        Unloaded += (_, _) => { timer.Stop(); interactionRefresh.Stop(); interactionPreview.Stop(); };
+        Unloaded += (_, _) => { timer.Stop(); interactionRefresh.Stop(); };
     }
     public bool IsLive => live;
     public bool IsInteracting => dragging;
-    internal object Diagnostics => new { spanSeconds = span, rangeText = rangeLabel.Text, zoomOutEnabled = zoomOut.IsEnabled, zoomInEnabled = zoomIn.IsEnabled, active, live, dragging, center, visible = Visibility == Visibility.Visible };
+    public bool IsActive => active;
+    internal object Diagnostics => new { spanSeconds = span, rangeText = rangeLabel.Text, zoomOutEnabled = zoomOut.IsEnabled, zoomInEnabled = zoomIn.IsEnabled, active, live, dragging, center, visible = Visibility == Visibility.Visible, trackShift = trackContentVisual.Offset.X, trackRebuilds, interactionTrackRebuilds = trackRebuilds-interactionStartRebuilds, interactionMoves, interactionQueries, interactionMoveMsAverage = interactionMoves == 0 ? 0 : interactionMoveMsTotal/interactionMoves, interactionMoveMsMax };
     internal void ValidationZoom(bool zoomIn) => Zoom(zoomIn ? .5 : 2);
     internal void ValidationSelect(MemoryFrame frame) { span = 1800; UpdateRange(); Select(frame); }
     internal Task ValidationCommit(MemoryFrame frame) { Select(frame); return CommitInteraction(); }
+    internal void ValidationBeginDrag() => BeginInteraction(Math.Max(1,track.ActualWidth)/2);
+    internal void ValidationDrag(int step) => MoveInteraction(startX + Math.Sin(step*.12)*Math.Min(280,Math.Max(40,track.ActualWidth*.34)));
+    internal Task ValidationEndDrag() { dragging = false; return CommitInteraction(); }
     int visibilityRevision;
     public void SetActive(bool value)
     {
@@ -106,29 +128,50 @@ internal sealed class TimelineView : Grid
         }
         else
         {
-            timer.Stop(); settle.Stop(); interactionRefresh.Stop(); interactionPreview.Stop(); Interlocked.Increment(ref revision); Interlocked.Increment(ref commitRevision); refreshAgain = previewAgain = false;
+            timer.Stop(); settle.Stop(); interactionRefresh.Stop(); Interlocked.Increment(ref revision); Interlocked.Increment(ref commitRevision); refreshAgain = previewAgain = false; SetTrackShift(0);
             if (!Design.Motion || !IsLoaded) { Visibility = Visibility.Collapsed; return; }
             _ = HideAfterFade(token);
         }
     }
+    void BeginInteraction(double x)
+    {
+        interactionRefresh.Stop(); settle.Stop();
+        Interlocked.Increment(ref revision);
+        interactionStartRebuilds = trackRebuilds;
+        interactionMoves = interactionQueries = 0;
+        interactionMoveMsTotal = interactionMoveMsMax = 0;
+        dragging = true; live = false; startX = x; startVisualX = trackContentVisual.Offset.X; startTime = center;
+    }
+    void MoveInteraction(double x)
+    {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var delta = x-startX;
+        center = startTime.AddSeconds(-delta / Math.Max(1,track.ActualWidth) * span);
+        if (center > DateTimeOffset.Now) center = DateTimeOffset.Now;
+        SetTrackShift(startVisualX + delta);
+        interactionMoves++;
+        UpdateCenterLabel(center,span,false,updateToolTip: false);
+        var elapsed = (System.Diagnostics.Stopwatch.GetTimestamp()-started)*1000.0/System.Diagnostics.Stopwatch.Frequency;
+        interactionMoveMsTotal += elapsed; interactionMoveMsMax = Math.Max(interactionMoveMsMax,elapsed);
+    }
     void ScheduleInteraction()
     {
-        if (!interactionRefresh.IsRunning) interactionRefresh.Start();
-        interactionPreview.Stop(); interactionPreview.Start();
+        interactionRefresh.Stop(); interactionRefresh.Start();
     }
+    void SetTrackShift(double x) => trackContentVisual.Offset = new((float)x,0,0);
     async Task CommitInteraction()
     {
-        interactionRefresh.Stop(); interactionPreview.Stop(); settle.Stop();
+        interactionRefresh.Stop(); settle.Stop();
         var request = Interlocked.Increment(ref commitRevision);
         var date = center;
         // Repaint the ruler independently, but resolve the selected frame on a
         // dedicated path so a slower icon lookup cannot swallow pointer-up.
         _ = Refresh();
+        interactionQueries++;
         var frame = await Task.Run(() => runtime.Store.At(date));
         if (!active || live || request != commitRevision || date != center) return;
         preview(frame);
         Committed?.Invoke(frame);
-        InteractionEnded?.Invoke();
     }
     async Task HideAfterFade(int token)
     {
@@ -210,12 +253,13 @@ internal sealed class TimelineView : Grid
         if (!Current())
             return;
         var colors = intervals.Select((x, i) => (x.Id, entries[i].Color)).ToDictionary(x => x.Id, x => x.Color);
-        track.Children.Clear();
         var width = track.ActualWidth;
         if (width <= 0)
             return;
+        trackContent.Width = width; trackContent.Height = track.ActualHeight;
+        trackContent.Children.Clear(); SetTrackShift(0); trackRebuilds++;
         // A neutral continuous underlay communicates periods without captured app data.
-        track.Children.Add(new Border { Width = width, Height = 8, CornerRadius = new(4), Background = Design.Brush(Color.FromArgb(80, 170, 179, 190)), Margin = new(0, 66, 0, 0) });
+        trackContent.Children.Add(new Border { Width = width, Height = 8, CornerRadius = new(4), Background = Design.Brush(Color.FromArgb(80, 170, 179, 190)), Margin = new(0, 66, 0, 0) });
         foreach (var item in intervals)
         {
             var a = Math.Max(0, (item.Start - start).TotalSeconds / window * width);
@@ -225,7 +269,7 @@ internal sealed class TimelineView : Grid
             var segment = new Border { Width = Math.Max(1, b - a), Height = 8, CornerRadius = new(Math.Min(4, (b - a) / 2)), Background = Design.Brush(colors[item.Id]) };
             Canvas.SetLeft(segment, a);
             Canvas.SetTop(segment, 66);
-            track.Children.Add(segment);
+            trackContent.Children.Add(segment);
         }
         var clusters = new List<(double X, List<AppInterval> Items)>();
         foreach (var item in intervals.Where(i => i.App.Kind == "application"))
@@ -242,7 +286,7 @@ internal sealed class TimelineView : Grid
             var button = Design.Button("", () => { }); button.Content = AppIcons.View(item.App); button.Width = button.Height = 44; button.Padding = new(7); button.CornerRadius = new(14);
             Canvas.SetLeft(button, group.X - 22);
             Canvas.SetTop(button, 48);
-            track.Children.Add(button);
+            trackContent.Children.Add(button);
             ToolTipService.SetToolTip(button, item.App.Name + " · " + item.Start.ToLocalTime().ToString("HH:mm:ss"));
             button.Click += (_, _) => { if (group.Items.Count == 1) { live = false; center = item.Start; _ = Refresh(true); } else OpenCluster(button, group.Items); };
             if (group.Items.Count > 1)
@@ -251,17 +295,22 @@ internal sealed class TimelineView : Grid
                 Canvas.SetLeft(count, group.X + 8);
                 Canvas.SetTop(count, 43);
                 count.IsHitTestVisible = false;
-                track.Children.Add(count);
+                trackContent.Children.Add(count);
             }
         }
-        var ago = DateTimeOffset.Now - date;
-        label.Text = live ? "Now" : ago.TotalSeconds < 60 ? $"{Math.Max(0, (int)ago.TotalSeconds)} seconds ago" : ago.TotalDays < 1 ? $"{(int)ago.TotalMinutes} minutes ago" : date.ToLocalTime().ToString("MMM d · HH:mm");
-        ToolTipService.SetToolTip(timePill, date.ToLocalTime().ToString("f") + " · " + TimelineMath.Duration(window) + " visible");
+        UpdateCenterLabel(date,window,wasLive);
         if (updatePreview)
         {
             var frame = await Task.Run(() => runtime.Store.At(date));
             if (Current()) { preview(frame); settle.Stop(); settle.Start(); }
         }
+    }
+    void UpdateCenterLabel(DateTimeOffset date, double window, bool isLive, bool updateToolTip = true)
+    {
+        var ago = DateTimeOffset.Now-date;
+        var text = isLive ? "Now" : ago.TotalSeconds < 60 ? $"{Math.Max(0,(int)ago.TotalSeconds)} seconds ago" : ago.TotalDays < 1 ? $"{(int)ago.TotalMinutes} minutes ago" : date.ToLocalTime().ToString("MMM d · HH:mm");
+        if (label.Text != text) label.Text = text;
+        if (updateToolTip) ToolTipService.SetToolTip(timePill,date.ToLocalTime().ToString("f") + " · " + TimelineMath.Duration(window) + " visible");
     }
     void OpenCluster(FrameworkElement target, List<AppInterval> items)
     {
