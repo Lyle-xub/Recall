@@ -506,6 +506,7 @@ internal sealed class RhineArchiveView : Grid
                 records = prepared.Frames; day = nextDay; Build(prepared);
                 coldFirstRackMs = (Stopwatch.GetTimestamp()-started)*1000.0/Stopwatch.Frequency;
                 await Task.Yield();
+                await Task.Delay(60,queryToken);
                 archiveQueryCount++;
                 prepared = await Task.Run(() => PrepareArchive(
                     runtime.Store.ArchiveIndex(nextDay,cancellation: queryToken),nextDay,records,queryToken),queryToken);
@@ -730,13 +731,30 @@ internal sealed class RhineArchiveView : Grid
         }
         else
         {
-            ReleaseFrontCopy();
+            ResetPresentation();
             pointerDown = false; pendingDay = null; pendingExtraction = null; seekPreparing = false; ReleasePointerCaptures(); Stop(); imageTimer.Stop(); ++revision; ++seekRevision; imageLoads.Cancel(); archiveQueries.Cancel(); pendingImages.Clear();
             runningRefresh = null; runningRefreshAnchor = null; runningRefreshRevision = 0;
             foreach (var sheet in sheets)
             { sheet.LoadSerial++; sheet.Loading = false; sheet.LoadingEdge = 0;
                 sheet.PendingImage = null; sheet.PendingEdge = 0; }
         }
+    }
+    public void ResetPresentation()
+    {
+        pendingExtraction = null; seekPreparing = false;
+        if (extracted is not { } sheet)
+        {
+            ReleaseFrontCopy(); extraction = new(0); extractTarget = 0;
+            SetExpandedControlsVisible(false); return;
+        }
+        ReleaseFrontCopy();
+        SetFooterRaster(sheet,1,1,false);
+        if (sheet.FocusVisual != null) sheet.FocusVisual.Opacity = 0;
+        RemoveProjectedActions(sheet);
+        sheet.ExpandedAspect = sheet.Aspect;
+        Shape(sheet,535,650);
+        extracted = null; extraction = new(0); extractTarget = 0; orderDirty = true;
+        SetExpandedControlsVisible(false); ExpansionChanged?.Invoke(false); UpdateCaption();
     }
     public void Seek(MemoryFrame frame, bool expand = false)
     {

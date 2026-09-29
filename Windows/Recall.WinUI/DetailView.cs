@@ -19,6 +19,9 @@ internal sealed class DetailView : Grid, IDisposable
     MediaPlayer? video; MediaPlayerElement? videoElement; MediaSource? videoSource; int playbackRevision, rotationSteps; string? playbackError, sourceOrientation; readonly List<(MediaPlayer Player, double Offset)> audio = []; readonly Microsoft.UI.Dispatching.DispatcherQueueTimer sync; List<TranscriptLine> lines = []; bool playing, refreshing, disposed;
     RecordingSession? availableVideoSession; Task? videoPreparation; string? preparingSessionId, preparedSessionId; bool playRequested, mediaOpened;
     long prepareStartedAt, playRequestedAt; double lastPrepareMs, clickToPlaybackMs, clickToFirstFrameMs;
+    bool posterReady;
+    internal event Action? PosterReady;
+    internal bool IsPosterReady => posterReady;
     public DetailView(AppRuntime runtime, MemoryFrame frame, Action<MemoryFrame> open)
     {
         this.runtime = runtime;
@@ -253,16 +256,25 @@ internal sealed class DetailView : Grid, IDisposable
             foreach (var child in visual.Children.ToArray())
                 if (child != poster) visual.Children.Remove(child);
             videoHost = null;
-            poster.Opacity = 1; poster.IsHitTestVisible = true; posterVisible = true; poster.Update(frame); FitMedia(); return;
+            poster.Opacity = 1; poster.IsHitTestVisible = true; posterVisible = true; poster.Update(frame); FitMedia();
+            if (poster.HasImage) SignalPosterReady();
+            return;
         }
         visual.Children.Clear();
         videoHost = null;
         poster = new FrameSurface(runtime.Store, frame, meeting: meetingImage);
+        poster.Presented += _ => SignalPosterReady();
         posterMeetingImage = meetingImage;
         poster.ImageSizeChanged += FitMedia;
         visual.Children.Add(poster);
         posterVisible = true;
         FitMedia();
+    }
+    void SignalPosterReady()
+    {
+        if (posterReady) return;
+        posterReady = true;
+        PosterReady?.Invoke();
     }
     bool posterMeetingImage;
     static Button ActionIcon(string glyph, string label, Action action)
@@ -709,6 +721,6 @@ internal sealed class DetailView : Grid, IDisposable
     public void Dispose()
     {
         if (disposed) return;
-        disposed = true; Stop(); visual.Children.Clear();
+        disposed = true; PosterReady = null; Stop(); visual.Children.Clear();
     }
 }

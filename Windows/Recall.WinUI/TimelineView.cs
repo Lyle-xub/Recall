@@ -10,7 +10,7 @@ internal sealed class TimelineView : Grid
     DateTimeOffset center = DateTimeOffset.Now; double span = 300; bool live = true, dragging, active; double startX, startVisualX, interactionMoveMsTotal, interactionMoveMsMax; DateTimeOffset startTime; long revision, trackRebuilds, interactionStartRebuilds, interactionMoves, interactionQueries; int commitRevision; bool refreshing, refreshAgain, previewAgain;
     DateTimeOffset renderedCenter, refreshingCenter; double renderedSpan, renderedWidth, refreshingSpan, refreshingWidth; bool refreshingLive;
     long renderedUsageRevision = -1, refreshRequests, coalescedRefreshes, usageQueries, cacheHits; long renderedAt;
-    double lastRefreshMs, maxRefreshMs;
+    double lastRefreshMs, maxRefreshMs, lastColorMs;
     readonly LinearGradientBrush tint = new() { StartPoint = new(0, 0), EndPoint = new(0, 1), GradientStops = { new() { Color = Microsoft.UI.Colors.Transparent, Offset = 0 }, new() { Color = Color.FromArgb(20, 255, 255, 255), Offset = 1 } } };
     public TimelineView(AppRuntime runtime, Action<MemoryFrame?> preview)
     {
@@ -124,7 +124,7 @@ internal sealed class TimelineView : Grid
     public bool IsLive => live;
     public bool IsInteracting => dragging;
     public bool IsActive => active;
-    internal object Diagnostics => new { spanSeconds = span, rangeText = rangeLabel.Text, zoomOutEnabled = zoomOut.IsEnabled, zoomInEnabled = zoomIn.IsEnabled, active, live, dragging, center, visible = Visibility == Visibility.Visible, trackShift = trackContentVisual.Offset.X, trackRebuilds, refreshRequests, coalescedRefreshes, usageQueries, cacheHits, lastRefreshMs, maxRefreshMs, renderedUsageRevision, storeUsageRevision = runtime.Store.UsageRevision, interactionTrackRebuilds = trackRebuilds-interactionStartRebuilds, interactionMoves, interactionQueries, interactionMoveMsAverage = interactionMoves == 0 ? 0 : interactionMoveMsTotal/interactionMoves, interactionMoveMsMax };
+    internal object Diagnostics => new { spanSeconds = span, rangeText = rangeLabel.Text, zoomOutEnabled = zoomOut.IsEnabled, zoomInEnabled = zoomIn.IsEnabled, active, live, dragging, center, visible = Visibility == Visibility.Visible, trackShift = trackContentVisual.Offset.X, trackRebuilds, refreshRequests, coalescedRefreshes, usageQueries, cacheHits, lastRefreshMs, maxRefreshMs, lastColorMs, renderedUsageRevision, storeUsageRevision = runtime.Store.UsageRevision, interactionTrackRebuilds = trackRebuilds-interactionStartRebuilds, interactionMoves, interactionQueries, interactionMoveMsAverage = interactionMoves == 0 ? 0 : interactionMoveMsTotal/interactionMoves, interactionMoveMsMax };
     internal void ValidationZoom(bool zoomIn) => Zoom(zoomIn ? .5 : 2);
     internal void ValidationSelect(MemoryFrame frame) { span = 1800; UpdateRange(); Select(frame); }
     internal Task ValidationCommit(MemoryFrame frame) { Select(frame); return CommitInteraction(); }
@@ -285,15 +285,17 @@ internal sealed class TimelineView : Grid
         if (!Current())
             return;
         var identities = intervals.Select(x => x.App).Distinct().ToArray();
-        var entries = await Task.WhenAll(identities.Select(AppIcons.Load));
-        if (!Current())
-            return;
-        var appColors = identities.Select((identity,index) => (identity,entries[index].Color)).ToDictionary(x => x.identity,x => x.Color);
+        var colorTasks = identities.Select(AppIcons.Load).ToArray();
+        // Icon extraction can touch package manifests and the registry. Paint a
+        // complete, interactive track immediately and refine its colors when the
+        // shared icon tasks finish instead of holding the first frame hostage.
+        var appColors = identities.Select((identity,index) => (identity,Color: colorTasks[index].IsCompletedSuccessfully ? colorTasks[index].Result.Color : Design.Muted)).ToDictionary(x => x.identity,x => x.Color);
         var colors = intervals.ToDictionary(x => x.Id,x => appColors[x.App]);
         trackContent.Width = width; trackContent.Height = track.ActualHeight;
         trackContent.Children.Clear(); SetTrackShift(0); trackRebuilds++;
         // A neutral continuous underlay communicates periods without captured app data.
         trackContent.Children.Add(new Border { Width = width, Height = 8, CornerRadius = new(4), Background = Design.Brush(Color.FromArgb(80, 170, 179, 190)), Margin = new(0, 66, 0, 0) });
+        var segments = new Dictionary<string,Border>(intervals.Count,StringComparer.Ordinal);
         foreach (var item in intervals)
         {
             var a = Math.Max(0, (item.Start - start).TotalSeconds / window * width);
@@ -304,6 +306,7 @@ internal sealed class TimelineView : Grid
             Canvas.SetLeft(segment, a);
             Canvas.SetTop(segment, 66);
             trackContent.Children.Add(segment);
+            segments[item.Id] = segment;
         }
         var clusters = new List<(double X, List<AppInterval> Items)>();
         foreach (var item in intervals.Where(i => i.App.Kind == "application"))
@@ -337,11 +340,28 @@ internal sealed class TimelineView : Grid
         renderedUsageRevision = usageRevision; renderedAt = System.Diagnostics.Stopwatch.GetTimestamp();
         lastRefreshMs = (renderedAt-refreshStarted)*1000.0/System.Diagnostics.Stopwatch.Frequency;
         maxRefreshMs = Math.Max(maxRefreshMs,lastRefreshMs);
+        _ = RefineColors(colorTasks,identities,intervals,segments,token,date,window,wasLive,refreshStarted);
         if (updatePreview)
         {
             var frame = await Task.Run(() => runtime.Store.At(date));
             if (Current()) { preview(frame); settle.Stop(); settle.Start(); }
         }
+    }
+    async Task RefineColors(Task<AppIcons.Entry>[] tasks, AppIdentity[] identities,
+        List<AppInterval> intervals, Dictionary<string,Border> segments, long token,
+        DateTimeOffset date, double window, bool wasLive, long refreshStarted)
+    {
+        try
+        {
+            var entries = await Task.WhenAll(tasks);
+            if (!active || token != revision || center != date || span != window || live != wasLive) return;
+            var colors = identities.Select((identity,index) => (identity,entries[index].Color))
+                .ToDictionary(x => x.identity,x => x.Color);
+            foreach (var item in intervals)
+                if (segments.TryGetValue(item.Id,out var segment)) segment.Background = Design.Brush(colors[item.App]);
+            lastColorMs = (System.Diagnostics.Stopwatch.GetTimestamp()-refreshStarted)*1000.0/System.Diagnostics.Stopwatch.Frequency;
+        }
+        catch { /* Missing application metadata keeps the neutral segment color. */ }
     }
     bool CanReuseTrack()
     {

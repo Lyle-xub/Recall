@@ -17,6 +17,7 @@ internal sealed class RecallWindow : Window
     readonly Image desktopScene = new() { Stretch = Stretch.Fill, IsHitTestVisible = false };
     readonly Image desktopBlurScene = new() { Stretch = Stretch.Fill, IsHitTestVisible = false };
     WriteableBitmap? desktopBlurSource, desktopTimelineBlurSource;
+    int desktopSceneRevision;
     readonly RhineArchiveView archive; readonly Button back, topMenu; readonly AccessibilityGrid toolbar = new(); readonly TextBox search = Design.Input("Search anything you’ve seen, said, or heard", height: 72, externalGlass: true); readonly StackPanel actions = new() { Orientation = Orientation.Horizontal, Spacing = 16 };
     readonly TextBlock notice = Design.Text("", 13, color: Design.Muted); readonly Microsoft.UI.Dispatching.DispatcherQueueTimer statusTimer;
     readonly Border noticeHost = new() { CornerRadius = new(16), Padding = new(16, 9, 16, 9), MaxWidth = 680, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Top, IsHitTestVisible = false };
@@ -25,7 +26,7 @@ internal sealed class RecallWindow : Window
     Microsoft.UI.Dispatching.DispatcherQueueTimer? toolbarTimer;
     (double Width, double Height, double Top, double Actions) toolbarTarget;
     double archiveSafeTop, archiveSafeBottom;
-    CancellationTokenSource? queryCancellation; DetailView? detail; bool expanded, quitting; string mode = "home"; string? appFilter; bool starred, trash; MemoryFrame? selected; string? lastSearchSignature; DateTimeOffset? searchSince;
+    CancellationTokenSource? queryCancellation; DetailView? detail; DetailView? transitioningDetail; int detailTransitionRevision; bool expanded, quitting; string mode = "home"; string? appFilter; bool starred, trash; MemoryFrame? selected; string? lastSearchSignature; DateTimeOffset? searchSince;
     public bool IsShown
     {
         get; private set;
@@ -105,7 +106,7 @@ internal sealed class RecallWindow : Window
     }
     bool materialDesktop, nativeBackdropActive;
     long layoutUpdates, backdropUpdates;
-    double maxBackdropMs;
+    double maxBackdropMs, lastDesktopSnapshotMs, lastDesktopCaptureMs;
     Microsoft.UI.Dispatching.DispatcherQueueTimer? backdropLayoutTimer;
     void QueueBackdrop()
     {
@@ -184,57 +185,75 @@ internal sealed class RecallWindow : Window
         // Capture only while Recall is hidden. The bitmap is transient and
         // supplies the real desktop texture to LiquidGlassWinUI's in-window
         // shader; it is never persisted, indexed or sent to a model.
+        var started = Stopwatch.GetTimestamp();
+        var revision = ++desktopSceneRevision;
+        System.Drawing.Bitmap? bitmap = null;
         try
         {
             var bounds = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position).WorkingArea;
-            using var bitmap = new System.Drawing.Bitmap(bounds.Width, bounds.Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+            bitmap = new System.Drawing.Bitmap(bounds.Width, bounds.Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
             using (var graphics = System.Drawing.Graphics.FromImage(bitmap))
                 graphics.CopyFromScreen(bounds.Location, System.Drawing.Point.Empty, bounds.Size);
-            desktopScene.Source = BitmapSource(bitmap);
-            using var blurred = BlurDesktop(bitmap);
-            desktopBlurSource = BitmapSource(blurred);
-            desktopTimelineBlurSource = BitmapSource(blurred, timelineMask: true);
-            desktopBlurScene.Source = desktopBlurSource;
+            lastDesktopSnapshotMs = (Stopwatch.GetTimestamp()-started)*1000.0/Stopwatch.Frequency;
+            _ = PrepareDesktopScene(bitmap,bounds.Width,bounds.Height,revision,started);
+            bitmap = null;
         }
         catch (Exception error) when (error is System.Runtime.InteropServices.ExternalException or ArgumentException or OutOfMemoryException)
         {
+            bitmap?.Dispose();
             desktopScene.Source = null;
             desktopBlurScene.Source = null;
             desktopBlurSource = desktopTimelineBlurSource = null;
         }
     }
+    async Task PrepareDesktopScene(System.Drawing.Bitmap bitmap, int width, int height, int revision, long started)
+    {
+        try
+        {
+            var textures = await Task.Run(() =>
+            {
+                using (bitmap)
+                using (var scene = ResizeDesktop(bitmap,Math.Max(1,width/2),Math.Max(1,height/2)))
+                using (var blurred = BlurDesktop(bitmap))
+                    return (Scene: BitmapPixels(scene), Blur: BitmapPixels(blurred), Timeline: BitmapPixels(blurred,true));
+            });
+            if (!IsShown || revision != desktopSceneRevision) return;
+            desktopScene.Source = BitmapSource(textures.Scene);
+            desktopBlurSource = BitmapSource(textures.Blur);
+            desktopTimelineBlurSource = BitmapSource(textures.Timeline);
+            desktopBlurScene.Source = mode == "home" && !runtime.Settings.RhineLabMode ? desktopTimelineBlurSource : desktopBlurSource;
+            lastDesktopCaptureMs = (Stopwatch.GetTimestamp()-started)*1000.0/Stopwatch.Frequency;
+            ConfigureNativeBackdrop();
+        }
+        catch (Exception error) when (error is System.Runtime.InteropServices.ExternalException or ArgumentException or OutOfMemoryException)
+        {
+            bitmap.Dispose();
+        }
+    }
     static System.Drawing.Bitmap BlurDesktop(System.Drawing.Bitmap source)
     {
-        // Produce one stable blurred texture while the overlay is hidden. This
-        // restores page blur without a full-screen per-frame shader and prevents
-        // stale pixels when a Rhine card moves away from a glass control.
-        const int factor = 18;
+        // A deliberately low-frequency texture is the blur. Keep it small and
+        // let the compositor stretch it instead of upscaling it on the UI thread
+        // and then uploading millions of indistinguishable pixels.
+        const int factor = 10;
         var smallWidth = Math.Max(1, source.Width / factor);
         var smallHeight = Math.Max(1, source.Height / factor);
-        using var small = new System.Drawing.Bitmap(smallWidth, smallHeight, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
-        using (var graphics = System.Drawing.Graphics.FromImage(small))
-        {
-            graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
-            graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
-            graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-            graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
-            graphics.DrawImage(source, new System.Drawing.Rectangle(0, 0, smallWidth, smallHeight));
-        }
-        // The texture is already deliberately low-frequency. Keeping it at the
-        // window's usual logical resolution halves upload dimensions on a 200%
-        // display without changing the visible blur.
-        var result = new System.Drawing.Bitmap(Math.Max(1, source.Width / 2), Math.Max(1, source.Height / 2), System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+        return ResizeDesktop(source,smallWidth,smallHeight);
+    }
+    static System.Drawing.Bitmap ResizeDesktop(System.Drawing.Bitmap source, int width, int height)
+    {
+        var result = new System.Drawing.Bitmap(width,height,System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
         using (var graphics = System.Drawing.Graphics.FromImage(result))
         {
             graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
-            graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
-            graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-            graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
-            graphics.DrawImage(small, new System.Drawing.Rectangle(0, 0, result.Width, result.Height));
+            graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighSpeed;
+            graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBilinear;
+            graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighSpeed;
+            graphics.DrawImage(source,new System.Drawing.Rectangle(0,0,width,height));
         }
         return result;
     }
-    static WriteableBitmap BitmapSource(System.Drawing.Bitmap bitmap, bool timelineMask = false)
+    static (byte[] Pixels,int Width,int Height) BitmapPixels(System.Drawing.Bitmap bitmap, bool timelineMask = false)
     {
         var area = new System.Drawing.Rectangle(0, 0, bitmap.Width, bitmap.Height);
         var locked = bitmap.LockBits(area, System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
@@ -265,8 +284,12 @@ internal sealed class RecallWindow : Window
                 }
         }
         finally { bitmap.UnlockBits(locked); }
-        var scene = new WriteableBitmap(bitmap.Width, bitmap.Height);
-        using (var stream = scene.PixelBuffer.AsStream()) stream.Write(pixels);
+        return (pixels,bitmap.Width,bitmap.Height);
+    }
+    static WriteableBitmap BitmapSource((byte[] Pixels,int Width,int Height) source)
+    {
+        var scene = new WriteableBitmap(source.Width,source.Height);
+        using (var stream = scene.PixelBuffer.AsStream()) stream.Write(source.Pixels);
         scene.Invalidate();
         return scene;
     }
@@ -313,6 +336,7 @@ internal sealed class RecallWindow : Window
             }
             finally { shell.Hide(); }
             root.Opacity = 0;
+            desktopSceneRevision++;
             desktopScene.Source = null;
             desktopBlurScene.Source = null;
             desktopBlurSource = desktopTimelineBlurSource = null;
@@ -558,6 +582,10 @@ internal sealed class RecallWindow : Window
         if (!IsShown)
             Show();
         DismissPopups();
+        var connectedDetail = target == "detail" && mode != "detail" && selected != null && IsShown && page.Children.Count != 0
+            ? page.Children.OfType<FrameworkElement>().ToArray() : null;
+        detailTransitionRevision++;
+        transitioningDetail = null;
         detail?.Dispose();
         detail = null;
         queryCancellation?.Cancel();
@@ -567,7 +595,7 @@ internal sealed class RecallWindow : Window
             Expand();
         else if (!runtime.Settings.RhineLabMode)
             Collapse();
-        Compose();
+        Compose(connectedDetail);
         if (target == "home")
         {
             var previousFrame = selected;
@@ -612,7 +640,7 @@ internal sealed class RecallWindow : Window
         if (root.XamlRoot is not { } xamlRoot) return;
         foreach (var popup in VisualTreeHelper.GetOpenPopupsForXamlRoot(xamlRoot).ToArray()) popup.IsOpen = false;
     }
-    void Compose()
+    void Compose(FrameworkElement[]? connectedDetail = null)
     {
         // Keep the native editor attached across navigation and composition.
         // Reparenting a focused TextBox destroys the IME surface and flashes it.
@@ -622,7 +650,7 @@ internal sealed class RecallWindow : Window
             root.Children.Add(timeline); root.Children.Add(toolbar);
             root.Children.Add(back); root.Children.Add(archiveClose); root.Children.Add(noticeHost); root.Children.Add(topMenu);
         }
-        if (page.Children.Count != 0) page.Children.Clear();
+        if (connectedDetail == null && page.Children.Count != 0) page.Children.Clear();
         var night = runtime.Settings.DarkAppearance;
         if (Design.Dark != night) Design.SetDark(night);
         var theme = night ? ElementTheme.Dark : ElementTheme.Light;
@@ -643,7 +671,19 @@ internal sealed class RecallWindow : Window
         {
             case "onboarding": page.Children.Add(new OnboardingView(runtime, () => Navigate("home"))); break;
             case "search": _ = Search(); break;
-            case "detail": if (selected != null) { detail = new(runtime, selected, OpenFrame); Place(detail); } break;
+            case "detail":
+                if (selected != null)
+                {
+                    detail = new(runtime, selected, OpenFrame);
+                    if (connectedDetail is { Length: > 0 })
+                    {
+                        detail.Opacity = 0;
+                        Place(detail,animate: false);
+                        StartDetailTransition(detail,connectedDetail);
+                    }
+                    else Place(detail);
+                }
+                break;
             case "ask":
                 Place(new AskView(runtime, OpenFrame, () => (appFilter, searchSince),
                     () => { appFilter = null; searchSince = null; },
@@ -766,7 +806,7 @@ internal sealed class RecallWindow : Window
             safeArea = new { top = archiveSafeTop, bottom = root.ActualHeight - archiveSafeBottom,
                 left = 0d, right = root.ActualWidth } };
     }
-    internal object ValidationDiagnostics => new { shown = IsShown, buttons = actions.Children.OfType<FrameworkElement>().Select(x => new { label = Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(x), bounds = x.TransformToVisual(root).TransformBounds(new Rect(0,0,x.ActualWidth,x.ActualHeight)).ToString(), offset = x.ActualOffset.ToString(), opacity = x.Opacity, hitTestVisible = x.IsHitTestVisible }).ToArray(), mode, query = search.Text, appFilter, motion = new { enabled = Design.Motion, expanded, toolbarAnimating = toolbarTimer?.IsRunning ?? false, searchWidth = search.ActualWidth, targetWidth = toolbarTarget.Width }, chrome = ChromeDiagnostics(), uiThread = new { layoutUpdates, backdropUpdates, maxBackdropMs }, recording = new { state = runtime.Recording.State, fake = runtime.ValidationCaptureDiagnostics }, native = shell.Diagnostics, glass = GlassMaterial.Diagnostics, popupGlass = PopupGlassBackdrop.Diagnostics, popupTree = Design.PopupDiagnostics, backdrop = backdrop.Diagnostics, rhine = archive.Diagnostics, timeline = timeline.Diagnostics, preview = page.Children.OfType<TimelinePreviewView>().FirstOrDefault()?.Diagnostics(root), notice = new { visible = noticeHost.Visibility == Visibility.Visible, bounds = noticeHost.TransformToVisual(root).TransformBounds(new Rect(0, 0, noticeHost.ActualWidth, noticeHost.ActualHeight)) }, settings = page.Children.OfType<SettingsView>().FirstOrDefault()?.Diagnostics, media = detail?.Diagnostics, imageCache = MemoryImages.Diagnostics, ask = page.Children.OfType<AskView>().FirstOrDefault()?.Diagnostics };
+    internal object ValidationDiagnostics => new { shown = IsShown, buttons = actions.Children.OfType<FrameworkElement>().Select(x => new { label = Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(x), bounds = x.TransformToVisual(root).TransformBounds(new Rect(0,0,x.ActualWidth,x.ActualHeight)).ToString(), offset = x.ActualOffset.ToString(), opacity = x.Opacity, hitTestVisible = x.IsHitTestVisible }).ToArray(), mode, query = search.Text, appFilter, motion = new { enabled = Design.Motion, expanded, toolbarAnimating = toolbarTimer?.IsRunning ?? false, detailTransitioning = transitioningDetail != null, searchWidth = search.ActualWidth, targetWidth = toolbarTarget.Width }, chrome = ChromeDiagnostics(), uiThread = new { layoutUpdates, backdropUpdates, maxBackdropMs, lastDesktopSnapshotMs, lastDesktopCaptureMs }, recording = new { state = runtime.Recording.State, fake = runtime.ValidationCaptureDiagnostics }, native = shell.Diagnostics, glass = GlassMaterial.Diagnostics, popupGlass = PopupGlassBackdrop.Diagnostics, popupTree = Design.PopupDiagnostics, backdrop = backdrop.Diagnostics, rhine = archive.Diagnostics, timeline = timeline.Diagnostics, preview = page.Children.OfType<TimelinePreviewView>().FirstOrDefault()?.Diagnostics(root), notice = new { visible = noticeHost.Visibility == Visibility.Visible, bounds = noticeHost.TransformToVisual(root).TransformBounds(new Rect(0, 0, noticeHost.ActualWidth, noticeHost.ActualHeight)) }, settings = page.Children.OfType<SettingsView>().FirstOrDefault()?.Diagnostics, media = detail?.Diagnostics, imageCache = MemoryImages.Diagnostics, ask = page.Children.OfType<AskView>().FirstOrDefault()?.Diagnostics };
     internal object? ValidationPreviewDiagnostics => page.Children.OfType<TimelinePreviewView>().FirstOrDefault()?.Diagnostics(root);
     internal object? ValidationMediaDiagnostics => detail?.Diagnostics;
     internal object ValidationArchiveDiagnostics => archive.Diagnostics;
@@ -844,13 +884,52 @@ internal sealed class RecallWindow : Window
         timeline.Select(frame);
         Preview(frame);
     }
-    void Place(FrameworkElement element)
+    void Place(FrameworkElement element, bool animate = true)
     {
         element.Margin = mode is "settings" or "usage" ? new(40, 8, 40, 8)
             : mode == "detail" ? new(28, 116, 28, 20) : new(42, 120, 42, 36);
         page.Children.Add(element);
         element.PointerPressed += (_, e) => e.Handled = true;
-        Design.Spring(element, 12, .99f);
+        if (animate) Design.Spring(element, 12, .99f);
+    }
+    void StartDetailTransition(DetailView target, FrameworkElement[] previous)
+    {
+        var revision = ++detailTransitionRevision;
+        transitioningDetail = target;
+        Action ready = null!;
+        ready = () =>
+        {
+            target.PosterReady -= ready;
+            BeginDetailTransition(target,previous,revision);
+        };
+        target.PosterReady += ready;
+        if (target.IsPosterReady) ready();
+        else _ = DetailTransitionTimeout(target,previous,revision,ready);
+    }
+    async Task DetailTransitionTimeout(DetailView target, FrameworkElement[] previous, int revision, Action ready)
+    {
+        await Task.Delay(280);
+        target.PosterReady -= ready;
+        BeginDetailTransition(target,previous,revision);
+    }
+    void BeginDetailTransition(DetailView target, FrameworkElement[] previous, int revision)
+    {
+        if (transitioningDetail != target || revision != detailTransitionRevision || detail != target || mode != "detail") return;
+        transitioningDetail = null;
+        // Keep the selected image beneath the destination until its poster is
+        // decoded. The opposing scale/vertical motion reads as one surface
+        // moving forward instead of a fade through the white desktop layer.
+        Design.Spring(target,24,.965f,response:.44,damping:.82);
+        foreach (var item in previous)
+            _ = LiquidMotion.Disappear(item,-18,.3,.88,190);
+        _ = RemoveTransitionSources(previous,target,revision);
+    }
+    async Task RemoveTransitionSources(FrameworkElement[] previous, DetailView target, int revision)
+    {
+        await Task.Delay(190);
+        if (revision != detailTransitionRevision || detail != target) return;
+        foreach (var item in previous)
+            if (page.Children.Contains(item)) page.Children.Remove(item);
     }
     async void UpdateStatus()
     {
