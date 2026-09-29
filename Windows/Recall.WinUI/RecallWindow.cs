@@ -76,8 +76,9 @@ internal sealed class RecallWindow : Window
         {
             if (open) archive.Focus(FocusState.Programmatic);
             SetToolbarVisible(mode is not ("settings" or "onboarding" or "usage"));
-            archiveClose.Visibility = Visibility.Visible;
-            topMenu.Visibility = Visibility.Visible;
+            archiveClose.Visibility = mode == "home" && runtime.Settings.RhineLabMode
+                ? Visibility.Visible : Visibility.Collapsed;
+            topMenu.Visibility = mode == "onboarding" ? Visibility.Collapsed : Visibility.Visible;
             archiveClose.Content = Design.Symbol(open ? "\uE72B" : "\uE711");
             AutomationProperties.SetName(archiveClose, open ? "Back to archive" : "Close Recall");
             StyleArchiveGlyph(archiveClose, 16);
@@ -597,9 +598,13 @@ internal sealed class RecallWindow : Window
         var connectedDetail = target == "detail" && mode != "detail" && selected != null && IsShown &&
             (page.Children.Count != 0 || connectedArchive)
             ? page.Children.OfType<FrameworkElement>().ToArray() : null;
+        var outgoing = target != "detail" && mode != target && page.Children.Count != 0
+            ? page.Children.OfType<FrameworkElement>().ToArray() : null;
+        var outgoingDetail = outgoing == null ? null : detail;
         detailTransitionRevision++;
         transitioningDetail = null;
-        detail?.Dispose();
+        if (outgoingDetail != null) outgoingDetail.PrepareForExit();
+        else detail?.Dispose();
         detail = null;
         queryCancellation?.Cancel();
         mode = target;
@@ -608,15 +613,39 @@ internal sealed class RecallWindow : Window
             Expand();
         else if (!runtime.Settings.RhineLabMode)
             Collapse();
-        Compose(connectedDetail,connectedArchive);
+        Compose(connectedDetail ?? outgoing,connectedArchive);
+        if (outgoing != null) StartPageExit(outgoing,outgoingDetail);
+        else if (target == "detail" && connectedDetail == null) QueueChromeGlassRefresh();
         if (target == "home")
         {
             var previousFrame = selected;
             selected = null;
-            Preview(previousFrame);
+            if (outgoing != null) _ = PreviewAfterPageExit(previousFrame);
+            else Preview(previousFrame);
         }
         // Apply the page's full or local desktop mask in this navigation turn.
         Backdrop();
+    }
+    void StartPageExit(FrameworkElement[] outgoing, DetailView? outgoingDetail)
+    {
+        foreach (var item in outgoing)
+        {
+            item.IsHitTestVisible = false;
+            _ = LiquidMotion.Disappear(item,14,.28,.9,170);
+        }
+        _ = RemoveExitedPage(outgoing,outgoingDetail);
+    }
+    async Task RemoveExitedPage(FrameworkElement[] outgoing, DetailView? outgoingDetail)
+    {
+        await Task.Delay(170);
+        foreach (var item in outgoing)
+            if (page.Children.Contains(item)) page.Children.Remove(item);
+        outgoingDetail?.Dispose();
+    }
+    async Task PreviewAfterPageExit(MemoryFrame? frame)
+    {
+        await Task.Delay(175);
+        if (mode == "home" && IsShown) Preview(frame);
     }
     void LayoutNotice()
     {
@@ -945,6 +974,25 @@ internal sealed class RecallWindow : Window
         foreach (var item in previous)
             if (page.Children.Contains(item)) page.Children.Remove(item);
         if (connectedArchive) archive.SetActive(false);
+        QueueChromeGlassRefresh();
+    }
+    void QueueChromeGlassRefresh()
+    {
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            if (!IsShown || mode != "detail") return;
+            // A retained Rhine surface changes the sampled visual tree after the
+            // page transition. Recreate the small toolbar graphs in one UI turn
+            // so none keeps a stale or disconnected backdrop source.
+            LayoutToolbar(immediate: true);
+            foreach (var surface in actions.Children.OfType<FrameworkElement>()
+                         .Concat(new FrameworkElement[] { searchGlass, back, topMenu }))
+            {
+                GlassMaterial.SetEnabled(surface,false);
+                GlassMaterial.SetEnabled(surface,true);
+            }
+            Backdrop();
+        });
     }
     async void UpdateStatus()
     {

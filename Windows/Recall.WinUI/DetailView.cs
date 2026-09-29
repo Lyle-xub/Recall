@@ -244,7 +244,10 @@ internal sealed class DetailView : Grid, IDisposable
         var availableWidth = mediaViewport.ActualWidth;
         var availableHeight = mediaViewport.ActualHeight;
         if (availableWidth <= 0 || availableHeight <= 0) return;
-        var aspect = videoSurface?.IsReady == true && !posterVisible ? videoSurface.DisplayAspect : poster?.ImageAspect ?? 1.6;
+        // Keep the shell at the recorded still's geometry. Switching from the
+        // still's 16:10 ratio to a decoder's 16:9 metadata made the whole card
+        // visibly stretch during the first playback frame.
+        var aspect = poster?.ImageAspect ?? (videoSurface?.IsReady == true ? videoSurface.DisplayAspect : 1.6);
         if (!double.IsFinite(aspect) || aspect <= 0) aspect = 1.6;
         mediaShell.Width = Math.Max(1, Math.Min(availableWidth, availableHeight * aspect));
         mediaShell.Height = Math.Max(1, mediaShell.Width / aspect);
@@ -533,12 +536,7 @@ internal sealed class DetailView : Grid, IDisposable
                 if (disposed || revision != playbackRevision || video != player || videoSurface != surface || videoHost != host || videoCompleted || !playRequested) return;
                 var playback = player.PlaybackSession;
                 if (playback.NaturalDuration > TimeSpan.Zero && playback.Position >= playback.NaturalDuration) return;
-                // The still remains on screen until the corrected first video frame exists.
-                if (poster != null) { poster.Opacity = 0; poster.IsHitTestVisible = false; }
-                posterVisible = false;
-                FitMedia();
-                host.Opacity = 1; host.IsHitTestVisible = true;
-                if (playRequestedAt != 0) clickToFirstFrameMs = System.Diagnostics.Stopwatch.GetElapsedTime(playRequestedAt).TotalMilliseconds;
+                RevealVideo(host,surface,revision);
             };
             surface.Ready += videoReadyHandler;
             host.Children.Add(surface);
@@ -621,12 +619,25 @@ internal sealed class DetailView : Grid, IDisposable
         if (video == null || disposed) return;
         playRequested = true; videoCompleted = false;
         if (videoSurface?.IsReady == true && videoHost != null)
-        {
-            if (poster != null) { poster.Opacity = 0; poster.IsHitTestVisible = false; }
-            posterVisible = false; FitMedia(); videoHost.Opacity = 1; videoHost.IsHitTestVisible = true;
-            if (playRequestedAt != 0) clickToFirstFrameMs = System.Diagnostics.Stopwatch.GetElapsedTime(playRequestedAt).TotalMilliseconds;
-        }
+            RevealVideo(videoHost,videoSurface,playbackRevision);
         video.Play(); playing = true; sync.Start(); UpdateTransport();
+    }
+    void RevealVideo(Grid host, VideoSurface surface, int revision)
+    {
+        if (disposed || revision != playbackRevision || videoHost != host || videoSurface != surface || !posterVisible) return;
+        // Cross the corrected video frame over the still without changing the
+        // media shell's bounds. This avoids a one-frame stretch before play.
+        posterVisible = false;
+        FitMedia();
+        host.IsHitTestVisible = true;
+        Design.Spring(host,0,1,response:.28,damping:.94);
+        if (poster != null)
+        {
+            poster.IsHitTestVisible = false;
+            _ = LiquidMotion.Disappear(poster,0,.24,.94,150);
+        }
+        if (playRequestedAt != 0)
+            clickToFirstFrameMs = System.Diagnostics.Stopwatch.GetElapsedTime(playRequestedAt).TotalMilliseconds;
     }
     private static (byte[] Pixels, int Width, int Height) LoadOrientationReference(MemoryStore store, string path)
     {
@@ -704,6 +715,7 @@ internal sealed class DetailView : Grid, IDisposable
     }
     public void Stop()
     {
+        LiquidMotion.Cancel(visual);
         playbackRevision++; playing = false; playRequested = false; mediaOpened = false; sync.Stop();
         videoPreparation = null; preparingSessionId = preparedSessionId = null;
         if (videoSurface != null && videoReadyHandler != null) videoSurface.Ready -= videoReadyHandler;
@@ -719,6 +731,13 @@ internal sealed class DetailView : Grid, IDisposable
         videoHost = null;
         seekSlider = null; currentTime = totalTime = null; pauseButton = speedButton = null; renderedPlaying = null; lastSeekInputTicks = 0;
         if (poster != null && visual.Children.Contains(poster)) { poster.Opacity = 1; poster.IsHitTestVisible = true; posterVisible = true; FitMedia(); }
+    }
+    internal void PrepareForExit()
+    {
+        IsHitTestVisible = false;
+        playRequested = false; playing = false; sync.Stop();
+        video?.Pause();
+        foreach (var track in audio) track.Player.Pause();
     }
     public void Dispose()
     {
