@@ -137,6 +137,7 @@ internal sealed class RhineArchiveView : Grid
     bool expandedControlsShown;
     bool extractedButtonsEnabled;
     bool ticking, active, reduced, timeline, seekPreparing;
+    internal bool IsActive => active;
     float expandedTopInset, expandedBottomInset;
     Sheet? hovered, extracted, frontCopy;
     DateTime day;

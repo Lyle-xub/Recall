@@ -133,5 +133,7 @@ internal sealed class App : Application, Microsoft.UI.Xaml.Markup.IXamlMetadataP
         }
         if (!arguments.Contains("--background") && !arguments.Contains("--cli-service"))
             CurrentWindow.Show();
+        else
+            CurrentWindow.PrimeHiddenState();
     }
 }

@@ -262,7 +262,9 @@ internal sealed class DetailView : Grid, IDisposable
         }
         visual.Children.Clear();
         videoHost = null;
-        poster = new FrameSurface(runtime.Store, frame, meeting: meetingImage);
+        // Rhine already decodes expanded cards at this size. Reusing that cache
+        // avoids a second full-resolution decode while entering the video page.
+        poster = new FrameSurface(runtime.Store, frame, meeting: meetingImage, imageEdge: 1200);
         poster.Presented += _ => SignalPosterReady();
         posterMeetingImage = meetingImage;
         poster.ImageSizeChanged += FitMedia;

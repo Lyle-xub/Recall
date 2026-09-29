@@ -6,7 +6,7 @@ namespace Recall;
 
 internal sealed class FrameSurface : Grid
 {
-    MemoryFrame frame; readonly MemoryStore store; readonly Image image = new() { Stretch = Stretch.Uniform }; readonly Canvas selection = new() { IsHitTestVisible = false }; BitmapImage? bitmap;
+    MemoryFrame frame; readonly MemoryStore store; readonly int imageEdge; readonly Image image = new() { Stretch = Stretch.Uniform }; readonly Canvas selection = new() { IsHitTestVisible = false }; BitmapImage? bitmap;
     readonly LatestPreviewLoad<(MemoryFrame Frame, BitmapImage Bitmap)> imageRequests = new();
     MemoryFrame? requested;
     (int Line, int Character)? anchor, focus; bool dragging; readonly bool meeting;
@@ -18,10 +18,11 @@ internal sealed class FrameSurface : Grid
     public bool HasImage => bitmap != null;
     public string? LoadError { get; private set; }
     public double ImageAspect => bitmap?.PixelHeight > 0 ? (double)bitmap.PixelWidth / bitmap.PixelHeight : 16.0 / 10;
-    public FrameSurface(MemoryStore store, MemoryFrame frame, bool meeting = false)
+    public FrameSurface(MemoryStore store, MemoryFrame frame, bool meeting = false, int imageEdge = 0)
     {
         this.store = store;
         this.meeting = meeting;
+        this.imageEdge = imageEdge;
         frame = Display(frame);
         this.frame = frame;
         Background = Design.Brush(Design.Dark ? Color.FromArgb(255, 37, 40, 47) : Color.FromArgb(255, 225, 229, 235));
@@ -89,14 +90,14 @@ internal sealed class FrameSurface : Grid
         LoadError = null;
         _ = imageRequests.Request(async cancellation =>
         {
-            try { return (target, await MemoryImages.Load(store, target.ImagePath, 0, cancellation)); }
+            try { return (target, await MemoryImages.Load(store, target.ImagePath, imageEdge, cancellation)); }
             catch (Exception) when (!cancellation.IsCancellationRequested)
             {
                 // Capture may finish writing a newer image path while this one is decoding.
                 var latest = await Task.Run(() => store.Frame(target.Id), cancellation);
                 if (latest == null || latest.ImagePath == target.ImagePath) throw;
                 latest = Display(latest);
-                return (latest, await MemoryImages.Load(store, latest.ImagePath, 0, cancellation));
+                return (latest, await MemoryImages.Load(store, latest.ImagePath, imageEdge, cancellation));
             }
         }, loaded =>
         {
