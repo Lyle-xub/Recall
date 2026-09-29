@@ -280,6 +280,15 @@ internal sealed class VisualParitySession
             var elapsed = Stopwatch.StartNew();
             if (request.TryGetProperty("motionSamples", out var motion))
                 for (var step = 0; step < Math.Clamp(motion.GetInt32(), 0, 120); step++) { window.ValidationRetarget(step); await Task.Delay(250); }
+            if (request.TryGetProperty("dragSamples", out var drag))
+            {
+                try
+                {
+                    for (var step = 0; step < Math.Clamp(drag.GetInt32(), 0, 600); step++)
+                    { window.ValidationDrag(step); await Task.Delay(16); }
+                }
+                finally { window.ValidationEndDrag(); }
+            }
             if (measureSeconds > 0) await Task.Delay(TimeSpan.FromSeconds(measureSeconds));
             // Burst evidence defers PNG compression until the transition ends.
             // This reduces capture gaps; it still is not a GPU frame-time probe.

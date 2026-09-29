@@ -78,6 +78,8 @@ internal sealed class RhineArchiveView : Grid
     readonly AppRuntime runtime;
     readonly Action<MemoryFrame> rewind;
     readonly DecorativeWall wall = new() { IsHitTestVisible = false };
+    readonly Visual wallVisual;
+    Vector3 appliedWallOffset;
     readonly List<Sheet> sheets = [];
     readonly List<Sheet> drawOrder = [];
     readonly Dictionary<int, DayTag> dayTags = [];
@@ -117,13 +119,14 @@ internal sealed class RhineArchiveView : Grid
     readonly Button starAction;
     readonly Button[] extractedActionButtons;
     readonly TextBlock dayText = Design.Text("", 13, true);
-    RhineSpring dragX = new(0), dragY = new(0); double dragTargetX, dragTargetY, dragOriginX, dragOriginY; Point pressPoint; bool pointerDown, didDrag;
+    RhineSpring dragX = new(0), dragY = new(0); double dragTargetX, dragTargetY, dragOriginX, dragOriginY;
+    double lastViewportDragX, lastViewportDragY; Point pressPoint; bool pointerDown, didDrag, viewportDirty;
     RhineSpring crest = new(0), across = new(0), pan = new(0);
     RhineTransition extraction = new(0);
     double crestTarget, acrossTarget, panTarget, extractTarget;
     long previous, transitionStarted;
     double lastTransitionMs, transitionMaxUpdateMs, transitionMaxIntervalMs;
-    int transitionFrames, transitionSlowFrames, matrixWrites, imageRequests;
+    int transitionFrames, transitionSlowFrames, matrixWrites, wallOffsetWrites, imageRequests;
     string transitionDirection = "none";
     bool orderDirty = true;
     bool expandedControlsShown;
@@ -153,7 +156,7 @@ internal sealed class RhineArchiveView : Grid
     string collectionSummary = "";
     long buildEndedAt;
     double lastQueryMs, lastBuildMs, maxBuildMs, lastReconcileMs, firstImageMs, imageLoadTotalMs, maxImageLoadMs;
-    internal object Diagnostics => new { motionProfile = new { transitionDirection, lastTransitionMs, transitionFrames, transitionSlowFrames, transitionMaxUpdateMs, transitionMaxIntervalMs, transitionMaxQueueMs, transitionMaxClockIntervalMs, transitionClockTicks, framePending = Volatile.Read(ref frameQueued) != 0, matrixWrites, imageRequests, imagePumpRunning = imageTimer.IsRunning }, startup = new { builds, incrementalUpdates = reconciles, reusedSheets = lastReusedSheets, reusedImages = lastReusedImages, cacheHits = refreshCacheHits, queryCount = archiveQueryCount, lastReconcileMs, lastQueryMs, lastBuildMs, maxBuildMs, sheetCount = sheets.Count, evictedSheets, releasedImages, retainedImageBytes = sheets.Sum(ImageBytes), deferredImages = sheets.Count(s => s.PendingImage != null), firstImageMs, imagesLoadedSinceBuild, imageLoadTotalMs, maxImageLoadMs }, archive = ArchiveDiagnostics(), card = CardDiagnostics(), footer = FooterDiagnostics(), safeArea = new { top = expandedTopInset, bottom = (float)ActualHeight - expandedBottomInset, bottomInset = expandedBottomInset, timelineVisible = timeline, dockHeight = bottomDock.ActualHeight }, copyCount = frontCopy == null ? 0 : 1, active, ticking, dragTargetX, dragTargetY, pointerDown, reducedMotion = reduced, expandedActionsVisible = expandedControlsShown, extraction = extraction.Value, extractTarget, pointerMoves, hoverChanges, expansions, collapses, hovered = hovered?.Frame?.Id, extracted = extracted?.Frame?.Id, crestTarget, acrossTarget, imageCount = sheets.Count(s => s.Frame != null), visiblePhotoCards = sheets.Count(s => s.Frame != null && s.Root.Visibility == Visibility.Visible && NearViewport(s,0)), loadedImages = sheets.Count(s => s.Image?.Source != null), visibleLoadedImages = sheets.Count(s => s.Image?.Source != null && s.Root.Visibility == Visibility.Visible && NearViewport(s,0)), highResolutionImages = sheets.Count(s => s.ImageEdge == ExpandedImageEdge), failedImages = sheets.Count(s => s.Failed) };
+    internal object Diagnostics => new { motionProfile = new { transitionDirection, lastTransitionMs, transitionFrames, transitionSlowFrames, transitionMaxUpdateMs, transitionMaxIntervalMs, transitionMaxQueueMs, transitionMaxClockIntervalMs, transitionClockTicks, framePending = Volatile.Read(ref frameQueued) != 0, matrixWrites, wallOffsetWrites, imageRequests, imagePumpRunning = imageTimer.IsRunning }, startup = new { builds, incrementalUpdates = reconciles, reusedSheets = lastReusedSheets, reusedImages = lastReusedImages, cacheHits = refreshCacheHits, queryCount = archiveQueryCount, lastReconcileMs, lastQueryMs, lastBuildMs, maxBuildMs, sheetCount = sheets.Count, evictedSheets, releasedImages, retainedImageBytes = sheets.Sum(ImageBytes), deferredImages = sheets.Count(s => s.PendingImage != null), firstImageMs, imagesLoadedSinceBuild, imageLoadTotalMs, maxImageLoadMs }, archive = ArchiveDiagnostics(), card = CardDiagnostics(), footer = FooterDiagnostics(), safeArea = new { top = expandedTopInset, bottom = (float)ActualHeight - expandedBottomInset, bottomInset = expandedBottomInset, timelineVisible = timeline, dockHeight = bottomDock.ActualHeight }, copyCount = frontCopy == null ? 0 : 1, active, ticking, dragTargetX, dragTargetY, pointerDown, reducedMotion = reduced, expandedActionsVisible = expandedControlsShown, extraction = extraction.Value, extractTarget, pointerMoves, hoverChanges, expansions, collapses, hovered = hovered?.Frame?.Id, extracted = extracted?.Frame?.Id, crestTarget, acrossTarget, imageCount = sheets.Count(s => s.Frame != null), visiblePhotoCards = sheets.Count(s => s.Frame != null && s.Root.Visibility == Visibility.Visible && NearViewport(s,0)), loadedImages = sheets.Count(s => s.Image?.Source != null), visibleLoadedImages = sheets.Count(s => s.Image?.Source != null && s.Root.Visibility == Visibility.Visible && NearViewport(s,0)), highResolutionImages = sheets.Count(s => s.ImageEdge == ExpandedImageEdge), failedImages = sheets.Count(s => s.Failed) };
     object ArchiveDiagnostics() => new { initialized = columns.Count != 0,
         indexedRecords = records.Count, maxRows = rows, seekTargetId, seekTargetRow,
         storeRevision = runtime.Store.ArchiveRevision, appliedArchiveRevision,
@@ -167,14 +170,14 @@ internal sealed class RhineArchiveView : Grid
     object? CardDiagnostics()
     {
         if (extracted is not { } card) return null;
-        var layout = card.Layout; var m = card.Matrix;
+        var layout = card.Layout; var m = DisplayMatrix(card);
         var footer = RhineGeometry.FooterMatrix(layout,m);
         var artBottom = Vector2.Transform(new(layout.ArtLeft,layout.ArtTop+layout.ArtHeight),m);
         var footerTop = Vector2.Transform(Vector2.Zero,footer);
         var proxyTop = Vector2.Transform(Vector2.Zero,inputMatrix);
         var center = Vector2.Transform(Vector2.Zero,m);
         var neighbors = sheets.Count(other => other != card && other.Root.Visibility == Visibility.Visible &&
-            other.SortDistance < card.SortDistance && Vector2.Distance(Vector2.Transform(Vector2.Zero,other.Matrix),center) <
+            other.SortDistance < card.SortDistance && Vector2.Distance(Vector2.Transform(Vector2.Zero,DisplayMatrix(other)),center) <
             (card.Width+other.Width)*MathF.Max(MathF.Abs(m.M11),MathF.Abs(m.M22)));
         static object Point(Vector2 point) => new { x = point.X, y = point.Y };
         var corners = new[] { Vector2.Transform(new(-card.Width/2,-card.Size/2),m),
@@ -195,6 +198,22 @@ internal sealed class RhineArchiveView : Grid
                 right = corners.Max(p => p.X), bottom = corners.Max(p => p.Y) },
             imageBottom = Point(artBottom), footerTop = Point(footerTop), actionTop = Point(proxyTop),
             imageFooterGap = Vector2.Distance(artBottom,footerTop), actionPlaneError = Vector2.Distance(footerTop,proxyTop) };
+    }
+    Vector2 WallOffset => new((float)dragX.Value, (float)dragY.Value);
+    Matrix3x2 DisplayMatrix(Sheet sheet)
+    {
+        var matrix = sheet.Matrix;
+        matrix.M31 += (float)dragX.Value;
+        matrix.M32 += (float)dragY.Value;
+        return matrix;
+    }
+    void ApplyWallOffset()
+    {
+        var wanted = new Vector3((float)dragX.Value, (float)dragY.Value, 0);
+        if (appliedWallOffset == wanted) return;
+        wallVisual.Offset = wanted;
+        appliedWallOffset = wanted;
+        wallOffsetWrites++;
     }
     object FooterDiagnostics()
     {
@@ -228,6 +247,20 @@ internal sealed class RhineArchiveView : Grid
         acrossTarget = step % 3 - 1; crestTarget = step % 7 * RhineGeometry.RowPitch;
         Wake();
     }
+    internal void ValidationDrag(int step)
+    {
+        if (!active || extracted != null) return;
+        pointerDown = didDrag = true;
+        dragTargetX = Math.Sin(step*.18)*260;
+        dragTargetY = Math.Cos(step*.13)*110;
+        dragX = new(dragTargetX); dragY = new(dragTargetY);
+        ApplyWallOffset();
+    }
+    internal void ValidationEndDrag()
+    {
+        if (!pointerDown) return;
+        pointerDown = false; viewportDirty = true; imageTimer.Start(); Wake();
+    }
     public bool IsExpanded => extracted != null;
     public event Action? TimelineRequested;
     public event Action<bool>? ExpansionChanged;
@@ -244,6 +277,7 @@ internal sealed class RhineArchiveView : Grid
         Background = Design.Brush(Microsoft.UI.Colors.Transparent);
         IsTabStop = true;
         Children.Add(wall);
+        wallVisual = ElementCompositionPreview.GetElementVisual(wall);
         foreach (var label in new[] { collectionText, statusText })
         {
             label.CharacterSpacing = 180; label.VerticalAlignment = VerticalAlignment.Center;
@@ -337,9 +371,19 @@ internal sealed class RhineArchiveView : Grid
                 var dx = point.X - pressPoint.X; var dy = point.Y - pressPoint.Y;
                 if (didDrag || dx * dx + dy * dy > 36)
                 {
-                    didDrag = true; hovered = null; UpdateCaption();
+                    if (!didDrag) { didDrag = true; hovered = null; UpdateCaption(); }
                     dragTargetX = dragOriginX + dx; dragTargetY = dragOriginY + dy;
-                    Wake(); e.Handled = true; return;
+                    // Dragging is a single compositor translation. Updating the
+                    // wall directly keeps pointer latency independent of how
+                    // many cards are currently realized.
+                    dragX = new(dragTargetX); dragY = new(dragTargetY); ApplyWallOffset();
+                    if (Math.Abs(dragTargetX-lastViewportDragX) > 180 ||
+                        Math.Abs(dragTargetY-lastViewportDragY) > 180)
+                    {
+                        lastViewportDragX = dragTargetX; lastViewportDragY = dragTargetY;
+                        viewportDirty = true; Wake();
+                    }
+                    e.Handled = true; return;
                 }
             }
             if (!pointerDown) Move(point);
@@ -350,12 +394,15 @@ internal sealed class RhineArchiveView : Grid
             var point = e.GetCurrentPoint(this);
             if (!point.Properties.IsLeftButtonPressed) return;
             Focus(FocusState.Pointer); pointerDown = true; didDrag = false; pressPoint = point.Position;
-            dragOriginX = dragTargetX; dragOriginY = dragTargetY; CapturePointer(e.Pointer); e.Handled = true;
+            dragOriginX = dragTargetX; dragOriginY = dragTargetY;
+            lastViewportDragX = dragTargetX; lastViewportDragY = dragTargetY;
+            CapturePointer(e.Pointer); e.Handled = true;
         };
         PointerReleased += (_, e) =>
         {
             if (!pointerDown) return;
             var dragged = didDrag; pointerDown = false; ReleasePointerCaptures(); imageTimer.Start();
+            if (dragged) { viewportDirty = true; Wake(); }
             if (!dragged)
             {
                 var hit = Pick(e.GetCurrentPoint(this).Position, out var localHit);
@@ -365,7 +412,16 @@ internal sealed class RhineArchiveView : Grid
             QueuePendingFlush();
             e.Handled = true;
         };
-        PointerCaptureLost += (_, _) => { pointerDown = false; if (active) { imageTimer.Start(); QueuePendingFlush(); } };
+        PointerCaptureLost += (_, _) =>
+        {
+            var dragged = pointerDown && didDrag;
+            pointerDown = false;
+            if (active)
+            {
+                if (dragged) { viewportDirty = true; Wake(); }
+                imageTimer.Start(); QueuePendingFlush();
+            }
+        };
         PointerWheelChanged += (_, e) =>
         {
             if (extracted != null) return;
@@ -695,14 +751,15 @@ internal sealed class RhineArchiveView : Grid
             Shape(old,535,650); orderDirty = true;
             extracted = null; extraction = new(0); extractTarget = 0; SetExpandedControlsVisible(false); ExpansionChanged?.Invoke(false);
         }
-        dragTargetX = dragTargetY = 0; panTarget = Math.Clamp(sheet.Depth, 0, RhineGeometry.LastScroll(rows));
+        dragTargetX = dragTargetY = 0; dragX = dragY = new(0); ApplyWallOffset(); viewportDirty = true;
+        lastViewportDragX = lastViewportDragY = 0;
+        panTarget = Math.Clamp(sheet.Depth, 0, RhineGeometry.LastScroll(rows));
         crestTarget = sheet.Depth; acrossTarget = sheet.Lane;
         // Deep seeks jump directly into the destination window. Springing past
         // thousands of rows materialized every intermediate viewport.
         if (Math.Abs(panTarget-pan.Value) > 12*RhineGeometry.RowPitch)
         {
             pan = new(panTarget); crest = new(crestTarget); across = new(acrossTarget);
-            dragX = dragY = new(0);
             foreach (var candidate in sheets)
                 candidate.Height = new(RhineGeometry.Height(candidate.Lane,candidate.Depth,crestTarget,acrossTarget));
             orderDirty = true;
@@ -727,6 +784,7 @@ internal sealed class RhineArchiveView : Grid
         seekTargetId = null; seekTargetRow = -1;
         ExpansionChanged?.Invoke(false);
         dragX = dragY = new(0); dragTargetX = dragTargetY = 0;
+        lastViewportDragX = lastViewportDragY = 0; viewportDirty = true; ApplyWallOffset();
         crest = new(0); across = new(0); pan = new(0); crestTarget = acrossTarget = panTarget = 0;
         extraction = new(0); extractTarget = 0; SetExpandedControlsVisible(false);
         dayText.Text = day.ToString("MMM d, yyyy");
@@ -977,9 +1035,10 @@ internal sealed class RhineArchiveView : Grid
         sheets.Sum(ImageBytes) - (DeferringImages ? BitmapBytes(sheet.PendingImage) : ImageBytes(sheet)) + BitmapBytes(bitmap) <= MaxRetainedImageBytes;
     bool NearViewport(Sheet sheet, double margin)
     {
-        var center = Vector2.Transform(Vector2.Zero, sheet.Matrix);
-        var extentX = (Math.Abs(sheet.Matrix.M11) * sheet.Width + Math.Abs(sheet.Matrix.M21) * sheet.Size) / 2;
-        var extentY = (Math.Abs(sheet.Matrix.M12) * sheet.Width + Math.Abs(sheet.Matrix.M22) * sheet.Size) / 2;
+        var matrix = DisplayMatrix(sheet);
+        var center = Vector2.Transform(Vector2.Zero, matrix);
+        var extentX = (Math.Abs(matrix.M11) * sheet.Width + Math.Abs(matrix.M21) * sheet.Size) / 2;
+        var extentY = (Math.Abs(matrix.M12) * sheet.Width + Math.Abs(matrix.M22) * sheet.Size) / 2;
         return center.X + extentX > -margin && center.X - extentX < ActualWidth + margin &&
             center.Y + extentY > -margin && center.Y - extentY < ActualHeight + margin;
     }
@@ -1055,7 +1114,7 @@ internal sealed class RhineArchiveView : Grid
             var height = MathF.Sqrt(s.Matrix.M21*s.Matrix.M21+s.Matrix.M22*s.Matrix.M22) * 309.375f;
             // A sub-20px card is glass texture, not a useful photograph.
             if (s != extracted && (width < 20 || height < 13)) continue;
-            var center = Vector2.Transform(new Vector2(0,-150),s.Matrix);
+            var center = Vector2.Transform(new Vector2(0,-150),DisplayMatrix(s));
             var normalizedDistance = Vector2.DistanceSquared(center,focus) /
                 Math.Max(1,ActualWidth*ActualWidth+ActualHeight*ActualHeight);
             var priority = s == extracted ? -1000 : (s.Root.Visibility == Visibility.Visible ? 0 : 5)
@@ -1272,12 +1331,12 @@ internal sealed class RhineArchiveView : Grid
     }
     Sheet? Pick(Point point, out Vector2 local)
     {
-        if (extracted != null && RhineGeometry.Hit(extracted.Matrix, new((float)point.X, (float)point.Y), extracted.Width, extracted.Size, out local)) return extracted;
+        if (extracted != null && RhineGeometry.Hit(DisplayMatrix(extracted), new((float)point.X, (float)point.Y), extracted.Width, extracted.Size, out local)) return extracted;
         local = default; Sheet? best = null; var distance = float.MaxValue;
         foreach (var s in sheets)
         {
             if (s.Frame == null || s.Distance > distance || s.Root.Visibility != Visibility.Visible) continue;
-            if (!RhineGeometry.Hit(s.Matrix, new((float)point.X, (float)point.Y), s.Width, s.Size, out var p)) continue;
+            if (!RhineGeometry.Hit(DisplayMatrix(s), new((float)point.X, (float)point.Y), s.Width, s.Size, out var p)) continue;
             distance = s.Distance; best = s; local = p;
         }
         return best;
@@ -1435,9 +1494,7 @@ internal sealed class RhineArchiveView : Grid
         else { crest.Step(crestTarget, 8, dt); across.Step(acrossTarget, 7, dt); pan.Step(panTarget, 10, dt); extraction.Step(extractTarget, dt); }
         bool sceneMoving = !crest.Settled(crestTarget) || !across.Settled(acrossTarget) || !pan.Settled(panTarget);
         bool moving = sceneMoving || !extraction.Settled(extractTarget);
-        if (reduced) { dragX = new(dragTargetX); dragY = new(dragTargetY); } else { dragX.Step(dragTargetX,24,dt); dragY.Step(dragTargetY,24,dt); }
-        sceneMoving |= !dragX.Settled(dragTargetX) || !dragY.Settled(dragTargetY);
-        moving |= sceneMoving;
+        ApplyWallOffset();
         // Complete before rendering: footer, depth order, input and toolbar all
         // observe the same final pose rather than changing on a later timer tick.
         if (extracted != null && extractTarget == 0 && extraction.Settled(0))
@@ -1451,11 +1508,11 @@ internal sealed class RhineArchiveView : Grid
             Shape(returned,535,650); extracted = null; orderDirty = true; imageTimer.Start();
             ExpansionChanged?.Invoke(false); UpdateCaption();
         }
-        moving |= EnsureVisibleSheets();
+        if (!pointerDown || viewportDirty) moving |= EnsureVisibleSheets();
         var view = RhineGeometry.View((float)pan.Value); Matrix4x4.Invert(view, out var camera);
         var cameraRotation = Quaternion.CreateFromRotationMatrix(camera);
         var span = 19.98f * (float)(ActualHeight / ActualWidth);
-        var refreshScene = sceneMoving || orderDirty;
+        var refreshScene = sceneMoving || orderDirty || viewportDirty;
         var depthChanged = false;
         foreach (var s in sheets)
         {
@@ -1484,22 +1541,35 @@ internal sealed class RhineArchiveView : Grid
                 { s.ActionVisual.Opacity = actionOpacity; s.ActionOpacity = actionOpacity; }
             }
             var matrix = RhineGeometry.Plane(s.Position, rotation, view, (float)ActualWidth, (float)ActualHeight);
-            var shift = s == extracted ? 1 - Math.Clamp(extraction.Value,0,1) : 1;
-            matrix.M31 += (float)(dragX.Value * shift); matrix.M32 += (float)(dragY.Value * shift);
             if (s == extracted)
+            {
                 matrix.M32 += RhineGeometry.ExpandedCenterShift(expandedTopInset, expandedBottomInset) *
                     RhineGeometry.Smooth(((float)extraction.Value - .3f) / .7f);
+                // The wall retains its pan while an opened card moves toward
+                // screen center. Counter-translate only that card so its final
+                // display pose is independent of the wall offset.
+                var p = (float)Math.Clamp(extraction.Value,0,1);
+                matrix.M31 -= (float)dragX.Value*p;
+                matrix.M32 -= (float)dragY.Value*p;
+            }
             if (s == extracted && extractTarget == 1 && extraction.Settled(1))
-                matrix = RhineGeometry.SnapFacingPlane(matrix, s.Layout, (float)(XamlRoot?.RasterizationScale ?? 1));
+            {
+                var display = matrix;
+                display.M31 += (float)dragX.Value; display.M32 += (float)dragY.Value;
+                display = RhineGeometry.SnapFacingPlane(display, s.Layout, (float)(XamlRoot?.RasterizationScale ?? 1));
+                display.M31 -= (float)dragX.Value; display.M32 -= (float)dragY.Value;
+                matrix = display;
+            }
             var matrixChanged = matrix != s.Matrix;
             if (matrixChanged) s.Matrix = matrix;
             var previousSortDistance = s.SortDistance;
             s.Distance = -Vector3.Transform(s.Position, view).Z;
             s.SortDistance = s == extracted ? homeDistance : s.Distance;
             depthChanged |= Math.Abs(s.SortDistance - previousSortDistance) > .0001f;
-            var center = Vector2.Transform(Vector2.Zero, s.Matrix);
-            var extentX = (Math.Abs(s.Matrix.M11) * s.Width + Math.Abs(s.Matrix.M21) * s.Size) / 2;
-            var extentY = (Math.Abs(s.Matrix.M12) * s.Width + Math.Abs(s.Matrix.M22) * s.Size) / 2;
+            var displayMatrix = DisplayMatrix(s);
+            var center = Vector2.Transform(Vector2.Zero, displayMatrix);
+            var extentX = (Math.Abs(displayMatrix.M11) * s.Width + Math.Abs(displayMatrix.M21) * s.Size) / 2;
+            var extentY = (Math.Abs(displayMatrix.M12) * s.Width + Math.Abs(displayMatrix.M22) * s.Size) / 2;
             var visible = center.X + extentX > -80 && center.X - extentX < ActualWidth + 80 && center.Y + extentY > -80 && center.Y - extentY < ActualHeight + 80;
             var visibility = visible ? Visibility.Visible : Visibility.Collapsed;
             var becameVisible = visible && s.Root.Visibility != Visibility.Visible;
@@ -1540,9 +1610,8 @@ internal sealed class RhineArchiveView : Grid
                 (float)RhineGeometry.Height(tag.Lane,tag.Depth,crest.Value,across.Value)+3.65f-Math.Max(0,tag.Lane)*1.15f,
                 tag.Depth-5);
             var matrix = RhineGeometry.Plane(position,cameraRotation,view,(float)ActualWidth,(float)ActualHeight);
-            matrix.M31 += (float)dragX.Value; matrix.M32 += (float)dragY.Value;
             tag.Visual.TransformMatrix = RhineGeometry.Matrix(matrix);
-            var point = Vector2.Transform(Vector2.Zero,matrix);
+            var point = Vector2.Transform(Vector2.Zero,matrix) + WallOffset;
             tag.Root.Visibility = point.X > -280 && point.X < ActualWidth+280 && point.Y > -80 && point.Y < ActualHeight+80
                 ? Visibility.Visible : Visibility.Collapsed;
             tag.Visual.Opacity = extracted == null ? .92f : .22f;
@@ -1550,7 +1619,7 @@ internal sealed class RhineArchiveView : Grid
         if (extracted is { } open)
         {
             SyncFrontCopy(open, (float)extraction.Value);
-            var footerMatrix = RhineGeometry.FooterMatrix(open.Layout, open.Matrix);
+            var footerMatrix = RhineGeometry.FooterMatrix(open.Layout, DisplayMatrix(open));
             if (footerMatrix != inputMatrix)
             {
                 inputMatrix = footerMatrix;
@@ -1560,7 +1629,8 @@ internal sealed class RhineArchiveView : Grid
             SetExpandedControlsVisible(extractTarget == 1 && extraction.Settled(1));
         }
         else SetExpandedControlsVisible(false);
-        moving |= PruneSheets();
+        if (!pointerDown) moving |= PruneSheets();
+        viewportDirty = false;
         // Depth values move every tick, but ZIndex changes only at crossings.
         if (!orderDirty && depthChanged)
             for (var i = 1; i < drawOrder.Count; i++)

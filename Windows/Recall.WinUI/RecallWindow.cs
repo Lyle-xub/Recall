@@ -791,6 +791,8 @@ internal sealed class RecallWindow : Window
         else if (action == "recording-interrupt") runtime.ValidationInterruptCapture();
     }
     internal void ValidationRetarget(int step) => archive.ValidationRetarget(step);
+    internal void ValidationDrag(int step) => archive.ValidationDrag(step);
+    internal void ValidationEndDrag() => archive.ValidationEndDrag();
     internal void ValidationSeekArchive(string id)
     {
         if (!runtime.Settings.RhineLabMode || mode != "home") throw new InvalidOperationException("Archive seek requires Rhine home.");
