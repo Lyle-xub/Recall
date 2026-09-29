@@ -18,7 +18,7 @@ internal sealed class RecallWindow : Window
     readonly Image desktopBlurScene = new() { Stretch = Stretch.Fill, IsHitTestVisible = false };
     WriteableBitmap? desktopBlurSource, desktopTimelineBlurSource;
     readonly RhineArchiveView archive; readonly Button back, topMenu; readonly AccessibilityGrid toolbar = new(); readonly TextBox search = Design.Input("Search anything you’ve seen, said, or heard", height: 72, externalGlass: true); readonly StackPanel actions = new() { Orientation = Orientation.Horizontal, Spacing = 16 };
-    readonly TextBlock notice = Design.Text("", 13, color: Design.Muted); readonly Microsoft.UI.Dispatching.DispatcherQueueTimer statusTimer;
+    readonly TextBlock notice = Design.Text("", 13, color: Design.Muted); readonly Microsoft.UI.Dispatching.DispatcherQueueTimer statusTimer, archiveTimelineHideTimer;
     readonly Border noticeHost = new() { CornerRadius = new(16), Padding = new(16, 9, 16, 9), MaxWidth = 680, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Top, IsHitTestVisible = false };
     readonly Button archiveClose;
     readonly Border searchGlass = new() { CornerRadius = new(38), IsHitTestVisible = false };
@@ -52,8 +52,18 @@ internal sealed class RecallWindow : Window
             notice.Text = error;
         timeline = new(runtime, Preview);
         archive = new(runtime, OpenFrame);
-        timeline.Committed += frame => { if (runtime.Settings.RhineLabMode && mode == "home" && frame != null) archive.Seek(frame, true); };
-        archive.TimelineRequested += () => { timeline.SetActive(true); archive.SetTimeline(true); UpdateArchiveSafeArea(); };
+        archiveTimelineHideTimer = DispatcherQueue.CreateTimer();
+        archiveTimelineHideTimer.Interval = TimeSpan.FromMilliseconds(1800);
+        archiveTimelineHideTimer.IsRepeating = false;
+        archiveTimelineHideTimer.Tick += (_, _) => HideArchiveTimeline();
+        timeline.Committed += frame =>
+        {
+            if (!runtime.Settings.RhineLabMode || mode != "home") return;
+            if (frame != null) archive.Seek(frame, true);
+            HideArchiveTimeline();
+        };
+        timeline.InteractionEnded += ScheduleArchiveTimelineHide;
+        archive.TimelineRequested += ShowArchiveTimeline;
         archive.DockSizeChanged += UpdateArchiveSafeArea;
         timeline.RegisterPropertyChangedCallback(UIElement.VisibilityProperty, (_, _) => UpdateArchiveSafeArea());
         back = Design.Icon("\uE72B", "Back", () => Navigate("home"), 56);
@@ -86,9 +96,9 @@ internal sealed class RecallWindow : Window
             if (archive.IsOverDayControls(e.GetCurrentPoint(archive).Position)) return;
             var y = e.GetCurrentPoint(root).Position.Y;
             var visible = timeline.Visibility == Visibility.Visible;
-            var reveal = y >= root.ActualHeight - (visible ? 258 : 88) || !timeline.IsLive;
-            timeline.SetActive(reveal); archive.SetTimeline(reveal);
-            if (visible != reveal) UpdateArchiveSafeArea();
+            var reveal = y >= root.ActualHeight - (visible ? 258 : 88);
+            if (reveal) ShowArchiveTimeline();
+            else if (visible) HideArchiveTimeline();
         };
         root.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(Keys), true);
         runtime.Error += message => DispatcherQueue.TryEnqueue(() => notice.Text = message);
@@ -300,7 +310,7 @@ internal sealed class RecallWindow : Window
         try
         {
             root.IsHitTestVisible = false;
-            statusTimer.Stop(); toolbarTimer?.Stop(); backdropLayoutTimer?.Stop();
+            statusTimer.Stop(); archiveTimelineHideTimer.Stop(); toolbarTimer?.Stop(); backdropLayoutTimer?.Stop();
             // Remove the native overlay before media or content cleanup. Even
             // a disconnected popup must not keep the interface pause alive.
             try
@@ -497,7 +507,7 @@ internal sealed class RecallWindow : Window
         if (root.ActualWidth <= 0 || root.ActualHeight <= 0) return;
         var top = Math.Max(toolbarTarget.Top + toolbarTarget.Height,
             Math.Max(archiveClose.Margin.Top + archiveClose.Height,
-                topMenu.Margin.Top + topMenu.Height)) + 12;
+                topMenu.Margin.Top + topMenu.Height)) + 20;
         // Visibility stays true during the timeline's dismissal animation.
         // Keep the card clear until that visual layer is actually gone.
         var bottom = timeline.Visibility == Visibility.Visible
@@ -508,11 +518,34 @@ internal sealed class RecallWindow : Window
             // ArchiveViewportLayout uses 116/180 insets in the 972-point Mac
             // reference window. Preserve those proportions on the shorter VM.
             var referenceScale = root.ActualHeight / 972;
-            top = 116 * referenceScale;
+            top = Math.Max(top, 116 * referenceScale);
             bottom = Math.Max(bottom,180 * referenceScale);
         }
         archiveSafeTop = top; archiveSafeBottom = bottom;
         archive.SetExpandedSafeArea(top, bottom);
+    }
+    void ShowArchiveTimeline()
+    {
+        if (mode != "home" || !runtime.Settings.RhineLabMode || archive.IsExpanded) return;
+        timeline.SetActive(true);
+        archive.SetTimeline(true);
+        UpdateArchiveSafeArea();
+        ScheduleArchiveTimelineHide();
+    }
+    void ScheduleArchiveTimelineHide()
+    {
+        if (mode != "home" || !runtime.Settings.RhineLabMode || archive.IsExpanded) return;
+        archiveTimelineHideTimer.Stop();
+        archiveTimelineHideTimer.Start();
+    }
+    void HideArchiveTimeline()
+    {
+        archiveTimelineHideTimer.Stop();
+        if (mode != "home" || !runtime.Settings.RhineLabMode) return;
+        if (timeline.IsInteracting) { ScheduleArchiveTimelineHide(); return; }
+        timeline.SetActive(false);
+        archive.SetTimeline(false);
+        UpdateArchiveSafeArea();
     }
     void Expand()
     {
@@ -606,7 +639,7 @@ internal sealed class RecallWindow : Window
         archive.SetActive(rhine && IsShown);
         if (rhine) { Expand(); if (IsShown) _ = archive.Refresh(); }
         timeline.SetActive(mode == "home" && !rhine);
-        if (rhine) archive.SetTimeline(false);
+        if (rhine) { archiveTimelineHideTimer.Stop(); archive.SetTimeline(false); }
         back.Visibility = mode == "home" ? Visibility.Collapsed : Visibility.Visible;
         topMenu.Visibility = mode == "onboarding" ? Visibility.Collapsed : Visibility.Visible;
         archiveClose.Visibility = rhine ? Visibility.Visible : Visibility.Collapsed;
@@ -711,6 +744,13 @@ internal sealed class RecallWindow : Window
         root.Background = Design.Brush(Color.FromArgb(1, 255, 255, 255));
         page.Children.Add(new MaterialReferenceView(desktop));
         backdrop.Update(desktop, root.ActualWidth, root.ActualHeight, new Rect(), []);
+    }
+    internal void ValidationShowArchiveTimeline() => ShowArchiveTimeline();
+    internal async Task ValidationCommitArchiveTimeline(string id)
+    {
+        var frame = runtime.Store.Frame(id) ?? throw new InvalidOperationException("Timeline fixture is missing: " + id);
+        ShowArchiveTimeline();
+        await timeline.ValidationCommit(frame);
     }
     object ChromeDiagnostics()
     {
@@ -1099,7 +1139,7 @@ internal sealed class RecallWindow : Window
         if (key == shortcuts.Back)
         {
             if (runtime.Settings.RhineLabMode && mode == "home" && timeline.Visibility == Visibility.Visible)
-            { timeline.SetActive(false); archive.SetTimeline(false); UpdateArchiveSafeArea(); e.Handled = true; return; }
+            { HideArchiveTimeline(); e.Handled = true; return; }
             if (mode == "home")
                 _ = Hide();
             else

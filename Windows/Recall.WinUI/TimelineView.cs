@@ -6,7 +6,8 @@ internal sealed class TimelineView : Grid
 {
     readonly AppRuntime runtime; readonly Action<MemoryFrame?> preview; readonly Canvas track = new(); readonly TextBlock label = Design.Text("Now", 14, true), rangeLabel = Design.Text(TimelineMath.Duration(300), 14, true); readonly Border timePill; readonly Button zoomOut, zoomIn, rangeButton; readonly Microsoft.UI.Dispatching.DispatcherQueueTimer timer, settle, interactionRefresh, interactionPreview;
     public event Action<MemoryFrame?>? Committed;
-    DateTimeOffset center = DateTimeOffset.Now; double span = 300; bool live = true, dragging, active; double startX; DateTimeOffset startTime; long revision; bool refreshing, refreshAgain, previewAgain;
+    public event Action? InteractionEnded;
+    DateTimeOffset center = DateTimeOffset.Now; double span = 300; bool live = true, dragging, active; double startX; DateTimeOffset startTime; long revision; int commitRevision; bool refreshing, refreshAgain, previewAgain;
     readonly LinearGradientBrush tint = new() { StartPoint = new(0, 0), EndPoint = new(0, 1), GradientStops = { new() { Color = Microsoft.UI.Colors.Transparent, Offset = 0 }, new() { Color = Color.FromArgb(20, 255, 255, 255), Offset = 1 } } };
     public TimelineView(AppRuntime runtime, Action<MemoryFrame?> preview)
     {
@@ -16,7 +17,11 @@ internal sealed class TimelineView : Grid
         settle.Tick += async (_, _) =>
         {
             var date = center; var frame = await Task.Run(() => runtime.Store.At(date));
-            if (active && !live && date == center) Committed?.Invoke(frame);
+            if (active && !live && date == center)
+            {
+                Committed?.Invoke(frame);
+                InteractionEnded?.Invoke();
+            }
         };
         interactionRefresh = DispatcherQueue.CreateTimer(); interactionRefresh.Interval = TimeSpan.FromMilliseconds(55); interactionRefresh.IsRepeating = false;
         interactionRefresh.Tick += (_, _) => _ = Refresh();
@@ -70,8 +75,8 @@ internal sealed class TimelineView : Grid
         Children.Add(now);
         track.PointerPressed += (_, e) => { if (e.Handled) return; dragging = true; live = false; startX = e.GetCurrentPoint(track).Position.X; startTime = center; track.CapturePointer(e.Pointer); e.Handled = true; };
         track.PointerMoved += (_, e) => { if (!dragging) return; center = startTime.AddSeconds(-(e.GetCurrentPoint(track).Position.X - startX) / Math.Max(1, track.ActualWidth) * span); if (center > DateTimeOffset.Now) center = DateTimeOffset.Now; ScheduleInteraction(); e.Handled = true; };
-        track.PointerReleased += (_, e) => { dragging = false; track.ReleasePointerCaptures(); interactionRefresh.Stop(); interactionPreview.Stop(); _ = Refresh(true); e.Handled = true; };
-        track.PointerCaptureLost += (_, _) => dragging = false;
+        track.PointerReleased += (_, e) => { dragging = false; track.ReleasePointerCaptures(); _ = CommitInteraction(); e.Handled = true; };
+        track.PointerCaptureLost += (_, _) => { if (!dragging) return; dragging = false; _ = CommitInteraction(); };
         PointerWheelChanged += (_, e) => { var delta = e.GetCurrentPoint(this).Properties.MouseWheelDelta; if ((InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0) Zoom(delta > 0 ? .8 : 1.25); else { live = false; center = center.AddSeconds(-delta / 120.0 * span / 18); if (center > DateTimeOffset.Now) center = DateTimeOffset.Now; ScheduleInteraction(); } e.Handled = true; };
         PointerPressed += (_, e) => e.Handled = true;
         SizeChanged += (_, _) => _ = Refresh();
@@ -83,9 +88,11 @@ internal sealed class TimelineView : Grid
         Unloaded += (_, _) => { timer.Stop(); interactionRefresh.Stop(); interactionPreview.Stop(); };
     }
     public bool IsLive => live;
-    internal object Diagnostics => new { spanSeconds = span, rangeText = rangeLabel.Text, zoomOutEnabled = zoomOut.IsEnabled, zoomInEnabled = zoomIn.IsEnabled };
+    public bool IsInteracting => dragging;
+    internal object Diagnostics => new { spanSeconds = span, rangeText = rangeLabel.Text, zoomOutEnabled = zoomOut.IsEnabled, zoomInEnabled = zoomIn.IsEnabled, active, live, dragging, center, visible = Visibility == Visibility.Visible };
     internal void ValidationZoom(bool zoomIn) => Zoom(zoomIn ? .5 : 2);
     internal void ValidationSelect(MemoryFrame frame) { span = 1800; UpdateRange(); Select(frame); }
+    internal Task ValidationCommit(MemoryFrame frame) { Select(frame); return CommitInteraction(); }
     int visibilityRevision;
     public void SetActive(bool value)
     {
@@ -99,7 +106,7 @@ internal sealed class TimelineView : Grid
         }
         else
         {
-            timer.Stop(); settle.Stop(); interactionRefresh.Stop(); interactionPreview.Stop(); Interlocked.Increment(ref revision); refreshAgain = previewAgain = false;
+            timer.Stop(); settle.Stop(); interactionRefresh.Stop(); interactionPreview.Stop(); Interlocked.Increment(ref revision); Interlocked.Increment(ref commitRevision); refreshAgain = previewAgain = false;
             if (!Design.Motion || !IsLoaded) { Visibility = Visibility.Collapsed; return; }
             _ = HideAfterFade(token);
         }
@@ -108,6 +115,20 @@ internal sealed class TimelineView : Grid
     {
         if (!interactionRefresh.IsRunning) interactionRefresh.Start();
         interactionPreview.Stop(); interactionPreview.Start();
+    }
+    async Task CommitInteraction()
+    {
+        interactionRefresh.Stop(); interactionPreview.Stop(); settle.Stop();
+        var request = Interlocked.Increment(ref commitRevision);
+        var date = center;
+        // Repaint the ruler independently, but resolve the selected frame on a
+        // dedicated path so a slower icon lookup cannot swallow pointer-up.
+        _ = Refresh();
+        var frame = await Task.Run(() => runtime.Store.At(date));
+        if (!active || live || request != commitRevision || date != center) return;
+        preview(frame);
+        Committed?.Invoke(frame);
+        InteractionEnded?.Invoke();
     }
     async Task HideAfterFade(int token)
     {

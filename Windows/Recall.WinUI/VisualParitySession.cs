@@ -265,6 +265,10 @@ internal sealed class VisualParitySession
                     window.ValidationSelectFrame(Field("frameId") ?? throw new InvalidDataException("frame action requires frameId."));
                 else if (Field("action") == "archive-seek")
                     window.ValidationSeekArchive(Field("frameId") ?? throw new InvalidDataException("archive-seek requires frameId."));
+                else if (Field("action") == "archive-timeline-show")
+                    window.ValidationShowArchiveTimeline();
+                else if (Field("action") == "archive-timeline-commit")
+                    await window.ValidationCommitArchiveTimeline(Field("frameId") ?? throw new InvalidDataException("archive-timeline-commit requires frameId."));
                 else window.ValidationAction(Field("action"));
             }
             await Task.Delay(request.TryGetProperty("settleMs", out var settle) ? Math.Clamp(settle.GetInt32(), 0, 10000) : 1200);

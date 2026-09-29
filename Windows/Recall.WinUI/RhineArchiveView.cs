@@ -579,8 +579,9 @@ internal sealed class RhineArchiveView : Grid
                     if (sheet.TitleText != null) sheet.TitleText.Text =
                         string.IsNullOrWhiteSpace(updated.Title) ? updated.AppName : updated.Title;
                     if (sheet.DateText != null) sheet.DateText.Text =
-                        updated.Timestamp.LocalDateTime.ToString("MMM d, yyyy  HH:mm");
+                        updated.Timestamp.LocalDateTime.ToString("MMM d, yyyy 'at' h:mm tt");
                     if (sheet.StarLabel != null) sheet.StarLabel.Text = updated.Starred ? "Starred" : "Star";
+                    if (sheet.ActionSymbols != null) sheet.ActionSymbols[0].Glyph = updated.Starred ? "\uE735" : "\uE734";
                     if (sheet == extracted)
                     {
                         extractedTitle.Text = updated.Title;
@@ -594,6 +595,7 @@ internal sealed class RhineArchiveView : Grid
                             if (frontCopy.TitleText != null) frontCopy.TitleText.Text = sheet.TitleText?.Text ?? "";
                             if (frontCopy.DateText != null) frontCopy.DateText.Text = sheet.DateText?.Text ?? "";
                             if (frontCopy.StarLabel != null) frontCopy.StarLabel.Text = starName;
+                            if (frontCopy.ActionSymbols != null) frontCopy.ActionSymbols[0].Glyph = updated.Starred ? "\uE735" : "\uE734";
                         }
                     }
                 }
@@ -863,15 +865,16 @@ internal sealed class RhineArchiveView : Grid
             footer = new Grid { Width = RhineGeometry.ArtBaseWidth, Height = RhineGeometry.FooterBaseHeight,
                 Background = Design.Brush(Design.Dark ? Color.FromArgb(248, 30, 34, 40) : Color.FromArgb(248, 255, 255, 255)),
                 IsHitTestVisible = false };
-            var info = new Grid { Height = 22, VerticalAlignment = VerticalAlignment.Top, Margin = new(9,0,9,0) };
+            var info = new Grid { Height = 21, VerticalAlignment = VerticalAlignment.Top, Margin = new(10,0,10,0) };
             heading = info;
             info.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
             info.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-            var title = Design.Text(string.IsNullOrWhiteSpace(frame.Title) ? frame.AppName : frame.Title, 15, true);
+            var title = Design.Text(string.IsNullOrWhiteSpace(frame.Title) ? frame.AppName : frame.Title, 14, true);
             titleText = title;
+            title.CharacterSpacing = -6;
             title.MaxLines = 1; title.TextTrimming = TextTrimming.CharacterEllipsis; title.TextWrapping = TextWrapping.NoWrap;
             info.Children.Add(title);
-            var date = Design.Text(frame.Timestamp.LocalDateTime.ToString("MMM d, yyyy  HH:mm"), 12, color: Design.Muted);
+            var date = Design.Text(frame.Timestamp.LocalDateTime.ToString("MMM d, yyyy 'at' h:mm tt"), 11.5, color: Design.Muted);
             dateText = date;
             date.Margin = new(12,0,0,0); date.TextWrapping = TextWrapping.NoWrap;
             Grid.SetColumn(date,1); info.Children.Add(date); footer.Children.Add(info);
@@ -959,8 +962,8 @@ internal sealed class RhineArchiveView : Grid
         sheet.DateText!.Margin = new(12*raster,0,0,0);
         sheet.DateText.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
         var textScale = expanded ? raster / Math.Max(.01f, projectedScale) : 1;
-        sheet.TitleText!.FontSize = expanded ? (compact ? 13 : 18)*textScale : 15;
-        sheet.DateText.FontSize = expanded ? 14*textScale : 12;
+        sheet.TitleText!.FontSize = expanded ? (compact ? 12.5 : 15.5)*textScale : 14;
+        sheet.DateText.FontSize = expanded ? 12.5*textScale : 11.5;
         sheet.DateText.FontFamily = expanded ? Design.BodyFont : Design.SmallFont;
         if (sheet.Actions != null)
         {
@@ -969,9 +972,9 @@ internal sealed class RhineArchiveView : Grid
             sheet.Actions.ColumnSpacing = (compact ? 3 : 7)*raster;
             for (var i = 0; i < sheet.ActionLabels!.Length; i++)
             {
-                sheet.ActionLabels[i].FontSize = expanded ? 16*textScale : 13;
+                sheet.ActionLabels[i].FontSize = expanded ? 14*textScale : 12.5;
                 sheet.ActionLabels[i].Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
-                sheet.ActionSymbols![i].FontSize = expanded ? (compact ? 15 : 16.5)*textScale : 15;
+                sheet.ActionSymbols![i].FontSize = expanded ? (compact ? 13.5 : 14.5)*textScale : 14;
                 sheet.ActionContents![i].Spacing = (compact ? 0 : 6)*raster;
                 sheet.ActionBorders![i].CornerRadius = new(10*raster);
                 sheet.ActionBorders[i].BorderThickness = new(raster);
@@ -1190,10 +1193,12 @@ internal sealed class RhineArchiveView : Grid
         for (var i = 0; i < borders.Length; i++)
         {
             row.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
-            var label = Design.Text(i == 0 && sheet.Frame?.Starred == true ? "Starred" : actionNames[i], 13);
+            var label = Design.Text(i == 0 && sheet.Frame?.Starred == true ? "Starred" : actionNames[i], 12.5);
+            label.FontWeight = Microsoft.UI.Text.FontWeights.Medium;
             label.TextWrapping = TextWrapping.NoWrap; label.TextTrimming = TextTrimming.CharacterEllipsis;
-            var symbol = new FontIcon { Glyph = actionSymbols[i], FontFamily = new("Segoe Fluent Icons"), FontSize = 15,
-                Foreground = Design.Brush(Design.Ink) };
+            var symbol = new FontIcon { Glyph = i == 0 && sheet.Frame?.Starred == true ? "\uE735" : actionSymbols[i], FontFamily = new("Segoe Fluent Icons"), FontSize = 14,
+                FontWeight = Microsoft.UI.Text.FontWeights.Normal,
+                Foreground = Design.Brush(Design.Dark ? Color.FromArgb(235,210,212,218) : Color.FromArgb(235,55,57,61)) };
             labels[i] = label; symbols[i] = symbol;
             var contents = Design.Row(6, symbol, label);
             contentsRows[i] = contents;
@@ -1402,6 +1407,8 @@ internal sealed class RhineArchiveView : Grid
             AutomationProperties.SetName(starAction, label);
             if (sheet.StarLabel != null) sheet.StarLabel.Text = label;
             if (frontCopy?.StarLabel != null) frontCopy.StarLabel.Text = label;
+            if (sheet.ActionSymbols != null) sheet.ActionSymbols[0].Glyph = sheet.Frame.Starred ? "\uE735" : "\uE734";
+            if (frontCopy?.ActionSymbols != null) frontCopy.ActionSymbols[0].Glyph = sheet.Frame.Starred ? "\uE735" : "\uE734";
             var recordIndex = records.FindIndex(item => item.Id == frame.Id);
             if (recordIndex >= 0) records[recordIndex] = sheet.Frame;
             var column = columns[sheet.Lane];
