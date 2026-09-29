@@ -5,7 +5,7 @@ namespace Recall;
 
 internal sealed class TimelineView : Grid
 {
-    readonly AppRuntime runtime; readonly Action<MemoryFrame?> preview; readonly Canvas track = new(), trackContent = new(); readonly Microsoft.UI.Composition.Visual trackContentVisual; readonly TextBlock label = Design.Text("Now", 14, true), rangeLabel = Design.Text(TimelineMath.Duration(300), 14, true); readonly Border timePill; readonly Button zoomOut, zoomIn, rangeButton; readonly Microsoft.UI.Dispatching.DispatcherQueueTimer timer, settle, interactionRefresh;
+    readonly AppRuntime runtime; readonly Action<MemoryFrame?> preview; readonly Canvas track = new(), trackContent = new(); readonly Microsoft.UI.Composition.Visual trackContentVisual; readonly TextBlock label = Design.Text("Now", 14, true), rangeLabel = Design.Text(TimelineMath.Duration(300), 14, true); readonly Border timePill; readonly Button zoomOut, zoomIn, rangeButton; readonly Microsoft.UI.Dispatching.DispatcherQueueTimer timer, settle, interactionRefresh, interactionLabel;
     public event Action<MemoryFrame?>? Committed;
     DateTimeOffset center = DateTimeOffset.Now; double span = 300; bool live = true, dragging, active; double startX, startVisualX, interactionMoveMsTotal, interactionMoveMsMax; DateTimeOffset startTime; long revision, trackRebuilds, interactionStartRebuilds, interactionMoves, interactionQueries; int commitRevision; bool refreshing, refreshAgain, previewAgain;
     readonly LinearGradientBrush tint = new() { StartPoint = new(0, 0), EndPoint = new(0, 1), GradientStops = { new() { Color = Microsoft.UI.Colors.Transparent, Offset = 0 }, new() { Color = Color.FromArgb(20, 255, 255, 255), Offset = 1 } } };
@@ -22,6 +22,8 @@ internal sealed class TimelineView : Grid
         };
         interactionRefresh = DispatcherQueue.CreateTimer(); interactionRefresh.Interval = TimeSpan.FromMilliseconds(140); interactionRefresh.IsRepeating = false;
         interactionRefresh.Tick += (_, _) => _ = CommitInteraction();
+        interactionLabel = DispatcherQueue.CreateTimer(); interactionLabel.Interval = TimeSpan.FromMilliseconds(120); interactionLabel.IsRepeating = false;
+        interactionLabel.Tick += (_, _) => UpdateCenterLabel(center,span,false,updateToolTip: false);
         Height = 234; Visibility = Visibility.Collapsed;
         VerticalAlignment = VerticalAlignment.Bottom;
         Children.Add(new DesktopBlur(true));
@@ -103,7 +105,7 @@ internal sealed class TimelineView : Grid
             _ = Refresh();
         };
         Loaded += (_, _) => { if (active) timer.Start(); };
-        Unloaded += (_, _) => { timer.Stop(); interactionRefresh.Stop(); };
+        Unloaded += (_, _) => { timer.Stop(); interactionRefresh.Stop(); interactionLabel.Stop(); };
     }
     public bool IsLive => live;
     public bool IsInteracting => dragging;
@@ -128,14 +130,14 @@ internal sealed class TimelineView : Grid
         }
         else
         {
-            timer.Stop(); settle.Stop(); interactionRefresh.Stop(); Interlocked.Increment(ref revision); Interlocked.Increment(ref commitRevision); refreshAgain = previewAgain = false; SetTrackShift(0);
+            timer.Stop(); settle.Stop(); interactionRefresh.Stop(); interactionLabel.Stop(); Interlocked.Increment(ref revision); Interlocked.Increment(ref commitRevision); refreshAgain = previewAgain = false; SetTrackShift(0);
             if (!Design.Motion || !IsLoaded) { Visibility = Visibility.Collapsed; return; }
             _ = HideAfterFade(token);
         }
     }
     void BeginInteraction(double x)
     {
-        interactionRefresh.Stop(); settle.Stop();
+        interactionRefresh.Stop(); interactionLabel.Stop(); settle.Stop();
         Interlocked.Increment(ref revision);
         interactionStartRebuilds = trackRebuilds;
         interactionMoves = interactionQueries = 0;
@@ -150,7 +152,7 @@ internal sealed class TimelineView : Grid
         if (center > DateTimeOffset.Now) center = DateTimeOffset.Now;
         SetTrackShift(startVisualX + delta);
         interactionMoves++;
-        UpdateCenterLabel(center,span,false,updateToolTip: false);
+        if (!interactionLabel.IsRunning) interactionLabel.Start();
         var elapsed = (System.Diagnostics.Stopwatch.GetTimestamp()-started)*1000.0/System.Diagnostics.Stopwatch.Frequency;
         interactionMoveMsTotal += elapsed; interactionMoveMsMax = Math.Max(interactionMoveMsMax,elapsed);
     }
@@ -161,9 +163,10 @@ internal sealed class TimelineView : Grid
     void SetTrackShift(double x) => trackContentVisual.Offset = new((float)x,0,0);
     async Task CommitInteraction()
     {
-        interactionRefresh.Stop(); settle.Stop();
+        interactionRefresh.Stop(); interactionLabel.Stop(); settle.Stop();
         var request = Interlocked.Increment(ref commitRevision);
         var date = center;
+        UpdateCenterLabel(date,span,false,updateToolTip: false);
         // Repaint the ruler independently, but resolve the selected frame on a
         // dedicated path so a slower icon lookup cannot swallow pointer-up.
         _ = Refresh();

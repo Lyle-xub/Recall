@@ -497,10 +497,11 @@ internal sealed class RecallWindow : Window
         var top = Math.Max(toolbarTarget.Top + toolbarTarget.Height,
             Math.Max(archiveClose.Margin.Top + archiveClose.Height,
                 topMenu.Margin.Top + topMenu.Height)) + 20;
-        // Visibility stays true during the timeline's dismissal animation.
-        // Keep the card clear until that visual layer is actually gone.
-        var bottom = timeline.Visibility == Visibility.Visible
-            ? Math.Max(timeline.ActualHeight, timeline.Height) + 12
+        var timelineReserve = Math.Max(timeline.ActualHeight, timeline.Height) + 12;
+        // Rhine cards must have one presentation size. Reserving the timeline
+        // in both states prevents an open card from shrinking when it appears.
+        var bottom = mode == "home" && runtime.Settings.RhineLabMode
+            ? Math.Max(timelineReserve, archive.DateDockReserve + 12)
             : archive.DateDockReserve + 12;
         if (mode == "home" && runtime.Settings.RhineLabMode && archive.IsExpanded)
         {
@@ -525,9 +526,9 @@ internal sealed class RecallWindow : Window
         if (mode != "home" || !runtime.Settings.RhineLabMode) return;
         if (timeline.IsActive)
         {
-            var toolbarBottom = Math.Max(toolbarTarget.Top + toolbarTarget.Height,
-                Math.Max(archiveClose.Margin.Top + archiveClose.Height,topMenu.Margin.Top + topMenu.Height));
-            if (!timeline.IsInteracting && y <= toolbarBottom + 20) HideArchiveTimeline();
+            var timelineTop = Math.Max(0, root.ActualHeight-
+                Math.Max(timeline.ActualHeight,timeline.Height));
+            if (!timeline.IsInteracting && y <= timelineTop+8) HideArchiveTimeline();
             return;
         }
         if (!archive.IsExpanded && !overDayControls && y >= root.ActualHeight-88) ShowArchiveTimeline();
@@ -738,7 +739,8 @@ internal sealed class RecallWindow : Window
         backdrop.Update(desktop, root.ActualWidth, root.ActualHeight, new Rect(), []);
     }
     internal void ValidationShowArchiveTimeline() => ShowArchiveTimeline();
-    internal void ValidationMoveArchivePointerToTop() => UpdateArchiveTimelineForPointer(0,false);
+    internal void ValidationMoveArchivePointerToTop() => UpdateArchiveTimelineForPointer(
+        root.ActualHeight-Math.Max(timeline.ActualHeight,timeline.Height)-1,false);
     internal void ValidationBeginTimelineDrag() { ShowArchiveTimeline(); timeline.ValidationBeginDrag(); }
     internal void ValidationTimelineDrag(int step) => timeline.ValidationDrag(step);
     internal Task ValidationEndTimelineDrag() => timeline.ValidationEndDrag();

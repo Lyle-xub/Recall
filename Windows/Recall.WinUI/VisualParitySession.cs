@@ -286,6 +286,9 @@ internal sealed class VisualParitySession
             var elapsed = Stopwatch.StartNew();
             if (request.TryGetProperty("motionSamples", out var motion))
                 for (var step = 0; step < Math.Clamp(motion.GetInt32(), 0, 120); step++) { window.ValidationRetarget(step); await Task.Delay(250); }
+            if (request.TryGetProperty("timelineCommitFrame", out var timelineCommit))
+                await window.ValidationCommitArchiveTimeline(timelineCommit.GetString()
+                    ?? throw new InvalidDataException("timelineCommitFrame must be a frame id."));
             if (request.TryGetProperty("dragSamples", out var drag))
             {
                 try

@@ -124,6 +124,11 @@ internal sealed class RhineArchiveView : Grid
     RhineSpring crest = new(0), across = new(0), pan = new(0);
     RhineTransition extraction = new(0);
     double crestTarget, acrossTarget, panTarget, extractTarget;
+    Sheet? pendingExtraction;
+    long seekTravelStarted;
+    int seekTravelFrames, lastSeekTravelFrames;
+    double lastSeekTravelMs;
+    bool lastSeekExpandedAfterArrival;
     long previous, transitionStarted;
     double lastTransitionMs, transitionMaxUpdateMs, transitionMaxIntervalMs;
     int transitionFrames, transitionSlowFrames, matrixWrites, wallOffsetWrites, imageRequests;
@@ -131,7 +136,7 @@ internal sealed class RhineArchiveView : Grid
     bool orderDirty = true;
     bool expandedControlsShown;
     bool extractedButtonsEnabled;
-    bool ticking, active, reduced, timeline;
+    bool ticking, active, reduced, timeline, seekPreparing;
     float expandedTopInset, expandedBottomInset;
     Sheet? hovered, extracted, frontCopy;
     DateTime day;
@@ -156,7 +161,7 @@ internal sealed class RhineArchiveView : Grid
     string collectionSummary = "";
     long buildEndedAt;
     double lastQueryMs, lastBuildMs, maxBuildMs, lastReconcileMs, firstImageMs, imageLoadTotalMs, maxImageLoadMs;
-    internal object Diagnostics => new { motionProfile = new { transitionDirection, lastTransitionMs, transitionFrames, transitionSlowFrames, transitionMaxUpdateMs, transitionMaxIntervalMs, transitionMaxQueueMs, transitionMaxClockIntervalMs, transitionClockTicks, framePending = Volatile.Read(ref frameQueued) != 0, matrixWrites, wallOffsetWrites, imageRequests, imagePumpRunning = imageTimer.IsRunning }, startup = new { builds, incrementalUpdates = reconciles, reusedSheets = lastReusedSheets, reusedImages = lastReusedImages, cacheHits = refreshCacheHits, queryCount = archiveQueryCount, lastReconcileMs, lastQueryMs, lastBuildMs, maxBuildMs, sheetCount = sheets.Count, evictedSheets, releasedImages, retainedImageBytes = sheets.Sum(ImageBytes), deferredImages = sheets.Count(s => s.PendingImage != null), firstImageMs, imagesLoadedSinceBuild, imageLoadTotalMs, maxImageLoadMs }, archive = ArchiveDiagnostics(), card = CardDiagnostics(), footer = FooterDiagnostics(), safeArea = new { top = expandedTopInset, bottom = (float)ActualHeight - expandedBottomInset, bottomInset = expandedBottomInset, timelineVisible = timeline, dockHeight = bottomDock.ActualHeight }, copyCount = frontCopy == null ? 0 : 1, active, ticking, dragTargetX, dragTargetY, pointerDown, reducedMotion = reduced, expandedActionsVisible = expandedControlsShown, extraction = extraction.Value, extractTarget, pointerMoves, hoverChanges, expansions, collapses, hovered = hovered?.Frame?.Id, extracted = extracted?.Frame?.Id, crestTarget, acrossTarget, imageCount = sheets.Count(s => s.Frame != null), visiblePhotoCards = sheets.Count(s => s.Frame != null && s.Root.Visibility == Visibility.Visible && NearViewport(s,0)), loadedImages = sheets.Count(s => s.Image?.Source != null), visibleLoadedImages = sheets.Count(s => s.Image?.Source != null && s.Root.Visibility == Visibility.Visible && NearViewport(s,0)), highResolutionImages = sheets.Count(s => s.ImageEdge == ExpandedImageEdge), failedImages = sheets.Count(s => s.Failed) };
+    internal object Diagnostics => new { motionProfile = new { transitionDirection, lastTransitionMs, transitionFrames, transitionSlowFrames, transitionMaxUpdateMs, transitionMaxIntervalMs, transitionMaxQueueMs, transitionMaxClockIntervalMs, transitionClockTicks, framePending = Volatile.Read(ref frameQueued) != 0, matrixWrites, wallOffsetWrites, imageRequests, imagePumpRunning = imageTimer.IsRunning }, seekMotion = new { preparing = seekPreparing, pending = pendingExtraction?.Frame?.Id, travelFrames = lastSeekTravelFrames, travelMs = lastSeekTravelMs, expandedAfterArrival = lastSeekExpandedAfterArrival }, startup = new { builds, incrementalUpdates = reconciles, reusedSheets = lastReusedSheets, reusedImages = lastReusedImages, cacheHits = refreshCacheHits, queryCount = archiveQueryCount, lastReconcileMs, lastQueryMs, lastBuildMs, maxBuildMs, sheetCount = sheets.Count, evictedSheets, releasedImages, retainedImageBytes = sheets.Sum(ImageBytes), deferredImages = sheets.Count(s => s.PendingImage != null), firstImageMs, imagesLoadedSinceBuild, imageLoadTotalMs, maxImageLoadMs }, archive = ArchiveDiagnostics(), card = CardDiagnostics(), footer = FooterDiagnostics(), safeArea = new { top = expandedTopInset, bottom = (float)ActualHeight - expandedBottomInset, bottomInset = expandedBottomInset, timelineVisible = timeline, dockHeight = bottomDock.ActualHeight }, copyCount = frontCopy == null ? 0 : 1, active, ticking, dragTargetX, dragTargetY, pointerDown, reducedMotion = reduced, expandedActionsVisible = expandedControlsShown, extraction = extraction.Value, extractTarget, pointerMoves, hoverChanges, expansions, collapses, hovered = hovered?.Frame?.Id, extracted = extracted?.Frame?.Id, crestTarget, acrossTarget, imageCount = sheets.Count(s => s.Frame != null), visiblePhotoCards = sheets.Count(s => s.Frame != null && s.Root.Visibility == Visibility.Visible && NearViewport(s,0)), loadedImages = sheets.Count(s => s.Image?.Source != null), visibleLoadedImages = sheets.Count(s => s.Image?.Source != null && s.Root.Visibility == Visibility.Visible && NearViewport(s,0)), highResolutionImages = sheets.Count(s => s.ImageEdge == ExpandedImageEdge), failedImages = sheets.Count(s => s.Failed) };
     object ArchiveDiagnostics() => new { initialized = columns.Count != 0,
         indexedRecords = records.Count, maxRows = rows, seekTargetId, seekTargetRow,
         storeRevision = runtime.Store.ArchiveRevision, appliedArchiveRevision,
@@ -708,7 +713,7 @@ internal sealed class RhineArchiveView : Grid
         else
         {
             ReleaseFrontCopy();
-            pointerDown = false; pendingDay = null; ReleasePointerCaptures(); Stop(); imageTimer.Stop(); ++revision; ++seekRevision; imageLoads.Cancel(); archiveQueries.Cancel(); pendingImages.Clear();
+            pointerDown = false; pendingDay = null; pendingExtraction = null; seekPreparing = false; ReleasePointerCaptures(); Stop(); imageTimer.Stop(); ++revision; ++seekRevision; imageLoads.Cancel(); archiveQueries.Cancel(); pendingImages.Clear();
             runningRefresh = null; runningRefreshAnchor = null; runningRefreshRevision = 0;
             foreach (var sheet in sheets)
             { sheet.LoadSerial++; sheet.Loading = false; sheet.LoadingEdge = 0;
@@ -718,11 +723,21 @@ internal sealed class RhineArchiveView : Grid
     public void Seek(MemoryFrame frame, bool expand = false)
     {
         var request = ++seekRevision;
+        if (expand)
+        {
+            // A decode that started before scrubbing can otherwise upload on
+            // the same UI frames used by the rack and extraction transitions.
+            imageTimer.Stop(); imageLoads.Cancel(); imageLoads.Dispose(); imageLoads = new(); pendingImages.Clear();
+            foreach (var sheet in sheets.Where(sheet => sheet.Loading))
+            { sheet.LoadSerial++; sheet.Loading = false; sheet.LoadingEdge = 0; }
+        }
         if (frame.Timestamp.LocalDateTime.Date != day)
         {
+            seekPreparing = expand;
             _ = SeekInDay(frame, expand, request);
             return;
         }
+        seekPreparing = false;
         SeekLoaded(frame, expand);
     }
     async Task SeekInDay(MemoryFrame frame, bool expand, int request)
@@ -730,6 +745,7 @@ internal sealed class RhineArchiveView : Grid
         var target = frame.Timestamp.LocalDateTime.Date;
         await Refresh(target);
         if (active && request == seekRevision && day == target) SeekLoaded(frame, expand);
+        else if (request == seekRevision) seekPreparing = false;
     }
     void SeekLoaded(MemoryFrame frame, bool expand)
     {
@@ -743,8 +759,23 @@ internal sealed class RhineArchiveView : Grid
                 var row = Array.FindIndex(entries, item => item.Id == frame.Id);
                 if (row >= 0) { sheet = EnsureSheet(lane, row); break; }
             }
-        if (sheet == null || extracted == sheet && extractTarget == 1) return;
+        if (sheet == null || extracted == sheet && extractTarget == 1)
+        {
+            seekPreparing = false;
+            if (active) imageTimer.Start();
+            return;
+        }
+        if (pendingExtraction == sheet && expand) return;
         seekTargetId = frame.Id; seekTargetRow = sheet.Row;
+        if (pendingExtraction is { } previousTarget && previousTarget != sheet)
+        {
+            ReleaseFrontCopy();
+            SetFooterRaster(previousTarget,1,1,false);
+            RemoveProjectedActions(previousTarget);
+            previousTarget.ExpandedAspect = previousTarget.Aspect;
+            Shape(previousTarget,535,650);
+        }
+        pendingExtraction = null;
         if (extracted is { } old)
         {
             ReleaseFrontCopy();
@@ -766,7 +797,18 @@ internal sealed class RhineArchiveView : Grid
                 candidate.Height = new(RhineGeometry.Height(candidate.Lane,candidate.Depth,crestTarget,acrossTarget));
             orderDirty = true;
         }
-        if (expand) Expand(sheet);
+        if (expand)
+        {
+            // Build the invisible action plane and decorative foreground copy
+            // before motion starts, so first-use XAML layout cannot pause the
+            // visible handoff from rack travel to extraction.
+            PrepareExpansion(sheet);
+            pendingExtraction = sheet;
+            seekPreparing = false;
+            seekTravelStarted = Stopwatch.GetTimestamp(); seekTravelFrames = 0;
+            lastSeekTravelFrames = 0; lastSeekTravelMs = 0;
+            lastSeekExpandedAfterArrival = false;
+        }
         Wake();
     }
     async void ShiftDay(int delta)
@@ -782,7 +824,7 @@ internal sealed class RhineArchiveView : Grid
     {
         var started = Stopwatch.GetTimestamp();
         imageLoads.Cancel(); imageLoads.Dispose(); imageLoads = new();
-        Stop(); imageTimer.Stop(); awaitingFirstImage = false; orderDirty = true; ReleaseFrontCopy(); wall.Children.Clear(); sheets.Clear(); drawOrder.Clear(); dayTags.Clear(); realized.Clear(); pendingImages.Clear(); extracted = hovered = null;
+        Stop(); imageTimer.Stop(); awaitingFirstImage = false; orderDirty = true; ReleaseFrontCopy(); wall.Children.Clear(); sheets.Clear(); drawOrder.Clear(); dayTags.Clear(); realized.Clear(); pendingImages.Clear(); extracted = hovered = pendingExtraction = null;
         seekTargetId = null; seekTargetRow = -1;
         ExpansionChanged?.Invoke(false);
         dragX = dragY = new(0); dragTargetX = dragTargetY = 0;
@@ -799,7 +841,8 @@ internal sealed class RhineArchiveView : Grid
         palettes = Enumerable.Range(-2,5).ToDictionary(l => l, CreateGlass);
         RefreshDayTags();
         darkAtBuild = Design.Dark;
-        reduced = !Design.Motion; UpdateCaption(); Wake(); imageTimer.Start();
+        reduced = !Design.Motion; UpdateCaption(); Wake();
+        if (!DeferringImages) imageTimer.Start();
         builds++; lastBuildMs = (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency;
         maxBuildMs = Math.Max(maxBuildMs, lastBuildMs);
         buildEndedAt = Stopwatch.GetTimestamp(); firstImageMs = imageLoadTotalMs = maxImageLoadMs = 0; imagesLoadedSinceBuild = 0;
@@ -813,7 +856,7 @@ internal sealed class RhineArchiveView : Grid
         realized[(lane, row)] = sheet;
         sheets.Add(sheet); drawOrder.Add(sheet); wall.Children.Add(sheet.Root);
         orderDirty = true;
-        if (active && !imageTimer.IsRunning) imageTimer.Start();
+        if (active && !DeferringImages && !imageTimer.IsRunning) imageTimer.Start();
         return sheet;
     }
     void RefreshDayTags()
@@ -1048,13 +1091,13 @@ internal sealed class RhineArchiveView : Grid
     bool PruneSheets()
     {
         foreach (var sheet in sheets)
-            if (sheet != extracted && sheet != hovered && !sheet.Loading &&
+            if (sheet != extracted && sheet != hovered && sheet != pendingExtraction && !sheet.Loading &&
                 (sheet.Image?.Source != null || sheet.PendingImage != null) &&
                 sheet.Root.Visibility == Visibility.Collapsed && !NearViewport(sheet, 220))
             { if (sheet.Image != null) sheet.Image.Source = null; sheet.ImageEdge = 0; sheet.PendingImage = null; sheet.PendingEdge = 0; releasedImages++; }
         var retained = Math.Max(80, sheets.Count(s => NearViewport(s, 220)) + 24);
         if (sheets.Count <= retained) return false;
-        var victims = sheets.Where(s => s != extracted && s != hovered && !s.Loading && !NearViewport(s, 220))
+        var victims = sheets.Where(s => s != extracted && s != hovered && s != pendingExtraction && !s.Loading && !NearViewport(s, 220))
             .OrderByDescending(s => Math.Abs(s.Depth - pan.Value)).Take(8).ToArray();
         foreach (var sheet in victims)
         {
@@ -1231,7 +1274,7 @@ internal sealed class RhineArchiveView : Grid
         if (frontCopy?.ActionBorders is { } copyBorders)
         { copyBorders[index].BorderBrush = borders[index].BorderBrush; copyBorders[index].BorderThickness = borders[index].BorderThickness; }
     }
-    bool DeferringImages => pointerDown || transitionStarted != 0 || extracted != null && !extraction.Settled(extractTarget);
+    bool DeferringImages => pointerDown || seekPreparing || pendingExtraction != null || transitionStarted != 0 || extracted != null && !extraction.Settled(extractTarget);
     void PresentImage(Sheet sheet, BitmapImage bitmap, int edge)
     {
         if (sheet.Image == null) return;
@@ -1346,9 +1389,35 @@ internal sealed class RhineArchiveView : Grid
         }
         return best;
     }
+    void PrepareExpansion(Sheet sheet)
+    {
+        sheet.ExpandedAspect = sheet.Aspect;
+        CreateProjectedActions(sheet);
+        var (openWidth, openHeight) = RhineGeometry.ExpandedSize(sheet.ExpandedAspect,
+            (float)ActualWidth,(float)ActualHeight,expandedTopInset,expandedBottomInset);
+        var view = RhineGeometry.View((float)panTarget);
+        Matrix4x4.Invert(view,out var camera);
+        var destination = Vector3.Transform(new Vector3(0,0,-14),camera);
+        var finalMatrix = RhineGeometry.Plane(destination,Quaternion.CreateFromRotationMatrix(camera),view,
+            (float)ActualWidth,(float)ActualHeight);
+        var finalScale = RhineGeometry.FooterScreenScale(
+            RhineGeometry.Layout(openWidth,openHeight,sheet.ExpandedAspect),finalMatrix);
+        if (ActualWidth >= 100 && ActualHeight >= 100 && finalScale >= .05f && float.IsFinite(finalScale))
+            SetFooterRaster(sheet,Math.Max(1,finalScale),finalScale,true);
+        else SetFooterRaster(sheet,1,1,false);
+        sheet.Footer?.UpdateLayout();
+        CreateFrontCopy(sheet);
+        if (frontCopy is { } copy)
+        {
+            SetFooterRaster(copy,sheet.FooterRasterScale,sheet.ExpandedProjectedScale,true);
+            copy.Footer?.UpdateLayout();
+            Shape(copy,sheet.Width,sheet.Size);
+        }
+    }
     void Expand(Sheet sheet)
     {
         if (extracted != null && extracted != sheet) return;
+        pendingExtraction = null;
         expansions++;
         sheet.FocusVisual!.Opacity = RhineGeometry.Smooth(((float)extraction.Value-.12f)/.78f);
         if (!sheet.GlassAttached) { GlassMaterial.Attach(sheet.FocusGlass!, 2, desktopSurface: false); sheet.GlassAttached = true; }
@@ -1356,25 +1425,7 @@ internal sealed class RhineArchiveView : Grid
         extractedDate.Text = sheet.Frame?.Timestamp.LocalDateTime.ToString("MMM d · HH:mm") ?? "";
         starAction.Content = Design.Text(sheet.Frame?.Starred == true ? "Starred" : "Star", 13);
         AutomationProperties.SetName(starAction, sheet.Frame?.Starred == true ? "Starred" : "Star");
-        sheet.ExpandedAspect = sheet.Aspect;
-        CreateProjectedActions(sheet);
-        var (openWidth, openHeight) = RhineGeometry.ExpandedSize(sheet.ExpandedAspect,
-            (float)ActualWidth, (float)ActualHeight, expandedTopInset, expandedBottomInset);
-        var view = RhineGeometry.View((float)pan.Value);
-        Matrix4x4.Invert(view, out var camera);
-        var destination = Vector3.Transform(new Vector3(0,0,-14), camera);
-        var finalMatrix = RhineGeometry.Plane(destination, Quaternion.CreateFromRotationMatrix(camera), view,
-            (float)ActualWidth, (float)ActualHeight);
-        var finalScale = RhineGeometry.FooterScreenScale(
-            RhineGeometry.Layout(openWidth, openHeight, sheet.ExpandedAspect), finalMatrix);
-        // A harness may request a card before its first measured viewport.
-        // Never divide by a near-zero projection to create giant XAML glyphs;
-        // SizeChanged will establish the final 18/14/16 DIP raster once ready.
-        if (ActualWidth >= 100 && ActualHeight >= 100 && finalScale >= .05f && float.IsFinite(finalScale))
-            SetFooterRaster(sheet, Math.Max(1, finalScale), finalScale, true);
-        else SetFooterRaster(sheet, 1, 1, false);
-        sheet.Footer?.UpdateLayout();
-        CreateFrontCopy(sheet);
+        PrepareExpansion(sheet);
         // Complete the one-time XAML layout before starting the 620 ms clock.
         // Otherwise the first render can include a full duplicate card layout.
         BeginTransition("open");
@@ -1520,6 +1571,7 @@ internal sealed class RhineArchiveView : Grid
         var cameraRotation = Quaternion.CreateFromRotationMatrix(camera);
         var span = 19.98f * (float)(ActualHeight / ActualWidth);
         var refreshScene = sceneMoving || orderDirty || viewportDirty;
+        var rackMoving = sceneMoving;
         var depthChanged = false;
         foreach (var s in sheets)
         {
@@ -1527,7 +1579,9 @@ internal sealed class RhineArchiveView : Grid
             if (s != extracted && !refreshScene && s.Height.Settled(wanted)) continue;
             var previousHeight = s.Height.Value;
             if (reduced) s.Height = new(wanted); else s.Height.Step(wanted, 9 - Math.Abs(s.Lane) * .9, dt);
-            moving |= !s.Height.Settled(wanted);
+            var heightMoving = !s.Height.Settled(wanted);
+            moving |= heightMoving;
+            if (s != extracted) rackMoving |= heightMoving;
             depthChanged |= s != extracted && Math.Abs(s.Height.Value - previousHeight) > .0001;
             var rotation = Quaternion.Identity;
             s.Position = new(s.Lane * (s.Lane < 0 ? 5.65f : 6.25f), (float)s.Height.Value, (float)s.Depth - 5);
@@ -1610,6 +1664,27 @@ internal sealed class RhineArchiveView : Grid
             }
             var opacity = Math.Clamp((60-s.Distance)/24,s.Frame == null ? .08f : .18f,1); opacity += (1-opacity)*blend;
             if (Math.Abs(s.DrawOpacity-opacity) > .002) { s.Visual.Opacity = opacity; s.DrawOpacity = opacity; }
+        }
+        if (pendingExtraction is { } target && extracted == null)
+        {
+            seekTravelFrames++;
+            var targetHeight = RhineGeometry.Height(target.Lane,target.Depth,crestTarget,acrossTarget);
+            var arrived = !rackMoving && target.Height.Settled(targetHeight);
+            if (arrived)
+            {
+                // Remove the sub-pixel spring tail before extraction. Without
+                // this snap, every background sheet keeps receiving matrices
+                // while the foreground card is opening.
+                crest = new(crestTarget); across = new(acrossTarget); pan = new(panTarget);
+                foreach (var sheet in sheets)
+                    sheet.Height = new(RhineGeometry.Height(sheet.Lane,sheet.Depth,crestTarget,acrossTarget));
+                lastSeekTravelFrames = seekTravelFrames;
+                lastSeekTravelMs = seekTravelStarted == 0 ? 0 :
+                    (Stopwatch.GetTimestamp()-seekTravelStarted)*1000.0/Stopwatch.Frequency;
+                lastSeekExpandedAfterArrival = true;
+                Expand(target);
+                moving = true;
+            }
         }
         foreach (var tag in dayTags.Values)
         {
