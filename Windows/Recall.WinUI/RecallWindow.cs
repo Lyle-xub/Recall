@@ -169,9 +169,10 @@ internal sealed class RecallWindow : Window
             mode = "onboarding";
         Compose();
         shell.Show();
+        Program.TraceStartup("Window shown");
         lastShowMs = (Stopwatch.GetTimestamp()-showStarted)*1000.0/Stopwatch.Frequency;
         statusTimer.Start();
-        Design.Spring(root, 20, .985f, response: .64);
+        if (!runtime.Settings.RhineLabMode) Design.Spring(root, 20, .985f, response: .64);
         _ = ActivateGlassAfterFirstFrame();
         _ = RecordMaterialDiagnostics();
     }
@@ -179,7 +180,19 @@ internal sealed class RecallWindow : Window
     {
         if (IsShown) return;
         CaptureDesktopScene();
-        if (runtime.Settings.RhineLabMode) _ = archive.Refresh();
+        if (runtime.Settings.RhineLabMode && (runtime.Settings.OnboardingComplete || runtime.HasMemories))
+        {
+            // A background launch should prepare real card surfaces and decoded
+            // thumbnails, not just metadata. The native window stays hidden;
+            // recording visibility continues to be owned by Show/Hide.
+            var size = shell.PrepareHiddenLayout();
+            Compose();
+            archive.SetActive(true);
+            root.Measure(size);
+            root.Arrange(new Rect(0, 0, size.Width, size.Height));
+            _ = archive.Refresh();
+        }
+        _ = RecordMaterialDiagnostics();
     }
     async Task ActivateGlassAfterFirstFrame()
     {
@@ -313,7 +326,8 @@ internal sealed class RecallWindow : Window
             var report = new { capturedAt = DateTimeOffset.UtcNow, processPath = Environment.ProcessPath,
                 mode, dark = Design.Dark, rhine = runtime.Settings.RhineLabMode,
                 scale = root.XamlRoot?.RasterizationScale, native = shell.Diagnostics,
-                glass = GlassMaterial.Diagnostics, backdrop = backdrop.Diagnostics };
+                glass = GlassMaterial.Diagnostics, backdrop = backdrop.Diagnostics,
+                startup = Program.StartupDiagnostics, archiveStartup = archive.StartupDiagnostics };
             await File.WriteAllTextAsync(Path.Combine(AppPaths.DataRoot, "material-diagnostics.json"),
                 System.Text.Json.JsonSerializer.Serialize(report, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         }
@@ -423,6 +437,7 @@ internal sealed class RecallWindow : Window
     {
         var top = mode != "home" || runtime.Settings.RhineLabMode || selected != null;
         var rhine = mode == "home" && runtime.Settings.RhineLabMode;
+        immediate |= rhine;
         // The reference Mac window is 1512 points wide. Scale the complete
         // 1020-point toolbar as one unit so its viewport proportions survive
         // the narrower 1374-point Windows test desktop.
@@ -487,7 +502,7 @@ internal sealed class RecallWindow : Window
         var rhineSearchWidth = Math.Max(230, 620 * rhineScale);
         var target = (Width: rhine ? rhineSearchWidth : expanded ? Math.Max(230, width - 400) : Math.Min(860, Math.Max(230, root.ActualWidth - 196)),
             Height: rhine ? size : expanded ? 64.0 : 72.0, Top: rhine ? 32.0 : top ? 11.0 : Math.Max(72, root.ActualHeight * .425 - 36), Actions: actionWidth);
-        if (target == toolbarTarget) return;
+        if (target == toolbarTarget && !immediate) return;
         toolbarTarget = target;
         UpdateArchiveSafeArea();
         toolbarTimer?.Stop();
@@ -579,9 +594,16 @@ internal sealed class RecallWindow : Window
     void Expand()
     {
         var entering = !expanded;
+        var instant = mode == "home" && runtime.Settings.RhineLabMode;
         expanded = true; actions.Visibility = Visibility.Visible;
-        LayoutToolbar();
-        if (entering) for (int i = 0; i < actions.Children.Count; i++) LiquidMotion.Emerge((FrameworkElement)actions.Children[i], i);
+        LayoutToolbar(immediate: instant);
+        if (instant)
+        {
+            LiquidMotion.Cancel(actions);
+            foreach (FrameworkElement action in actions.Children)
+            { action.RenderTransform = null; action.Opacity = 1; }
+        }
+        else if (entering) for (int i = 0; i < actions.Children.Count; i++) LiquidMotion.Emerge((FrameworkElement)actions.Children[i], i);
     }
     void Collapse()
     {

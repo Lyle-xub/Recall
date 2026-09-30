@@ -29,6 +29,11 @@
     <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
     <AppxGeneratePriEnabled>false</AppxGeneratePriEnabled>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Release' and '$(RecallSourceCheck)' != 'true'">
+    <!-- Precompile managed startup paths instead of paying their JIT cost
+         while the first WinUI window and archive rack are being constructed. -->
+    <PublishReadyToRun>true</PublishReadyToRun>
+  </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Recall.Ocr/Recall.Ocr.csproj"/>
     <ProjectReference Include="../../Core/Recall.Core.csproj"/>

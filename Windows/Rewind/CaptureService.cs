@@ -30,6 +30,9 @@ public sealed class CaptureService : IDisposable
     private readonly SemaphoreSlim indexGate = new(1,1);
     private readonly CancellationTokenSource lifetime = new();
     private readonly Task indexingWorker;
+    private readonly object discoveryGate = new();
+    private Task discoveryWorker = Task.CompletedTask;
+    private bool discoveryStarted, discoveryStopped;
     private readonly VisualPromotionWorker visualPromotion;
     private volatile bool interfaceVisible;
     private RecordingSession? stoppedSession;
@@ -40,7 +43,7 @@ public sealed class CaptureService : IDisposable
     public event Action<RecordingSession>? SegmentFinished;
     public bool IsRecording => cts is { IsCancellationRequested: false };
     public bool IsPrivacyPaused => privacyPaused;
-    public CaptureService(MemoryStore store)
+    public CaptureService(MemoryStore store, bool deferBackgroundDiscovery = false)
     {
         this.store = store;
         interfaceVisible = !Environment.GetCommandLineArgs().Any(argument => argument is "--background" or "--cli-service" or "--visual-parity" or "--smoke-test");
@@ -56,10 +59,36 @@ public sealed class CaptureService : IDisposable
         }, error => Error?.Invoke("Visual archive verification retained original captures. " + error.Message), lifetime.Token, () => interfaceVisible);
         // Discovery scans historical metadata only once at startup. Steady-state
         // OCR and segment completion signal their specific ready session IDs.
-        foreach (var sessionId in store.UnfinishedVisualSessions()) visualPromotion.Request(sessionId);
         indexingWorker = Task.Run(IndexLoop);
-        foreach (var frame in store.PendingFrames())
-            QueueIndex(frame.Id);
+        if (!deferBackgroundDiscovery) StartBackgroundDiscovery();
+    }
+    public void StartBackgroundDiscovery()
+    {
+        lock (discoveryGate)
+        {
+            if (discoveryStarted || discoveryStopped) return;
+            discoveryStarted = true;
+            discoveryWorker = Task.Run(async () =>
+            {
+                try
+                {
+                    while (interfaceVisible) await Task.Delay(200, lifetime.Token);
+                    if (lifetime.IsCancellationRequested) return;
+                    foreach (var sessionId in store.UnfinishedVisualSessions())
+                    {
+                        if (lifetime.IsCancellationRequested) return;
+                        visualPromotion.Request(sessionId);
+                    }
+                    foreach (var id in store.PendingFrameIds())
+                    {
+                        if (lifetime.IsCancellationRequested) return;
+                        QueueIndex(id);
+                    }
+                }
+                catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+                catch (Exception error) { Error?.Invoke("Background discovery failed. " + error.Message); }
+            });
+        }
     }
     private void QueueVisualPromotion(string sessionId)
     {
@@ -573,6 +602,9 @@ public sealed class CaptureService : IDisposable
         finally
         {
             lifetime.Cancel();
+            Task discovery;
+            lock (discoveryGate) { discoveryStopped = true; discovery = discoveryWorker; }
+            await discovery;
             indexing.Writer.TryComplete();
             try { await indexingWorker; }
             finally

@@ -27,7 +27,8 @@ public sealed class DefaultLibrary(string parent, bool? windowsLayout = null)
         foreach(var component in full[current.Length..].Split(Path.DirectorySeparatorChar,StringSplitOptions.RemoveEmptyEntries))
         {
             current=Path.Combine(current,component);
-            if(Directory.Exists(current)) current=new DirectoryInfo(current).ResolveLinkTarget(true)?.FullName ?? current;
+            if(Directory.Exists(current) && (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                current=new DirectoryInfo(current).ResolveLinkTarget(true)?.FullName ?? current;
         }
         return Path.TrimEndingDirectorySeparator(current);
     }

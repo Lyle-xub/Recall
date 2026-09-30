@@ -6,10 +6,19 @@ internal static class Program
 {
     private static Mutex? single;
     static string? startupLog;
+    static readonly long enteredAt = System.Diagnostics.Stopwatch.GetTimestamp();
+    static readonly object stagesGate = new();
+    static readonly Dictionary<string, double> stages = [];
+    internal static object StartupDiagnostics
+    {
+        get { lock (stagesGate) return new Dictionary<string, double>(stages); }
+    }
     internal static void TraceStartup(string stage)
     {
+        var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(enteredAt).TotalMilliseconds;
+        lock (stagesGate) stages.TryAdd(stage, Math.Round(elapsed, 2));
         if (startupLog == null) return;
-        try { File.AppendAllText(startupLog, $"{DateTimeOffset.UtcNow:O} [{Environment.CurrentManagedThreadId}] {stage}{Environment.NewLine}"); }
+        try { File.AppendAllText(startupLog, $"{DateTimeOffset.UtcNow:O} +{elapsed:F2}ms [{Environment.CurrentManagedThreadId}] {stage}{Environment.NewLine}"); }
         catch (IOException) { }
     }
     [STAThread]
@@ -123,17 +132,34 @@ internal sealed class App : Application, Microsoft.UI.Xaml.Markup.IXamlMetadataP
         Program.TraceStartup("Window constructed");
         if (parity >= 0)
         {
+            runtime.StartBackgroundWork();
             await VisualParitySession.Start(CurrentWindow, runtime, arguments[parity + 1]);
             return;
         }
         if (smoke >= 0)
         {
+            runtime.StartBackgroundWork();
             _ = SmokeRunner.Run(CurrentWindow, runtime, arguments[smoke + 1]);
             return;
         }
         if (!arguments.Contains("--background") && !arguments.Contains("--cli-service"))
+        {
+            // Defer historical discovery until the first composition callback.
+            // The library schema and recovery are already ready for interaction.
+            EventHandler<object>? firstFrame = null;
+            firstFrame = (_, _) =>
+            {
+                Microsoft.UI.Xaml.Media.CompositionTarget.Rendering -= firstFrame;
+                Program.TraceStartup("First rendering callback");
+                CurrentWindow.DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, runtime.StartBackgroundWork);
+            };
+            Microsoft.UI.Xaml.Media.CompositionTarget.Rendering += firstFrame;
             CurrentWindow.Show();
+        }
         else
+        {
             CurrentWindow.PrimeHiddenState();
+            runtime.StartBackgroundWork();
+        }
     }
 }

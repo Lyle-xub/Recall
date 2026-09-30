@@ -34,6 +34,9 @@ internal sealed class AppRuntime
     private readonly Channel<RecordingSession> speech = Channel.CreateUnbounded<RecordingSession>(new() { SingleReader = true });
     private readonly UsageRecorder usage;
     private readonly Task usageWorker, speechWorker;
+    private Task backgroundStartup = Task.CompletedTask;
+    private readonly object backgroundStartupGate = new();
+    private bool backgroundStartupStarted;
     private volatile bool sessionLocked, powerSuspended;
     private volatile bool interfaceVisible;
     private bool Suspended => sessionLocked || powerSuspended;
@@ -71,9 +74,9 @@ internal sealed class AppRuntime
         if (visualParity) Settings.RecordingRequested = false;
         Store = new(AppPaths.DataRoot);
         Store.RecoverInterruptedVisualSessions();
-        HasMemories = Store.Count > 0;
+        HasMemories = Store.LatestArchiveDay() != null;
         usage = new(Store);
-        Capture = new(Store);
+        Capture = new(Store, deferBackgroundDiscovery: true);
         Capture.SetInterfaceVisible(interfaceVisible);
         Recording = new(async () =>
         {
@@ -108,13 +111,42 @@ internal sealed class AppRuntime
         SystemEvents.PowerModeChanged += PowerChange;
         usageWorker = Task.Run(UsageLoop);
         speechWorker = Task.Run(SpeechLoop);
-        foreach (var session in Store.Sessions().Where(s => s.EndedAt != null && s.HasAudio && s.SpeechState is RecognitionState.Pending or RecognitionState.Working))
-            QueueSpeech(session);
-        Store.Retain(Settings.RetentionDays);
         cliControl = new(Store.Root, "windows", Control, ownership);
         if (Settings.RecordingRequested)
             Recording.Request(true);
         QueueRecordingDiagnostics();
+    }
+    public void StartBackgroundWork()
+    {
+        lock (backgroundStartupGate)
+        {
+            if (backgroundStartupStarted || lifetime.IsCancellationRequested) return;
+            backgroundStartupStarted = true;
+            backgroundStartup = Task.Run(async () =>
+            {
+                try
+                {
+                    if (lifetime.IsCancellationRequested) return;
+                    Store.Retain(Settings.RetentionDays);
+                    HasMemories = Store.LatestArchiveDay() != null;
+                    LibraryChanged?.Invoke();
+                    // Historical scans share the store connection with the
+                    // first rack. Follow the existing OCR/speech pause policy
+                    // so discovery cannot take that connection while UI opens.
+                    while (interfaceVisible) await Task.Delay(200, lifetime.Token);
+                    if (lifetime.IsCancellationRequested) return;
+                    Capture.StartBackgroundDiscovery();
+                    foreach (var session in Store.Sessions().Where(s => s.EndedAt != null && s.HasAudio &&
+                        s.SpeechState is RecognitionState.Pending or RecognitionState.Working))
+                    {
+                        if (lifetime.IsCancellationRequested) return;
+                        QueueSpeech(session);
+                    }
+                }
+                catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+                catch (Exception error) { Error?.Invoke(error.Message); }
+            });
+        }
     }
     private void ReportRecordingError(string message)
     {
@@ -412,6 +444,9 @@ internal sealed class AppRuntime
     {
         await cliControl.Stop(releaseOwnership: false);
         lifetime.Cancel();
+        Task startup;
+        lock (backgroundStartupGate) startup = backgroundStartup;
+        await startup;
         speech.Writer.TryComplete();
         await Recording.Shutdown();
         await Capture.Shutdown();

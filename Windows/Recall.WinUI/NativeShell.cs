@@ -81,6 +81,14 @@ internal sealed class NativeShell : IDisposable
         ConfigureTransparency();
         int enabled = 1; hostBackdropResult = DwmSetWindowAttribute(handle,17,ref enabled,4); hostBackdropEnabled = true;
     }
+    public Size PrepareHiddenLayout()
+    {
+        var bounds = Forms.Screen.FromPoint(Forms.Cursor.Position).WorkingArea;
+        // Size the hidden HWND without activating it or exposing the overlay.
+        SetWindowPos(handle, 0, bounds.X, bounds.Y, bounds.Width, bounds.Height, SwpNoActivate | 0x4);
+        var scale = GetDpiForWindow(handle) / 96d;
+        return new Size(bounds.Width / scale, bounds.Height / scale);
+    }
     public void Show()
     {
         if (!hostBackdropEnabled) PrepareBackdrop();

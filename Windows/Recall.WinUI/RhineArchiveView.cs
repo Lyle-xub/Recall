@@ -147,6 +147,7 @@ internal sealed class RhineArchiveView : Grid
         Dictionary<string,(int Lane,int Row)> Positions, string Summary, int Rows, bool SameAsPrevious);
     int revision, rows = 20;
     long appliedArchiveRevision = -1;
+    bool completeArchive;
     Task? runningRefresh;
     DateTime? runningRefreshAnchor;
     int runningRefreshRevision;
@@ -162,6 +163,10 @@ internal sealed class RhineArchiveView : Grid
     string collectionSummary = "";
     long buildEndedAt;
     double lastQueryMs, coldFirstRackMs, lastBuildMs, maxBuildMs, lastReconcileMs, firstImageMs, imageLoadTotalMs, maxImageLoadMs;
+    internal object StartupDiagnostics => new { builds, archiveQueryCount, completeArchive,
+        coldFirstRackMs, lastQueryMs, lastBuildMs, firstImageMs, imagesLoadedSinceBuild,
+        visiblePhotoCards = sheets.Count(s => s.Frame != null && s.Root.Visibility == Visibility.Visible && NearViewport(s,0)),
+        visibleLoadedImages = sheets.Count(s => s.Image?.Source != null && s.Root.Visibility == Visibility.Visible && NearViewport(s,0)) };
     internal object Diagnostics => new { motionProfile = new { transitionDirection, lastTransitionMs, transitionFrames, transitionSlowFrames, transitionMaxUpdateMs, transitionMaxIntervalMs, transitionMaxQueueMs, transitionMaxClockIntervalMs, transitionClockTicks, framePending = Volatile.Read(ref frameQueued) != 0, matrixWrites, wallOffsetWrites, imageRequests, imagePumpRunning = imageTimer.IsRunning }, seekMotion = new { preparing = seekPreparing, pending = pendingExtraction?.Frame?.Id, travelFrames = lastSeekTravelFrames, travelMs = lastSeekTravelMs, expandedAfterArrival = lastSeekExpandedAfterArrival }, startup = new { builds, incrementalUpdates = reconciles, reusedSheets = lastReusedSheets, reusedImages = lastReusedImages, cacheHits = refreshCacheHits, queryCount = archiveQueryCount, coldFirstRackMs, lastReconcileMs, lastQueryMs, lastBuildMs, maxBuildMs, sheetCount = sheets.Count, evictedSheets, releasedImages, retainedImageBytes = sheets.Sum(ImageBytes), deferredImages = sheets.Count(s => s.PendingImage != null), firstImageMs, imagesLoadedSinceBuild, imageLoadTotalMs, maxImageLoadMs }, archive = ArchiveDiagnostics(), card = CardDiagnostics(), footer = FooterDiagnostics(), safeArea = new { top = expandedTopInset, bottom = (float)ActualHeight - expandedBottomInset, bottomInset = expandedBottomInset, timelineVisible = timeline, dockHeight = bottomDock.ActualHeight }, copyCount = frontCopy == null ? 0 : 1, active, ticking, dragTargetX, dragTargetY, pointerDown, reducedMotion = reduced, expandedActionsVisible = expandedControlsShown, extraction = extraction.Value, extractTarget, pointerMoves, hoverChanges, expansions, collapses, hovered = hovered?.Frame?.Id, extracted = extracted?.Frame?.Id, crestTarget, acrossTarget, imageCount = sheets.Count(s => s.Frame != null), visiblePhotoCards = sheets.Count(s => s.Frame != null && s.Root.Visibility == Visibility.Visible && NearViewport(s,0)), loadedImages = sheets.Count(s => s.Image?.Source != null), visibleLoadedImages = sheets.Count(s => s.Image?.Source != null && s.Root.Visibility == Visibility.Visible && NearViewport(s,0)), highResolutionImages = sheets.Count(s => s.ImageEdge == ExpandedImageEdge), failedImages = sheets.Count(s => s.Failed) };
     object ArchiveDiagnostics() => new { initialized = columns.Count != 0,
         indexedRecords = records.Count, maxRows = rows, seekTargetId, seekTargetRow,
@@ -475,7 +480,7 @@ internal sealed class RhineArchiveView : Grid
         // query must remain visible as a later revision, not be marked applied.
         var storeRevision = runtime.Store.ArchiveRevision;
         if (columns.Count != 0 && (anchor == null || anchor == day) &&
-            darkAtBuild == Design.Dark && storeRevision == appliedArchiveRevision)
+            completeArchive && darkAtBuild == Design.Dark && storeRevision == appliedArchiveRevision)
         {
             refreshCacheHits++;
             reduced = !Design.Motion;
@@ -496,18 +501,19 @@ internal sealed class RhineArchiveView : Grid
         archiveQueryCount++;
         try
         {
-            // On a cold open, make the selected day interactive first. The two
-            // neighbouring days on each side are reconciled after the UI has had
-            // a chance to present the initial rack.
-            if (columns.Count == 0 && anchor == null)
+            // Bound the first query independently for all five columns. A busy
+            // day must not delay the first rack or leave its neighbours blank.
+            if (columns.Count == 0)
             {
                 prepared = await Task.Run(() => PrepareArchive(
-                    runtime.Store.ArchiveIndex(nextDay,0,queryToken),nextDay,previous,queryToken),queryToken);
+                    runtime.Store.ArchivePreview(nextDay,cancellation: queryToken),nextDay,previous,queryToken),queryToken);
                 if (version != revision) return;
+                completeArchive = false;
                 records = prepared.Frames; day = nextDay; Build(prepared);
+                WarmFirstImages(queryToken);
                 coldFirstRackMs = (Stopwatch.GetTimestamp()-started)*1000.0/Stopwatch.Frequency;
+                Program.TraceStartup("Rhine preview ready");
                 await Task.Yield();
-                await Task.Delay(60,queryToken);
                 archiveQueryCount++;
                 prepared = await Task.Run(() => PrepareArchive(
                     runtime.Store.ArchiveIndex(nextDay,cancellation: queryToken),nextDay,records,queryToken),queryToken);
@@ -517,6 +523,7 @@ internal sealed class RhineArchiveView : Grid
         }
         catch (OperationCanceledException) { return; }
         if (version != revision) return;
+        completeArchive = true;
         lastQueryMs = (Stopwatch.GetTimestamp() - started) * 1000.0 / Stopwatch.Frequency;
         // A return from settings/search is a refresh of the existing archive,
         // not a request to jump back to the newest day the user already left.
@@ -541,6 +548,24 @@ internal sealed class RhineArchiveView : Grid
         appliedArchiveRevision = storeRevision;
         if (active && runtime.Store.ArchiveRevision != storeRevision)
             DispatcherQueue.TryEnqueue(() => _ = Refresh());
+    }
+
+    void WarmFirstImages(CancellationToken token)
+    {
+        // Prepare the front rows before their XAML sheets exist, including a
+        // background launch. Load shares requests with the normal image pump.
+        // The small batch respects MemoryImages' existing pipeline budget.
+        var centerRow = Math.Min(8, Math.Max(0, columns[0].Length - 1));
+        var frames = new[] { 0, -1, 1, -2, 2 }.SelectMany(lane =>
+            columns[lane].Skip(Math.Max(0, centerRow - 1)).Take(2)).ToArray();
+        foreach (var frame in frames) _ = WarmImage(frame.ImagePath, token);
+    }
+
+    async Task WarmImage(string path, CancellationToken token)
+    {
+        try { await MemoryImages.Load(runtime.Store, path, WallImageEdge, token); }
+        catch (OperationCanceledException) { }
+        catch { /* The normal sheet load reports unavailable images. */ }
     }
     static PreparedArchive PrepareArchive(List<ArchiveFrame> frames, DateTime day,
         IReadOnlyList<ArchiveFrame> previous, CancellationToken token)
@@ -1329,7 +1354,10 @@ internal sealed class RhineArchiveView : Grid
             }
         }
         if (imagesLoadedSinceBuild++ == 0 && buildEndedAt != 0)
+        {
             firstImageMs = (Stopwatch.GetTimestamp() - buildEndedAt) * 1000.0 / Stopwatch.Frequency;
+            Program.TraceStartup("Rhine first image assigned");
+        }
         // A loaded screenshot needs an opaque backing, including in dark mode.
         if (sheet.Art != null)
         {

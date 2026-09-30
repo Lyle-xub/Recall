@@ -9,6 +9,7 @@ internal static class ArchiveFramesTests
     {
         using var store = new MemoryStore(Path.Combine(root, "archive-window"));
         check(store.LatestArchiveDay() == null, "Empty archive has no latest day");
+        check(store.ArchivePreview(DateTime.Today).Count == 0, "Empty startup preview remains empty");
         var day = new DateTime(2026, 9, 25);
         var localMidnight = new DateTimeOffset(day);
         var text = string.Join(" ", Enumerable.Repeat("Screen OCR content", 400));
@@ -29,6 +30,13 @@ internal static class ArchiveFramesTests
         check(frames.SequenceEqual(frames.OrderByDescending(f => f.Timestamp).ThenBy(f => f.Id, StringComparer.Ordinal)), "Archive rows use stable time/id ordering");
         var full = store.Frame(frames[0].Id)!;
         check(full.Text == text && full.Regions.Count == 80, "Opening a lightweight record can still retrieve full OCR");
+        var preview = store.ArchivePreview(day, perDayLimit: 3);
+        check(preview.Select(f => f.Id).SequenceEqual(frames.Select(f => f.Id)),
+            "Startup preview uses the newest stable prefix of each local day");
+        check(preview.All(f => f.ImagePath == "frames/fixture.png" && f.Title.Length > 0),
+            "Startup preview preserves labels and image identity without OCR hydration");
+        check(store.PendingFrameIds().Order().SequenceEqual(store.PendingFrames().Select(f => f.Id).Order()),
+            "ID-only background discovery finds exactly the pending and working OCR records");
         check(store.ArchiveFrames(day, 0, 100).Count == 9, "Single-day query preserves all records below the cap");
         store.Save(new MemoryFrame { Id = "midnight-start", Timestamp = localMidnight });
         store.Save(new MemoryFrame { Id = "midnight-end", Timestamp = new DateTimeOffset(day.AddDays(1)) });
@@ -146,6 +154,17 @@ internal static class ArchiveFramesTests
         }
 
         var warm = store.ArchiveIndex(day);
+        var preview = store.ArchivePreview(day);
+        var expectedPreview = warm.GroupBy(f => f.Timestamp.LocalDateTime.Date)
+            .SelectMany(g => g.Take(48)).OrderByDescending(f => f.Timestamp)
+            .ThenBy(f => f.Id, StringComparer.Ordinal).ToArray();
+        check(preview.Count == 240 && preview.SequenceEqual(expectedPreview),
+            "Five busy days produce at most 240 startup entries without starving a column");
+        check(store.ArchivePreview(day, 2_000).Count == 640,
+            "Startup preview keeps a bounded budget even when callers request an excessive limit");
+        var previewRevision = store.ArchiveRevision;
+        store.ArchivePreview(day);
+        check(store.ArchiveRevision == previewRevision, "Preview queries do not invalidate retained cards");
         check(warm.Count == 20_431, "Archive index includes every row of five busy days without a per-day cap");
         check(warm.Count(f => f.Timestamp.LocalDateTime.Date == day) == 12_019,
             "A day with more than ten thousand frames keeps its full scroll depth");
@@ -168,6 +187,10 @@ internal static class ArchiveFramesTests
         try { store.ArchiveIndex(day, cancellation: canceled.Token); }
         catch (OperationCanceledException) { preCanceled = true; }
         check(preCanceled, "Archive index honors cancellation before query execution");
+        var previewCanceled = false;
+        try { store.ArchivePreview(day, cancellation: canceled.Token); }
+        catch (OperationCanceledException) { previewCanceled = true; }
+        check(previewCanceled, "Startup preview honors cancellation before touching the database");
 
         using var during = new CancellationTokenSource();
         var interrupted = false;
@@ -207,5 +230,14 @@ internal static class ArchiveFramesTests
         }
         Array.Sort(samples);
         Console.WriteLine($"ARCHIVE_INDEX_BENCH: rows={warm.Count}, medianMs={samples[2]:F1}, maxMs={samples[^1]:F1}");
+        var fullMedian = samples[2];
+        for (var i = 0; i < samples.Length; i++)
+        {
+            var start = Stopwatch.GetTimestamp();
+            store.ArchivePreview(day);
+            samples[i] = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+        }
+        Array.Sort(samples);
+        Console.WriteLine($"ARCHIVE_PREVIEW_BENCH: rows={preview.Count}, medianMs={samples[2]:F1}, maxMs={samples[^1]:F1}, fullIndexMedianMs={fullMedian:F1}");
     }
 }

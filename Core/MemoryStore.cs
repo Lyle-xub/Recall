@@ -317,6 +317,27 @@ public sealed partial class MemoryStore : IDisposable
         CancellationToken cancellation = default) =>
         ArchiveIndex(day, daysEachSide, cancellation, TimeZoneInfo.Local);
 
+    // A bounded first rack, not the complete archive. Call ArchiveIndex after
+    // presentation to retain the true scroll depth and reach the oldest rows.
+    public List<ArchiveFrame> ArchivePreview(DateTime day, int perDayLimit = 48,
+        CancellationToken cancellation = default) =>
+        ArchivePreview(day, perDayLimit, cancellation, TimeZoneInfo.Local);
+
+    internal List<ArchiveFrame> ArchivePreview(DateTime day, int perDayLimit,
+        CancellationToken cancellation, TimeZoneInfo zone)
+    {
+        cancellation.ThrowIfCancellationRequested();
+        var limit = Math.Clamp(perDayLimit, 1, 128);
+        var result = new List<ArchiveFrame>(5 * limit);
+        for (var lane = -2; lane <= 2; lane++)
+        {
+            var bounds = ArchiveDayBounds(day.Date.AddDays(lane), zone);
+            result.AddRange(ReadArchiveRange(bounds.Since, bounds.Until, cancellation, limit));
+        }
+        return result.OrderByDescending(frame => frame.Timestamp)
+            .ThenBy(frame => frame.Id, StringComparer.Ordinal).ToList();
+    }
+
     internal List<ArchiveFrame> ArchiveIndex(DateTime day, int daysEachSide,
         CancellationToken cancellation, TimeZoneInfo zone, Action<int>? rowRead = null)
     {
@@ -324,12 +345,18 @@ public sealed partial class MemoryStore : IDisposable
         var radius = Math.Clamp(daysEachSide, 0, 7);
         var since = ArchiveDayBounds(day.Date.AddDays(-radius), zone).Since;
         var until = ArchiveDayBounds(day.Date.AddDays(radius), zone).Until;
+        return ReadArchiveRange(since, until, cancellation, null, rowRead);
+    }
+
+    private List<ArchiveFrame> ReadArchiveRange(DateTimeOffset since, DateTimeOffset until,
+        CancellationToken cancellation, int? limit, Action<int>? rowRead = null)
+    {
         lock (gate)
         {
             cancellation.ThrowIfCancellationRequested();
             using var command = Command("SELECT id,time,app,starred,json_extract(json,'$.Title'),json_extract(json,'$.ImagePath') " +
                 "FROM frames WHERE demo=0 AND deleted IS NULL AND time>=$p0 AND time<$p1 " +
-                "ORDER BY time DESC,id COLLATE BINARY ASC", Seconds(since), Seconds(until));
+                "ORDER BY time DESC,id COLLATE BINARY ASC LIMIT $p2", Seconds(since), Seconds(until), limit ?? -1);
             using var reader = command.ExecuteReader();
             var result = new List<ArchiveFrame>();
             while (reader.Read())
@@ -484,6 +511,9 @@ public sealed partial class MemoryStore : IDisposable
     }
     public List<MemoryFrame> MetadataFrames() => Rows<MemoryFrame>("SELECT json FROM frames");
     public List<MemoryFrame> PendingFrames() => Rows<MemoryFrame>("SELECT json FROM frames WHERE json_extract(json,'$.TextState') IN (0,1)");
+    // Discovery only needs IDs; hydrate OCR and region payloads one at a time
+    // when IndexLoop actually processes the record.
+    public List<string> PendingFrameIds() => Rows<string>("SELECT json_quote(id) FROM frames WHERE json_extract(json,'$.TextState') IN (0,1)");
     public List<MemoryFrame> IndexCandidates(int limit = 100) => ReadFrames(SelectFrame + "WHERE f.demo=0 AND f.deleted IS NULL AND json_extract(f.json,'$.TextState') IN (0,4) ORDER BY f.time,f.id LIMIT $p0", Math.Clamp(limit, 1, 10000));
     public List<MemoryFrame> AllFrames() => ReadFrames(SelectFrame);
     public int EmptyTrash() => Cleanup(CleanupPreview(CleanupScope.Trash, true));
