@@ -11,7 +11,7 @@ enum BackgroundProcessingPolicy {
         switch thermal {
         case .critical: (multiplier,minimum,maximum) = (4,5,60)
         case .serious: (multiplier,minimum,maximum) = (2,2,30)
-        case .fair: (multiplier,minimum,maximum) = (1,0.5,10)
+        case .fair: (multiplier,minimum,maximum) = pending >= 32 && !lowPower ? (0.5,0.5,5):(1,0.5,10)
         default: (multiplier,minimum,maximum) = lowPower ? (1,0.5,10):pending >= 32 ? (0.05,0.15,0.5):(0.5,0.15,5)
         }
         return min(maximum,max(minimum,max(0,work)*multiplier))

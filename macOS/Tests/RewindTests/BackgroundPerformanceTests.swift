@@ -25,6 +25,8 @@ final class BackgroundPerformanceTests:XCTestCase {
         let normal = BackgroundProcessingPolicy.recoveryInterval(after:3,pending:500,thermal:.nominal,lowPower:false)
         XCTAssertEqual(normal,0.15,accuracy:0.001)
         XCTAssertGreaterThan(BackgroundProcessingPolicy.recoveryInterval(after:3,pending:500,thermal:.serious,lowPower:false),normal)
+        XCTAssertEqual(BackgroundProcessingPolicy.recoveryInterval(after:3,pending:500,thermal:.fair,lowPower:false),1.5)
+        XCTAssertEqual(BackgroundProcessingPolicy.recoveryInterval(after:3,pending:500,thermal:.fair,lowPower:true),3)
         XCTAssertGreaterThan(BackgroundProcessingPolicy.recoveryInterval(after:3,pending:500,thermal:.nominal,lowPower:true),normal)
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer {try? FileManager.default.removeItem(at:root)}
