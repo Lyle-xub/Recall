@@ -19,7 +19,7 @@ final class CoreCLILease {
         try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
         guard (try? directory.resourceValues(forKeys:[.isSymbolicLinkKey]).isSymbolicLink) != true else { throw CoreCLIError(code:"invalid_path",message:"The control directory must not be a symbolic link.") }
         let path = directory.appendingPathComponent("lease").path
-        descriptor = open(path,O_CREAT | O_RDWR | O_NOFOLLOW,0o600)
+        descriptor = open(path,O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC,0o600)
         guard descriptor >= 0 else { throw CoreCLIError(code:"permission_denied",message:"Cannot open the library control lease.") }
         guard flock(descriptor,LOCK_EX | LOCK_NB) == 0 else {
             close(descriptor);descriptor = -1

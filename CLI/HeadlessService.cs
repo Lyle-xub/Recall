@@ -21,9 +21,13 @@ public sealed class HeadlessService
         this.store=store;store.PrepareOcrQueue();
         indexing=new(store.PendingOcrIds, async (id,ct) =>
         {
-            var frame=store.Frame(id);
-            if(frame==null || frame.DeletedAt!=null || frame.TextState is RecognitionState.Complete or RecognitionState.Empty)return;
-            store.Recognition(id,RecognitionState.Working);
+            var frame=await CaptureBoundary(() =>
+            {
+                var saved=store.Frame(id);
+                if(saved==null || saved.DeletedAt!=null || saved.TextState is RecognitionState.Complete or RecognitionState.Empty)return null;
+                store.Recognition(id,RecognitionState.Working);return saved;
+            },ct);
+            if(frame==null)return;
             try {await ArchiveOcr.Recognize(store,frame,"eng",ct);}
             catch(OperationCanceledException) {store.Recognition(id,RecognitionState.Pending);throw;}
         }, (id,error) => {store.Recognition(id,RecognitionState.Failed,error.Message);lastError="Capture is saved; OCR will retry: "+error.Message;});
@@ -105,7 +109,7 @@ public sealed class HeadlessService
         if(command=="tasks-status") return new {recording=Status(),indexing=indexing.Active,error=lastError};
         if(command=="index-one") return await indexing.Exclusive(async () =>
         {
-            var frame=LibraryCommands.Require(store,args);
+            var frame=await CaptureBoundary(()=>LibraryCommands.Require(store,args),CancellationToken.None);
             await ArchiveOcr.Recognize(store,frame,args.Text("language")??"eng",CancellationToken.None);
             return (object)new {completed=1,id=frame.Id};
         },CancellationToken.None);
@@ -134,6 +138,13 @@ public sealed class HeadlessService
         finally {operation.Release();}
     }
     object Status()=>new {available=true,active=capture is {IsCompleted:false},requested=capture is {IsCompleted:false},owner="headless",captured,sessionId=session?.Id,error=lastError,mode="screenshots"};
+    async Task<T> CaptureBoundary<T>(Func<T> read,CancellationToken ct)
+    {
+        // Import and session metadata are two writes. Read only after capture
+        // finishes both, so a fast cache hit cannot be overwritten by its save.
+        await operation.WaitAsync(ct);
+        try {return read();} finally {operation.Release();}
+    }
     async Task Loop(RecordingSession recordingSession,CancellationToken ct)
     {
         try

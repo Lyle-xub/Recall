@@ -12,7 +12,7 @@ final class LibraryLocationLease {
     }
     init(parent:URL,exclusive:Bool)throws {
         try FileManager.default.createDirectory(at:parent,withIntermediateDirectories:true)
-        descriptor=open(parent.appendingPathComponent(".Recall-library-location.lock").path,O_CREAT | O_RDWR | O_NOFOLLOW,0o600)
+        descriptor=open(parent.appendingPathComponent(".Recall-library-location.lock").path,O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC,0o600)
         guard descriptor >= 0 else {throw CoreCLIError(code:"permission_denied",message:"Cannot open the library location lock.")}
         guard flock(descriptor,(exclusive ? LOCK_EX:LOCK_SH) | LOCK_NB) == 0 else {
             close(descriptor);descriptor = -1
