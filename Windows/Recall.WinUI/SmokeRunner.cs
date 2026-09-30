@@ -27,7 +27,8 @@ internal static class SmokeRunner
             {
                 using var g = Graphics.FromImage(image);
                 g.Clear(System.Drawing.Color.White);
-                using var font = new Font("Segoe UI", 34);
+                // Pixel units keep the fixture within its bitmap at any guest DPI.
+                using var font = new Font("Segoe UI", 34, GraphicsUnit.Pixel);
                 g.DrawString("Recall papers 12345", font, System.Drawing.Brushes.Black, 45, 70);
                 g.DrawString("Native Windows capture", font, System.Drawing.Brushes.Black, 45, 160);
                 image.Save(path, ImageFormat.Png);
@@ -51,7 +52,7 @@ internal static class SmokeRunner
             {
                 using var g = Graphics.FromImage(image);
                 g.Clear(System.Drawing.Color.White);
-                using var font = new Font("Segoe UI", 40);
+                using var font = new Font("Segoe UI", 40, GraphicsUnit.Pixel);
                 // Deliberately distinct vertical placement checks that the two
                 // coordinate lists belong to their own materialized image.
                 g.DrawString("Meeting budget 67890", font, System.Drawing.Brushes.Black, 45, 280);
