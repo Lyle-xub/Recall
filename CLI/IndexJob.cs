@@ -47,6 +47,7 @@ public sealed class IndexJob
     }
     public async Task<IndexJob> Run(LibraryClient client,TextWriter progress,CancellationToken ct)
     {
+        using var warmOcr = client.KeepOcrWarm();
         using var claim = new LibraryLease(Path.Combine(Folder(client.Root),Id));
         if(State=="completed")return this;
         State="running";Pid=Environment.ProcessId;Started=InferenceOwnership.Started(Pid);Error=null;Save(client.Root);

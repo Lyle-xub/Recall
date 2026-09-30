@@ -66,6 +66,7 @@ public sealed partial class MemoryStore : IDisposable
         Execute("CREATE INDEX IF NOT EXISTS frames_meeting_image ON frames(json_extract(json,'$.MeetingImagePath'))");
         Execute("CREATE INDEX IF NOT EXISTS frames_ocr ON frames(ocr_id)");
         Execute("CREATE INDEX IF NOT EXISTS frames_pixel ON frames(json_extract(json,'$.PixelHash'))");
+        Execute("CREATE INDEX IF NOT EXISTS frames_pending_ocr ON frames(time,id) WHERE demo=0 AND deleted IS NULL AND json_extract(json,'$.TextState') IN (0,1,4)");
         Execute("CREATE INDEX IF NOT EXISTS frames_session ON frames(json_extract(json,'$.SessionId'))");
         Execute("CREATE TABLE IF NOT EXISTS ocr_payloads(id TEXT UNIQUE NOT NULL,text TEXT NOT NULL,regions TEXT NOT NULL,meeting_regions TEXT NOT NULL)");
         Execute("CREATE VIRTUAL TABLE IF NOT EXISTS ocr_fts USING fts5(text,content='ocr_payloads',content_rowid='rowid',tokenize='unicode61 remove_diacritics 2',prefix='2 3 4')");
@@ -224,7 +225,7 @@ public sealed partial class MemoryStore : IDisposable
         lock (gate)
         {
             var f = Frame(id);
-            if (f != null)
+            if (f != null && f.DeletedAt == null)
                 Save(f with
                 {
                     Text = text,
@@ -477,6 +478,20 @@ public sealed partial class MemoryStore : IDisposable
                 Interlocked.Increment(ref archiveRevision);
     }
     public List<MemoryFrame> MetadataFrames() => Rows<MemoryFrame>("SELECT json FROM frames");
+    public void PrepareOcrQueue() => Execute("CREATE INDEX IF NOT EXISTS frames_pending_ocr ON frames(time,id) WHERE demo=0 AND deleted IS NULL AND json_extract(json,'$.TextState') IN (0,1,4)");
+    public IReadOnlyList<string> PendingOcrIds(int limit, IReadOnlyCollection<string>? excluded = null)
+    {
+        lock (gate)
+        {
+            var values = (excluded ?? []).Cast<object?>().ToList();
+            var skip = values.Count == 0 ? "" : " AND id NOT IN (" + string.Join(",", Enumerable.Range(0, values.Count).Select(i => "$p" + i)) + ")";
+            var cap = "$p" + values.Count; values.Add(Math.Clamp(limit, 1, OcrWorkPolicy.Window));
+            using var command = Command("SELECT id FROM frames WHERE demo=0 AND deleted IS NULL AND json_extract(json,'$.TextState') IN (0,1,4)" + skip + " ORDER BY time,id LIMIT " + cap, values.ToArray());
+            using var reader = command.ExecuteReader(); var ids = new List<string>();
+            while (reader.Read()) ids.Add(reader.GetString(0));
+            return ids;
+        }
+    }
     public List<MemoryFrame> PendingFrames() => Rows<MemoryFrame>("SELECT json FROM frames WHERE json_extract(json,'$.TextState') IN (0,1)");
     public List<MemoryFrame> IndexCandidates(int limit = 100) => ReadFrames(SelectFrame + "WHERE f.demo=0 AND f.deleted IS NULL AND json_extract(f.json,'$.TextState') IN (0,4) ORDER BY f.time,f.id LIMIT $p0", Math.Clamp(limit, 1, 10000));
     public List<MemoryFrame> AllFrames() => ReadFrames(SelectFrame);

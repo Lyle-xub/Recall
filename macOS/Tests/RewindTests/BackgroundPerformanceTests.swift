@@ -21,6 +21,24 @@ final class BackgroundPerformanceTests:XCTestCase {
         XCTAssertLessThanOrEqual(BackgroundProcessingPolicy.recoveryInterval(after:600,thermal:.critical,lowPower:true),60)
     }
 
+    func testCatchUpKeepsThermalAndLowPowerBudgetsAndBoundsDurableDiscovery()throws {
+        let normal = BackgroundProcessingPolicy.recoveryInterval(after:3,pending:500,thermal:.nominal,lowPower:false)
+        XCTAssertEqual(normal,0.15,accuracy:0.001)
+        XCTAssertGreaterThan(BackgroundProcessingPolicy.recoveryInterval(after:3,pending:500,thermal:.serious,lowPower:false),normal)
+        XCTAssertGreaterThan(BackgroundProcessingPolicy.recoveryInterval(after:3,pending:500,thermal:.nominal,lowPower:true),normal)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {try? FileManager.default.removeItem(at:root)}
+        let store = try MemoryStore(root:root)
+        let date = Date()
+        for i in 0..<70 {
+            try store.save(MemoryFrame(timestamp:date.addingTimeInterval(Double(i)),appName:"Synthetic",bundleID:"test",title:"",imagePath:"frames/source.png",text:"",regions:[],indexingComplete:false))
+        }
+        let window = try store.pendingIndexWindow(limit:10000)
+        XCTAssertEqual(window.ids.count,32);XCTAssertEqual(window.count,70)
+        let times = try window.ids.compactMap {try store.frame($0)?.timestamp}
+        XCTAssertEqual(times,times.sorted());XCTAssertEqual(times.first,date)
+    }
+
     @MainActor func testIndexingYieldsBetweenCachedJobsWithoutLosingSavedFrames() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at:root) }

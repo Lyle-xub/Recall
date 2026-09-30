@@ -32,8 +32,14 @@ final class CoreCLILease {
 enum NativeCoreCLI {
     static let writes:Set<String> = ["init","import","star","trash","restore","recognize","compact","cleanup","save-transcript","index-offline","index-one","config-set"]
     static func run() -> Int32 {
+        if CommandLine.arguments.contains("--core-session") {
+            while let line = readLine() { _ = runRequest(Data(line.utf8)) }
+            return 0
+        }
+        return runRequest(FileHandle.standardInput.readDataToEndOfFile())
+    }
+    private static func runRequest(_ input:Data)->Int32 {
         do {
-            let input = FileHandle.standardInput.readDataToEndOfFile()
             guard input.count <= 2_000_000,let request = try JSONSerialization.jsonObject(with:input) as? [String:Any],let rootPath = request["root"] as? String,let operation = request["operation"] as? String else { throw CoreCLIError(code:"invalid_request",message:"Invalid native core request.") }
             let root = URL(fileURLWithPath:rootPath).standardizedFileURL
             let lease = (writes.contains(operation) || operation == "export") ? try CoreCLILease(root:root):nil
@@ -109,7 +115,7 @@ enum NativeCoreCLI {
             try saveConfiguration(next,root:store.root)
             if args["key"] as? String == "retention-days" {try store.applyRetention(days:next.retentionDays)}
             return try object(next)
-        case "capabilities":return ["screenCapturePermission":CGPreflightScreenCaptureAccess(),"nativeRecording":true]
+        case "capabilities":return ["screenCapturePermission":CGPreflightScreenCaptureAccess(),"nativeRecording":true,"ocrSession":true]
         case "init","info": return ["root":store.root.path,"format":"macos","count":try store.count()]
         case "list": return try selected(args,store:store).map(frameObject)
         case "get": return try frameObject(required(args,store:store))
@@ -175,6 +181,13 @@ enum NativeCoreCLI {
             for var frame in frames {
                 let source = try CleanupFiles.ownedURL(frame.imagePath,root:store.root)
                 guard let image = StoredImage.load(source) else { throw CoreCLIError(code:"unsupported_media",message:"The saved image could not be decoded.") }
+                let language = args["language"] as? String ?? "eng"
+                if ProcessInfo.processInfo.environment["RECALL_TESSERACT"] == nil,
+                   ["eng","chi_sim","eng+chi_sim","chi_sim+eng"].contains(language) {
+                    let result = try NativeOCR.recognize(image,source:source.pathExtension == "png" ? source:nil)
+                    _ = try store.updateIndex(frameID:frame.id,text:result.0,regions:result.1)
+                    continue
+                }
                 let folder = FileManager.default.temporaryDirectory.appendingPathComponent("recall-cli-ocr-"+UUID().uuidString)
                 try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
                 defer { try? FileManager.default.removeItem(at:folder) }
@@ -191,7 +204,7 @@ enum NativeCoreCLI {
                 process.waitUntilExit();deadline.cancel()
                 guard process.terminationStatus == 0 else { throw CoreCLIError(code:"ocr_failed",message:"Tesseract failed; check the engine and installed languages.") }
                 frame.regions = LocalOCR.parse(try String(contentsOf:output.appendingPathExtension("tsv"),encoding:.utf8),width:image.width,height:image.height)
-                frame.text = frame.regions.map(\.text).joined(separator:"\n");frame.indexingComplete = true;try store.save(frame)
+                _ = try store.updateIndex(frameID:frame.id,text:frame.regions.map(\.text).joined(separator:"\n"),regions:frame.regions)
             }
             return ["completed":frames.count,"owner":"cli"]
         default: throw CoreCLIError(code:"unsupported",message:"Unsupported native library operation: "+operation)

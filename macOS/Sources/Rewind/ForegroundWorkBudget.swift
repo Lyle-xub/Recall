@@ -105,10 +105,10 @@ import Combine
         try await gate.wait()
         guard !stopped else {throw CancellationError()}
     }
-    func recoveryInterval(after work:TimeInterval)->TimeInterval {
+    func recoveryInterval(after work:TimeInterval,pending:Int = 0)->TimeInterval {
         // Warning pressure still makes progress. Critical pressure waits at
         // the gate; it does not repeatedly reload models or restart a job.
-        max(BackgroundProcessingPolicy.recoveryInterval(after:work),state.pressure == .warning ? min(30,max(1,work*2)):0)
+        max(BackgroundProcessingPolicy.recoveryInterval(after:work,pending:pending),state.pressure == .warning ? min(30,max(1,work*2)):0)
     }
     func stop() {
         guard !stopped else {return};stopped=true

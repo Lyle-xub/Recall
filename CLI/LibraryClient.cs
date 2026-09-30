@@ -5,6 +5,14 @@ namespace Recall.Cli;
 
 public sealed class LibraryClient(string root)
 {
+    JsonLineWorker? nativeOcr;
+    bool keepOcrWarm;
+    bool? supportsOcrSession;
+    public IDisposable KeepOcrWarm() { keepOcrWarm = true; return new OcrScope(this); }
+    sealed class OcrScope(LibraryClient client) : IDisposable
+    {
+        public void Dispose() { client.keepOcrWarm = false; client.nativeOcr?.Dispose(); client.nativeOcr = null; }
+    }
     public string Root { get; } = Path.GetFullPath(root);
     public static string DefaultRoot => DefaultLibrary.Resolve();
     public static string? MacHelper
@@ -48,13 +56,27 @@ public sealed class LibraryClient(string root)
     async Task<JsonElement> Native(string operation, object args, CancellationToken ct)
     {
         var helper = MacHelper ?? throw new RecallException("platform_unavailable", "This is a native Mac library. Use the macOS CLI bundle with recall-macos-core (or set RECALL_MAC_CORE). Its original schema is preserved.");
-        var result = await ChildProcess.Run(helper, ["--core-service"], JsonSerializer.Serialize(new { root = Root, operation, args }, Wire.Json), ct, LibraryCommands.Writes(operation) ? 0 : 120);
-        using var document = JsonDocument.Parse(result.Output);
-        if (result.ExitCode != 0 || !document.RootElement.Flag("ok"))
+        if (keepOcrWarm && operation == "index-one" && supportsOcrSession == null)
         {
-            var error = document.RootElement.GetProperty("error");
+            try { supportsOcrSession = (await Native("capabilities", new { }, ct)).Flag("ocrSession"); }
+            catch (RecallException error) when (error.Code == "unsupported") { supportsOcrSession = false; }
+        }
+        JsonElement reply;
+        if (keepOcrWarm && operation == "index-one" && supportsOcrSession == true)
+        {
+            nativeOcr ??= new(() => {var info = new ProcessStartInfo(helper); info.ArgumentList.Add("--core-service"); info.ArgumentList.Add("--core-session"); return info;});
+            reply = await nativeOcr.Request(new {root = Root, operation, args}, ct, TimeSpan.FromSeconds(120));
+        }
+        else
+        {
+            var result = await ChildProcess.Run(helper, ["--core-service"], JsonSerializer.Serialize(new { root = Root, operation, args }, Wire.Json), ct, LibraryCommands.Writes(operation) ? 0 : 120);
+            using var document = JsonDocument.Parse(result.Output); reply = document.RootElement.Clone();
+        }
+        if (!reply.Flag("ok"))
+        {
+            var error = reply.GetProperty("error");
             throw new RecallException(error.Text("code") ?? "operation_failed", error.Text("message") ?? "Native core request failed.");
         }
-        return document.RootElement.GetProperty("result").Clone();
+        return reply.GetProperty("result").Clone();
     }
 }
