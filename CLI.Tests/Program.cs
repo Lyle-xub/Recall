@@ -60,6 +60,8 @@ async Task<JsonElement> Run(string library, int expected, params string[] words)
 Directory.CreateDirectory(root);
 try
 {
+    DailyRecallChecks.Run(root,Assert);
+    if(args.Contains("--ask-only")) {Console.WriteLine($"{tests} Ask Recall assertions passed.");return;}
     await OcrThroughputChecks.Run(root,Assert);
     if(args.Contains("--ocr-throughput-only")) {Console.WriteLine($"{tests} OCR throughput assertions passed.");return;}
     if(args.Contains("--control-receipt-only")) {await ControlReceiptChecks.Run(root,Assert);Console.WriteLine($"{tests} control receipt assertions passed.");return;}

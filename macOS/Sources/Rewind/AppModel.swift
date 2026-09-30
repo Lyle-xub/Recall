@@ -1089,17 +1089,17 @@ import ServiceManagement
             do {
                 let worker = Task.detached(priority:.userInitiated) {
                     try Task.checkCancellation()
-                    return try db.evidence(question,since:scope,app:app,previous:previous,limit:profile.isBuiltin ? 5:12)
+                    return try db.evidence(question,since:scope,app:app,previous:previous,limit:12)
                 }
                 let evidence = try await withTaskCancellationHandler(operation:{ try await worker.value },onCancel:{ worker.cancel() })
                 try Task.checkCancellation(); guard askGeneration == generation else { return }
                 guard !evidence.sources.isEmpty else {
-                    messages.append(ChatMessage(role:"assistant",text:"No matching memories were found in this scope. Try a more specific topic, change the application or date filter, or record the content first."))
+                    messages.append(ChatMessage(role:"assistant",text:RecallPrompt.noEvidence(question)))
                     asking = false; askStatus = ""; return
                 }
                 askStatus = "Answering from \(evidence.sources.count) memories…"
                 let reply = ChatMessage(role:"assistant",text:"",sources:evidence.sources); messages.append(reply)
-                let answer = try await ModelClient.answer(question:question,sources:evidence.sources,transcripts:evidence.transcripts,history:history,profile:profile,key:SecretStore.read("chat")) { [weak self] partial in
+                let answer = try await ModelClient.answer(question:question,sources:evidence.sources,transcripts:evidence.transcripts,history:history,profile:profile,key:SecretStore.read("chat"),context:evidence.context) { [weak self] partial in
                     guard let self,self.askGeneration == generation,let index = self.messages.firstIndex(where:{$0.id == reply.id}) else { return };self.messages[index].text = partial
                 }
                 if !Task.isCancelled,askGeneration == generation,let index = messages.firstIndex(where:{$0.id == reply.id}) { messages[index].text = answer }

@@ -299,13 +299,13 @@ internal sealed class AskView : Grid
         try
         {
             var (app, since) = scope();
-            records = await Task.Run(() => runtime.Store.Retrieve(text, since: since, app: app, previous: conversation.History.LastOrDefault(x => x.Role == "user")?.Text), ct);
+            var evidence = await Task.Run(() => runtime.Store.Evidence(text, since: since, app: app, previous: conversation.History.LastOrDefault(x => x.Role == "user")?.Text), ct);
+            records = evidence.Sources;
             ct.ThrowIfCancellationRequested();
-            if (runtime.Settings.Chat.IsBuiltin) records = records.Take(5).ToList();
-            if (records.Count == 0) { body.Text = "No relevant memories were found. Try an app name, a phrase you saw, or a date."; completed = true; return; }
-            var transcripts = await Task.Run(() => records.Select(x => x.SessionId).Where(x => x != null).Distinct().SelectMany(x => runtime.Store.Transcript(x!)).ToList(), ct);
+            if (records.Count == 0) { body.Text = RecallPrompt.NoEvidence(text); completed = true; return; }
+            var transcripts = evidence.Transcripts;
             ct.ThrowIfCancellationRequested(); body.Text = "Preparing answer…"; timer.Start();
-            var result = await ModelClient.Answer(text, records, transcripts, conversation.History, runtime.Settings.Chat, SecretStore.Read("chat"), ct, value => Interlocked.Exchange(ref pendingText, value));
+            var result = await ModelClient.Answer(text, records, transcripts, conversation.History, runtime.Settings.Chat, SecretStore.Read("chat"), ct, value => Interlocked.Exchange(ref pendingText, value), evidence.Context);
             ct.ThrowIfCancellationRequested(); body.Text = result;
             conversation.History.Add(new("user", text)); conversation.History.Add(new("assistant", result, records)); completed = true;
         }

@@ -120,6 +120,9 @@ enum NativeCoreCLI {
         case "list": return try selected(args,store:store).map(frameObject)
         case "get": return try frameObject(required(args,store:store))
         case "retrieve": return try store.retrieve(args["query"] as? String ?? "",since:date(args,"since"),app:args["app"] as? String).map(frameObject)
+        case "evidence":
+            let evidence=try store.evidence(args["query"] as? String ?? "",since:date(args,"since"),app:args["app"] as? String,previous:nil,limit:12)
+            return ["sources":try evidence.sources.map(frameObject),"transcripts":try object(evidence.transcripts),"context":evidence.context]
         case "index-candidates": return try (args["id"] is String ? [required(args,store:store)] : Array(store.pendingIndexFrames().prefix(args["limit"] as? Int ?? 100))).map(frameObject)
         case "apps": return try store.appNames(demo:false,trash:false,since:nil)
         case "sessions": return try object(store.sessions())

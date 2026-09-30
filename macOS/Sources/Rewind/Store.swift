@@ -264,12 +264,39 @@ final class MemoryStore: @unchecked Sendable {
         var values: [Any?] = [demo ? 1:0];if let since {sql += " AND time>=?";values.append(since.timeIntervalSince1970)}
         return try jsonRows(sql + " ORDER BY app COLLATE NOCASE",values,as:String.self)
     }
-    func retrieve(_ question: String, since: Date? = nil, app: String? = nil, demo: Bool = false, previous:String? = nil) throws -> [MemoryFrame] {
+    func retrieve(_ question: String, since: Date? = nil, app: String? = nil, demo: Bool = false, previous:String? = nil,now:Date = Date()) throws -> [MemoryFrame] {
         let intent = RecallQuestion(question,previous:previous)
-        let range = RecallQuestion.timeRange(question)
+        let range = RecallQuestion.timeRange(question,now:now) ?? (intent.followup ? previous.flatMap {RecallQuestion.timeRange($0,now:now)}:nil)
         let start = [since,range?.start].compactMap { $0 }.max(), end = range?.end.addingTimeInterval(-0.001)
         var candidates:[MemoryFrame] = []
-        if intent.broad { candidates = try frames(app:app,since:start,until:end,demo:demo,limit:300) }
+        if intent.broad {
+            var conditions=["demo=?","deleted IS NULL"],args:[Any?]=[demo ? 1:0]
+            if let app {conditions.append("app=?");args.append(app)}
+            let earliest=try jsonRows("SELECT json_quote(MIN(time)) FROM frames WHERE \(conditions.joined(separator:" AND ")) HAVING COUNT(*)>0",args,as:Double.self).first
+            guard let earliest else {return []}
+            let lower=start?.timeIntervalSince1970 ?? earliest,upper=end?.timeIntervalSince1970 ?? now.timeIntervalSince1970
+            guard lower<upper else {return []}
+            conditions += ["COALESCE(json_extract(json,'$.endTimestamp')+978307200,time)>=?","time<=?"]
+            args += [lower,upper]
+            // Sample time buckets and applications in SQL before hydrating OCR.
+            // Bound reads to 300 records even in a many-thousand-frame day.
+            candidates=try jsonRows("""
+                WITH eligible AS (
+                    SELECT id,app,time FROM frames WHERE \(conditions.joined(separator:" AND "))
+                ), bounds AS (
+                    SELECT MIN(time) AS first,MAX(time) AS last FROM eligible
+                ), scoped AS (
+                    SELECT e.*,CAST(MAX(0,e.time-b.first)/MAX(1,(b.last-b.first)/12) AS INTEGER) AS bucket FROM eligible e CROSS JOIN bounds b
+                ), ranked AS (
+                    SELECT *,ROW_NUMBER() OVER(PARTITION BY bucket,app ORDER BY time,id) AS first_rank,
+                        ROW_NUMBER() OVER(PARTITION BY bucket,app ORDER BY time DESC,id) AS last_rank FROM scoped
+                ), spread AS (
+                    SELECT *,ROW_NUMBER() OVER(PARTITION BY bucket ORDER BY MIN(first_rank,last_rank),time,id) AS slot
+                    FROM ranked WHERE first_rank<=2 OR last_rank<=2
+                ) SELECT f.json FROM spread s JOIN frames f ON f.id=s.id ORDER BY slot,bucket LIMIT 300
+                """,args,as:MemoryFrame.self)
+            return RecallSelection.overview(candidates,limit:12)
+        }
         else {
             if !intent.terms.isEmpty { candidates = try frames(query:intent.terms.joined(separator:" "),app:app,since:start,until:end,demo:demo,limit:80) }
             for term in intent.terms { candidates += try frames(query:term,app:app,since:start,until:end,demo:demo,limit:40) }
@@ -290,14 +317,36 @@ final class MemoryStore: @unchecked Sendable {
         }
         return Array((selected+deferred).prefix(12))
     }
-    func evidence(_ question:String,since:Date?,app:String?,previous:String?,limit:Int) throws -> RecallEvidence {
-        let sources = Array(try retrieve(question,since:since,app:app,previous:previous).prefix(limit))
+    func evidence(_ question:String,since:Date?,app:String?,previous:String?,limit:Int,now:Date = Date()) throws -> RecallEvidence {
+        let intent=RecallQuestion(question,previous:previous)
+        let retrieved=try retrieve(question,since:since,app:app,previous:previous,now:now)
+        let sources = intent.broad ? RecallSelection.overview(retrieved,limit:limit):Array(retrieved.prefix(limit))
+        let range=RecallQuestion.timeRange(question,now:now) ?? (intent.followup ? previous.flatMap {RecallQuestion.timeRange($0,now:now)}:nil)
+        let start=[since,range?.start].compactMap {$0}.max(),end=range?.end
         var transcripts:[TranscriptLine] = []
         for session in Set(sources.compactMap(\.sessionID)) {
             let moments = sources.filter { $0.sessionID == session }
-            transcripts += try transcript(session).filter { line in moments.contains { line.timestamp >= $0.timestamp.addingTimeInterval(-30) && line.timestamp <= ($0.endTimestamp ?? $0.timestamp).addingTimeInterval(30) } }
+            transcripts += try transcript(session).filter { line in
+                if let start,line.timestamp<start {return false}
+                if let end,line.timestamp>=end {return false}
+                return intent.broad || moments.contains { line.timestamp >= $0.timestamp.addingTimeInterval(-30) && line.timestamp <= ($0.endTimestamp ?? $0.timestamp).addingTimeInterval(30) }
+            }
         }
-        return RecallEvidence(sources:sources,transcripts:transcripts.sorted { $0.timestamp < $1.timestamp })
+        var context=""
+        if intent.broad,let first=start ?? sources.first?.timestamp {
+            let last=end ?? now
+            var conditions=["demo=0","deleted IS NULL","COALESCE(json_extract(json,'$.endTimestamp')+978307200,time)>=?","time<?"],args:[Any?]=[first.timeIntervalSince1970,last.timeIntervalSince1970]
+            if let app {conditions.append("app=?");args.append(app)}
+            let count=try jsonRows("SELECT COUNT(*) FROM frames WHERE \(conditions.joined(separator:" AND "))",args,as:Int.self).first ?? 0
+            let pending=try jsonRows("SELECT COUNT(*) FROM frames WHERE \(conditions.joined(separator:" AND ")) AND json_extract(json,'$.indexingComplete')=0",args,as:Int.self).first ?? 0
+            context="Requested period: \(first.formatted(.iso8601)) through \(last.formatted(.iso8601)). \(sources.count) representative screens from \(count) recorded screens; \(pending) screens still await OCR. This is sampled evidence, not a complete activity log."
+            if first<last,Calendar.current.isDate(first,inSameDayAs:last.addingTimeInterval(-0.001)) {
+                let rows=try usage(in:DateInterval(start:first,end:last)).filter {$0.app.kind == .application && (app == nil || $0.app.name == app)}
+                let report=UsageReport.build(rows,date:first,now:last)
+                context += "\nRecorded foreground app usage (shows viewing time, not task completion): " + report.apps.prefix(12).map {"\($0.app.name): \(Int($0.seconds/60)) minutes"}.joined(separator:"; ")
+            }
+        }
+        return RecallEvidence(sources:sources,transcripts:transcripts.sorted { $0.timestamp < $1.timestamp },context:context)
     }
     func saveSession(_ session: RecordingSession) throws { try execute("INSERT OR REPLACE INTO sessions VALUES (?,?)", [session.id,try json(session)]) }
     func saveUsage(_ interval:AppUsageInterval) throws {

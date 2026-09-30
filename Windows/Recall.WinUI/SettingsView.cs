@@ -5,7 +5,7 @@ namespace Recall;
 
 internal sealed class SettingsView : Grid
 {
-    readonly AppRuntime runtime; readonly Func<AppSettings, Task> save; readonly AppSettings draft; readonly StackPanel sections = new() { Spacing = 16 }; readonly TextBlock message = Design.Text("Changes apply when you save.", 11, color: Design.Muted); readonly TextBlock subtitle = Design.Text("Choose what Recall remembers.", 12, color: Design.Muted); readonly Dictionary<string, PasswordBox> secrets = []; CancellationTokenSource? optimization;
+    readonly AppRuntime runtime; readonly Func<AppSettings, Task> save; readonly AppSettings draft; readonly StackPanel sections = new() { Spacing = 16 }; readonly TextBlock message = Design.Text("Changes apply when you save.", 11, color: Design.Muted); readonly TextBlock subtitle = Design.Text("Choose what Recall remembers.", 12, color: Design.Muted); readonly Dictionary<string, PasswordBox> secrets = [];
     readonly Dictionary<string, Button> tabButtons = [];
     readonly ScrollViewer scroll;
     readonly Button saveButton;
@@ -78,7 +78,6 @@ internal sealed class SettingsView : Grid
         var footerFrame = new Border { Child = footer, Padding = new(24, 16, 24, 16), BorderThickness = new(0, 1, 0, 0), BorderBrush = Design.Brush(Design.Dark ? Color.FromArgb(255, 58, 58, 58) : Color.FromArgb(255, 240, 240, 240)) };
         Grid.SetRow(footerFrame, 3);
         Children.Add(footerFrame);
-        Unloaded += (_, _) => optimization?.Cancel();
     }
     internal object Diagnostics => new { message = message.Text, saveEnabled = saveButton.IsEnabled };
     internal void ValidationSave() => _ = SaveSettings();
@@ -110,7 +109,6 @@ internal sealed class SettingsView : Grid
     static string TabSubtitle(string name) => name switch { "Recording" => "Choose what Recall remembers.", "Permissions" => "Control access to your screen and microphone.", "Models" => "Intelligence that works your way.", "Storage" => "Your memories, under your control.", _ => "A quick way back to any moment." };
     public void SelectTab(string name)
     {
-        optimization?.Cancel();
         subtitle.Text = TabSubtitle(name);
         foreach (var (key, button) in tabButtons)
         {
@@ -307,7 +305,6 @@ internal sealed class SettingsView : Grid
             reportHost.Children.Add(Design.Stack(16, grid, Design.Text($"{Design.Size(report.Free)} available of {Design.Size(report.Capacity)}", 12, color: Design.Muted), new ProgressBar { Maximum = report.Capacity, Value = report.Capacity - report.Free, Height = 5, Foreground = Design.Brush(Design.Pastels[0]), CornerRadius = new(3) }));
         }
         _ = Measure();
-        var optimize = NativeButton("Optimize images and video", async () => { if (optimization != null) { optimization.Cancel(); return; } optimization = new(); try { var saved = await StorageService.Optimize(runtime.Store, new Progress<string>(s => message.Text = s), optimization.Token); message.Text = "Freed " + Design.Size(saved); await Measure(true); } catch (OperationCanceledException) { message.Text = "Optimization stopped. Completed items were kept."; } catch (Exception ex) { message.Text = ex.Message; } finally { optimization.Dispose(); optimization = null; } });
         var scope = CleanupScope.Trash;
         var keep = true;
         var cleanup = NativeButton("Review cleanup", async () => { try { var plan = await Task.Run(() => runtime.Store.CleanupPreview(scope, keep)); if (plan.Ids.Length == 0) { message.Text = "No memories match this cleanup."; return; } if (await Confirm("Clear these memories?", $"{plan.Ids.Length} memories · up to {Design.Size(plan.Bytes)}. This permanently removes their unshared files and text. Active recordings and saved models are kept.", "Clear memories")) { var removed = await StorageService.Maintain(() => Task.Run(() => runtime.Store.Cleanup(plan))); message.Text = $"Cleared {removed} memories"; await Measure(true); } } catch (Exception ex) { message.Text = ex.Message; } });
@@ -319,7 +316,6 @@ internal sealed class SettingsView : Grid
         heading.Children.Add(refresh);
         return Design.Stack(16,
             Section("", "", heading, reportHost, Divider(), Design.Text("Review and clear old memories and recordings from the cleanup options below.", 11, color: Design.Muted)),
-            Section("Optimize storage", "\uE9D9", Design.Text("Repack images and video to free space while keeping your memories available.", 11, color: Design.Muted), optimize),
             Section("Memory library", "\uE7F1", Row("Keep history", Choice(["7 days", "30 days", "90 days", "Forever"], Array.IndexOf(new[] { 7, 30, 90, 0 }, draft.RetentionDays), i => draft.RetentionDays = new[] { 7, 30, 90, 0 }[i])), Design.Text("Older unstarred memories move to Trash. Starred memories are retained.", 11, color: Design.Muted), Divider(), Design.Text(runtime.Store.Root, 11, color: Design.Muted), NativeButton("Open data folder", () => { try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(runtime.Store.Root) { UseShellExecute = true }); } catch (Exception ex) { message.Text = ex.Message; } })),
             Section("Trash and cleanup", "\uE74D", Design.Text("Review what will be removed before deleting memories permanently.", 11, color: Design.Muted), Row("Clear", Choice(["Trash", "Older than 30 days", "Older than 7 days", "All memories"], 0, i => scope = (CleanupScope)i)), Row("Keep starred memories", Toggle(true, v => keep = v)), cleanup));
     }

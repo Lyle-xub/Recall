@@ -63,10 +63,8 @@ struct SettingsView: View {
             StorageCleanupView(model:model) { message in status = message }
         }
         .task(id:page.rawValue) {
-            model.storageOptimizer.setStoragePageVisible(page == .storage)
             if page == .storage { storageState.refresh() }
         }
-        .onDisappear { model.storageOptimizer.setStoragePageVisible(false) }
         .onAppear { chatKey = SecretStore.read("chat"); speechKey = SecretStore.read("transcription"); excluded = draft.excludedApps.joined(separator:"\n") }
         .onReceive(NotificationCenter.default.publisher(for:NSApplication.didBecomeActiveNotification)) { _ in refreshPermissions() }
         .onChange(of:model.settingsTab) { _,_ in refreshPermissions() }
@@ -272,7 +270,6 @@ struct SettingsView: View {
                     Button("Clear storage…",systemImage:"sparkles") { cleanupOpen = true }.buttonStyle(SettingsActionStyle())
                 }
             }
-            StorageOptimizationCard(optimizer:model.storageOptimizer)
             SettingsCard(title:"Memory library",symbol:"externaldrive") {
                 SettingsRow(title:"Keep history") { Picker("Keep history",selection:$draft.retentionDays) { Text("7 days").tag(7); Text("30 days").tag(30); Text("90 days").tag(90); Text("Forever").tag(0) }.labelsHidden().frame(width:154) }
                 Text("Older unstarred memories move to Trash and remain recoverable. Starred memories are always retained.").font(.system(size:11)).foregroundStyle(.secondary)

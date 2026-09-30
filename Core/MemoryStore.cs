@@ -411,18 +411,73 @@ public sealed partial class MemoryStore : IDisposable
         }
         return Rows<string>(sql + " ORDER BY app COLLATE NOCASE", args.ToArray());
     }
-    public List<MemoryFrame> Retrieve(string question, bool demo = false, DateTimeOffset? since = null, string? app = null, string? previous = null)
+    public List<MemoryFrame> Retrieve(string question, bool demo = false, DateTimeOffset? since = null, string? app = null, string? previous = null, DateTimeOffset? now = null)
     {
-        var plan = MemorySearch.Question(question, previous);
-        since = plan.Since ?? since;
+        var plan = MemorySearch.Question(question, previous, now);
+        since = since == null ? plan.Since : plan.Since == null ? since : since > plan.Since ? since : plan.Since;
         if (plan.Broad)
-            return Frames(app: app, demo: demo, since: since, until: plan.Until, limit: 12);
+        {
+            var args = new List<object?> { demo ? 1 : 0 };
+            var conditions = new List<string> { "demo=$p0", "deleted IS NULL" };
+            string Arg(object? value) { var key = "$p" + args.Count; args.Add(value); return key; }
+            if (app != null) conditions.Add("app=" + Arg(app));
+            var earliest = Rows<double>("SELECT json_quote(MIN(time)) FROM frames WHERE " + string.Join(" AND ", conditions) + " HAVING COUNT(*)>0", args.ToArray());
+            if (earliest.Count == 0) return [];
+            var lower = since != null ? Seconds(since.Value) : earliest[0];
+            var upper = Seconds(plan.Until ?? now ?? DateTimeOffset.Now);
+            if (lower >= upper) return [];
+            conditions.Add("COALESCE(unixepoch(json_extract(json,'$.EndTimestamp')),time)>=" + Arg(lower));
+            conditions.Add("time<" + Arg(upper));
+            var sql = $"""
+                WITH eligible AS (
+                    SELECT id,app,time FROM frames WHERE {string.Join(" AND ", conditions)}
+                ), bounds AS (
+                    SELECT MIN(time) AS first,MAX(time) AS last FROM eligible
+                ), scoped AS (
+                    SELECT e.*,CAST(MAX(0,e.time-b.first)/MAX(1,(b.last-b.first)/12) AS INTEGER) AS bucket FROM eligible e CROSS JOIN bounds b
+                ), ranked AS (
+                    SELECT *,ROW_NUMBER() OVER(PARTITION BY bucket,app ORDER BY time,id) AS first_rank,
+                        ROW_NUMBER() OVER(PARTITION BY bucket,app ORDER BY time DESC,id) AS last_rank FROM scoped
+                ), spread AS (
+                    SELECT *,ROW_NUMBER() OVER(PARTITION BY bucket ORDER BY MIN(first_rank,last_rank),time,id) AS slot
+                    FROM ranked WHERE first_rank<=2 OR last_rank<=2
+                )
+                """ + SelectFrame + "JOIN spread s ON s.id=f.id ORDER BY s.slot,s.bucket LIMIT 300";
+            return RecallSelection.Overview(ReadFrames(sql, args.ToArray()), 12);
+        }
         if (plan.Terms.Length == 0)
             return [];
         var matches = Frames(string.Join(" ", plan.Terms), app: app, demo: demo, since: since, until: plan.Until, limit: 24);
         foreach (var term in plan.Terms)
             matches.AddRange(Frames(term, app: app, demo: demo, since: since, until: plan.Until, limit: 24));
         return matches.DistinctBy(x => x.Id).OrderByDescending(x => plan.Terms.Count(t => MemorySearch.Normalize(x.Text + x.Title).Contains(t))).ThenByDescending(x => x.Timestamp).Take(12).ToList();
+    }
+    public RecallEvidence Evidence(string question, DateTimeOffset? since = null, string? app = null, string? previous = null, DateTimeOffset? now = null)
+    {
+        var plan = MemorySearch.Question(question, previous, now);
+        var sources = Retrieve(question, since: since, app: app, previous: previous, now:now);
+        var start = since == null ? plan.Since : plan.Since == null ? since : since > plan.Since ? since : plan.Since;
+        var lines = new List<TranscriptLine>();
+        foreach (var session in sources.Select(f => f.SessionId).OfType<string>().Distinct())
+            lines.AddRange(Transcript(session).Where(t => (start == null || t.Timestamp >= start) && (plan.Until == null || t.Timestamp < plan.Until) &&
+                (plan.Broad || sources.Any(f => f.SessionId == session && t.Timestamp >= f.Timestamp.AddSeconds(-30) && t.Timestamp <= (f.EndTimestamp ?? f.Timestamp).AddSeconds(30)))));
+        var context = "";
+        if (plan.Broad && sources.Count > 0)
+        {
+            var first = start ?? sources.Min(f => f.Timestamp); var last = plan.Until ?? now ?? DateTimeOffset.Now;
+            var conditions = "demo=0 AND deleted IS NULL AND COALESCE(unixepoch(json_extract(json,'$.EndTimestamp')),time)>=$p0 AND time<$p1";
+            var args = new List<object?> { Seconds(first), Seconds(last) };
+            if (app != null) { conditions += " AND app=$p2"; args.Add(app); }
+            var count = Rows<int>("SELECT COUNT(*) FROM frames WHERE " + conditions, args.ToArray())[0];
+            var pending = Rows<int>("SELECT COUNT(*) FROM frames WHERE " + conditions + " AND json_extract(json,'$.TextState') IN (0,4)", args.ToArray())[0];
+            context = $"Requested period: {first:O} through {last:O}. {sources.Count} representative screens from {count} recorded screens; {pending} screens still await OCR. This is sampled evidence, not a complete activity log.";
+            if (first.LocalDateTime.Date == last.AddMilliseconds(-1).LocalDateTime.Date)
+            {
+                var report = UsageReport.Build(first.LocalDateTime.Date, Usage(first, last).Where(x => x.App.Kind == "application" && (app == null || x.App.Name == app)));
+                context += "\nRecorded foreground app usage (viewing time, not task completion): " + string.Join("; ", report.Apps.Take(12).Select(x => $"{x.App.Name}: {(int)(x.Seconds / 60)} minutes"));
+            }
+        }
+        return new(sources, lines.OrderBy(t => t.Timestamp).ToList(), context);
     }
     public void SaveSession(RecordingSession s) => Execute("INSERT OR REPLACE INTO sessions VALUES($p0,$p1)", s.Id, JsonSerializer.Serialize(s));
     public bool SpeechStatus(string id, RecognitionState state, string? error = null)

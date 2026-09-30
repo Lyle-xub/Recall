@@ -22,6 +22,7 @@ public static class LibraryCommands
             case "list": return Select(store, args);
             case "get": return Require(store, args);
             case "retrieve": return store.Retrieve(args.Text("query") ?? "", app: args.Text("app"), since: Date(args, "since"));
+            case "evidence": return store.Evidence(args.Text("query") ?? "", app: args.Text("app"), since: Date(args, "since"));
             case "apps": return store.AppNames();
             case "index-candidates": return args.Text("id") != null ? new[] { Require(store,args) }.ToList() : store.IndexCandidates(args.Number("limit",100));
             case "sessions": return store.Sessions();

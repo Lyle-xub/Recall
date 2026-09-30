@@ -76,14 +76,9 @@ public static class CliApplication
         if (a.Words[0] == "ask")
         {
             a.Allow(ModelOptions + " app since", 2);
-            var frames = (await client.Call("retrieve", new { query = a.Words[1], app = a.Get("app"), since = a.Date("since") }, ct)).Deserialize<List<MemoryFrame>>(Wire.Json) ?? [];
-            var transcripts = new List<TranscriptLine>();
-            foreach (var id in frames.Select(f => f.SessionId).Where(id => id != null).Distinct())
-            {
-                var rows = (await client.Call("transcript", new { id }, ct)).Deserialize<List<TranscriptLine>>(Wire.Json) ?? [];
-                transcripts.AddRange(rows.Where(t => frames.Any(f => f.SessionId == id && t.Timestamp >= f.Timestamp.AddSeconds(-30) && t.Timestamp <= (f.EndTimestamp ?? f.Timestamp).AddSeconds(30))));
-            }
-            var answer = await ModelClient.Answer(a.Words[1], frames, transcripts, [], Profile(client.Root, a, false), await Key(a, false, ct), ct);
+            var evidence = (await client.Call("evidence", new { query = a.Words[1], app = a.Get("app"), since = a.Date("since") }, ct)).Deserialize<RecallEvidence>(Wire.Json) ?? new([], [], "");
+            var frames = evidence.Sources;
+            var answer = frames.Count == 0 ? RecallPrompt.NoEvidence(a.Words[1]) : await ModelClient.Answer(a.Words[1], frames, evidence.Transcripts, [], Profile(client.Root, a, false), await Key(a, false, ct), ct, context:evidence.Context);
             return new { answer, sources = frames.Select(f => new { f.Id, f.Timestamp, f.AppName, f.Title }) };
         }
         if (a.Words[0] == "transcribe")
