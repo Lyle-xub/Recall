@@ -334,10 +334,13 @@ final class MemoryStore: @unchecked Sendable {
     }
     func frame(_ id: String) throws -> MemoryFrame? { try jsonRows("SELECT json FROM frames WHERE id=?",[id],as:MemoryFrame.self).first }
     func cliIntegrity() throws -> String { try jsonRows("SELECT json_quote(quick_check) FROM pragma_quick_check",as:String.self).first ?? "unknown" }
-    func pendingIndexWindow(limit:Int = 32)throws->(ids:[String],count:Int) {
+    func pendingIndexWindow(limit:Int = 32,excluding:[String] = [])throws->(ids:[String],count:Int) {
         try synchronized {
             let count = try jsonRows("SELECT COUNT(*) FROM frames WHERE demo=0 AND deleted IS NULL AND json_extract(json,'$.indexingComplete')=0",as:Int.self).first ?? 0
-            let ids = try jsonRows("SELECT json_quote(id) FROM frames WHERE demo=0 AND deleted IS NULL AND json_extract(json,'$.indexingComplete')=0 ORDER BY time,id LIMIT ?",[max(1,min(32,limit))],as:String.self)
+            let blocked = Array(Set(excluding).prefix(128))
+            let exclusion = blocked.isEmpty ? "":" AND id NOT IN ("+Array(repeating:"?",count:blocked.count).joined(separator:",")+")"
+            let values:[Any?] = blocked.map {$0 as Any?}+[max(1,min(32,limit))]
+            let ids = try jsonRows("SELECT json_quote(id) FROM frames WHERE demo=0 AND deleted IS NULL AND json_extract(json,'$.indexingComplete')=0\(exclusion) ORDER BY time,id LIMIT ?",values,as:String.self)
             return (ids,count)
         }
     }

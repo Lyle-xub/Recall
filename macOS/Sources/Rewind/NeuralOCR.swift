@@ -31,10 +31,11 @@ final class NeuralOCR: @unchecked Sendable {
         let worker = Process(),inPipe = Pipe(),outPipe = Pipe()
         worker.executableURL = root.appendingPathComponent("recall-ocr");worker.arguments = [root.path]
         worker.standardInput = inPipe;worker.standardOutput = outPipe;worker.standardError = FileHandle.nullDevice
-        // Utility still yields to foreground work, without background process
-        // throttling turning a two-second frame into a growing source backlog.
-        // Keep the two-thread ceiling and the inter-job recovery budget.
-        worker.qualityOfService = .utility
+        // Utility QoS can confine inference to efficiency cores under load,
+        // extending the same bounded job far beyond the capture interval.
+        // User-interactive UI work still outranks this serial two-thread worker;
+        // the foreground gate and thermal/inter-job budgets remain in the owner.
+        worker.qualityOfService = .userInitiated
         // Bound Accelerate helpers too; ONNX's own pool is capped in the worker.
         worker.environment = ProcessInfo.processInfo.environment.merging(["VECLIB_MAXIMUM_THREADS":"2"]) { _,limit in limit }
         try worker.run();process = worker;input = inPipe.fileHandleForWriting;output = outPipe.fileHandleForReading
