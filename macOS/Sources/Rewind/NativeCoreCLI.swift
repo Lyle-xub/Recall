@@ -180,14 +180,19 @@ enum NativeCoreCLI {
             let frames = args["id"] != nil && !(args["id"] is NSNull) ? [try required(args,store:store)] : Array(try store.pendingIndexFrames().prefix(args["limit"] as? Int ?? 100))
             for var frame in frames {
                 let source = try CleanupFiles.ownedURL(frame.imagePath,root:store.root)
-                guard let image = StoredImage.load(source) else { throw CoreCLIError(code:"unsupported_media",message:"The saved image could not be decoded.") }
                 let language = args["language"] as? String ?? "eng"
                 if ProcessInfo.processInfo.environment["RECALL_TESSERACT"] == nil,
                    ["eng","chi_sim","eng+chi_sim","chi_sim+eng"].contains(language) {
-                    let result = try NativeOCR.recognize(image,source:source.pathExtension == "png" ? source:nil)
+                    let result:(String,[TextRegion])
+                    if source.pathExtension == "png" {result = try NativeOCR.recognize(source:source)}
+                    else {
+                        guard let image = StoredImage.load(source) else {throw CoreCLIError(code:"unsupported_media",message:"The saved image could not be decoded.")}
+                        result = try NativeOCR.recognize(image)
+                    }
                     _ = try store.updateIndex(frameID:frame.id,text:result.0,regions:result.1)
                     continue
                 }
+                guard let image = StoredImage.load(source) else { throw CoreCLIError(code:"unsupported_media",message:"The saved image could not be decoded.") }
                 let folder = FileManager.default.temporaryDirectory.appendingPathComponent("recall-cli-ocr-"+UUID().uuidString)
                 try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])
                 defer { try? FileManager.default.removeItem(at:folder) }

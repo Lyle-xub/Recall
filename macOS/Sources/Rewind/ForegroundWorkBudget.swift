@@ -108,9 +108,10 @@ import Combine
     func recoveryInterval(after work:TimeInterval,pending:Int = 0)->TimeInterval {
         // Warning pressure still makes progress. Critical pressure waits at
         // the gate; it does not repeatedly reload models or restart a job.
-        // A backlog stays serial and memory-bounded, with at least one second
-        // to recover under warning pressure instead of doubling every job.
-        max(BackgroundProcessingPolicy.recoveryInterval(after:work,pending:pending),state.pressure == .warning ? min(30,max(1,work*(pending >= 32 ? 0.5:2))):0)
+        // A large OCR backlog reuses the same serial worker. Warning pressure
+        // yields briefly without idling a full second after every short job;
+        // thermal and low-power recovery remain the lower bound.
+        max(BackgroundProcessingPolicy.recoveryInterval(after:work,pending:pending),state.pressure == .warning ? min(30,max(pending >= 32 ? 0.25:1,work*(pending >= 32 ? 0.1:2))):0)
     }
     func stop() {
         guard !stopped else {return};stopped=true

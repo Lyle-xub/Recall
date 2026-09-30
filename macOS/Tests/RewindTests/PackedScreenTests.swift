@@ -133,6 +133,20 @@ final class PackedScreenTests:XCTestCase {
         print("PACKED_SCREEN_BENCHMARK images=\(files.count) source=\(sourceBytes) previous=\(previousBytes) shared=\(sharedBytes) seconds=\(Date().timeIntervalSince(start))")
         XCTAssertEqual(try store.count(),files.count)
     }
+    func testVideoBackedIndexingUsesSameOriginalPixelsAndRecognition() async throws {
+        guard let path = ProcessInfo.processInfo.environment["RECALL_NEURAL_FIXTURE"],NeuralOCR.root != nil else {throw XCTSkip("Opt-in local OCR model test")}
+        let url = URL(fileURLWithPath:path),image = try XCTUnwrap(StoredImage.load(url))
+        let expected = try NativeOCR.recognize(image,source:url)
+        let processor = ScreenIndexProcessor()
+        let result = try await processor.process(url,archiveImage:false)
+        XCTAssertEqual(result.text,expected.0)
+        XCTAssertEqual(result.regions,expected.1)
+        XCTAssertEqual(result.archive.fileExtension,"png")
+        XCTAssertEqual(result.archive.data,try Data(contentsOf:url))
+        let cached = try await processor.process(url,archiveImage:false)
+        XCTAssertEqual(cached.regions,result.regions)
+    }
+
     func testLocalNeuralOCRFixtureAndRepeatAreIdentical() throws {
         guard let path = ProcessInfo.processInfo.environment["RECALL_NEURAL_FIXTURE"] else {throw XCTSkip("Opt-in local OCR model test")}
         let image = try XCTUnwrap(StoredImage.load(URL(fileURLWithPath:path)))

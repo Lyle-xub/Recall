@@ -12,6 +12,15 @@ enum NativeOCR {
     static var backendLabel:String {labelLock.withLock {lastBackend}}
     static func recognize(_ image: CGImage,source:URL? = nil) throws -> (String,[TextRegion]) {
         if NeuralOCR.root != nil,let result = try? NeuralOCR.shared.recognize(image,source:source) {labelLock.withLock {lastBackend = "ppocr-v6-small"};return CompactOCR.identified(result)}
+        return try recognizeFallback(image)
+    }
+    static func recognize(source:URL) throws -> (String,[TextRegion]) {
+        if NeuralOCR.root != nil,let result = try? NeuralOCR.shared.recognize(source:source) {labelLock.withLock {lastBackend = "ppocr-v6-small"};return CompactOCR.identified(result)}
+        try Task.checkCancellation()
+        guard let image = StoredImage.load(source) else {throw RewindError.message("Could not read captured frame.")}
+        return try recognizeFallback(image)
+    }
+    private static func recognizeFallback(_ image:CGImage) throws -> (String,[TextRegion]) {
         try Task.checkCancellation()
         return CompactOCR.identified(try recovery.recognize(primary:{try perform(image,compatible:false)},compatible:{try perform(image,compatible:true)}))
     }

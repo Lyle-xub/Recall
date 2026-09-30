@@ -66,9 +66,15 @@ actor ScreenIndexProcessor {
         if let cached = cache[key] {
             return ScreenIndexResult(text:cached.recognition.0,regions:cached.recognition.1,archive:cached.archive ?? ScreenArchive(data:data,fileExtension:"png"))
         }
-        guard let source = CGImageSourceCreateWithData(data as CFData,nil),let image = CGImageSourceCreateImageAtIndex(source,0,nil) else { throw RewindError.message("Could not read captured frame.") }
-        let recognition = try NativeOCR.recognize(image,source:url)
-        let archive = archiveImage ? try ScreenArchive.pack(image):nil
+        let recognition:(String,[TextRegion]),archive:ScreenArchive?
+        if archiveImage {
+            guard let source = CGImageSourceCreateWithData(data as CFData,nil),let image = CGImageSourceCreateImageAtIndex(source,0,nil) else { throw RewindError.message("Could not read captured frame.") }
+            recognition = try NativeOCR.recognize(image,source:url)
+            archive = try ScreenArchive.pack(image)
+        } else {
+            recognition = try NativeOCR.recognize(source:url)
+            archive = nil
+        }
         // Video-backed recognition only caches text. Do not retain six full
         // lossless screenshots after their durable spools have been released.
         cache[key] = Cached(recognition:recognition,archive:archive);order.append(key)

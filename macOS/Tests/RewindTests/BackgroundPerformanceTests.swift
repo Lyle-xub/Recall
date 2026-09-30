@@ -44,6 +44,16 @@ final class BackgroundPerformanceTests:XCTestCase {
         XCTAssertTrue(Set(unblocked.ids).isDisjoint(with:window.ids))
     }
 
+    @MainActor func testWarningPressureCatchUpYieldsWithoutAFullSecondPerFrame() throws {
+        let budget = ForegroundWorkBudget(observeSystem:false)
+        defer {budget.stop()}
+        budget.setPressure(.warning)
+        let baseline = BackgroundProcessingPolicy.recoveryInterval(after:1,pending:500)
+        XCTAssertEqual(budget.recoveryInterval(after:1,pending:500),max(0.25,baseline),accuracy:0.001)
+        XCTAssertGreaterThanOrEqual(budget.recoveryInterval(after:1,pending:500),baseline)
+        XCTAssertGreaterThanOrEqual(budget.recoveryInterval(after:1,pending:0),2)
+    }
+
     @MainActor func testFailedImageDoesNotHideLaterDurableWindows() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer {try? FileManager.default.removeItem(at:root)}

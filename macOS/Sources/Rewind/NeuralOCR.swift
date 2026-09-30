@@ -41,20 +41,27 @@ final class NeuralOCR: @unchecked Sendable {
         try worker.run();process = worker;input = inPipe.fileHandleForWriting;output = outPipe.fileHandleForReading
     }
     func recognize(_ image:CGImage,source:URL? = nil) throws -> (String,[TextRegion]) {
+        if let source {return try recognize(source:source)}
+        try lock.withLock {
+            try Task.checkCancellation()
+            guard Date() >= retryAfter,Self.root != nil else {throw RewindError.message("Neural text recognition is temporarily unavailable.")}
+        }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("recall-neural-"+UUID().uuidString)
+        defer {try? FileManager.default.removeItem(at:folder)}
+        try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+        let url = folder.appendingPathComponent("source.png")
+        try ScreenArchive.saveSource(image,to:url)
+        return try recognize(source:url)
+    }
+    /// The worker decodes the durable PNG itself; avoid decoding it again in Swift.
+    func recognize(source:URL) throws -> (String,[TextRegion]) {
         try lock.withLock {
             try Task.checkCancellation()
             guard Date() >= retryAfter,let root = Self.root else {throw RewindError.message("Neural text recognition is temporarily unavailable.")}
-            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("recall-neural-"+UUID().uuidString)
-            defer {if source == nil {try? FileManager.default.removeItem(at:folder)}}
-            let url:URL
-            if let source {url = source} else {
-                try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
-                url = folder.appendingPathComponent("source.png");try ScreenArchive.saveSource(image,to:url)
-            }
             do {
                 try start(root)
                 guard let input,let output else {throw RewindError.message("The text-recognition worker did not start.")}
-                var request = try JSONSerialization.data(withJSONObject:["image":url.path]);request.append(10)
+                var request = try JSONSerialization.data(withJSONObject:["image":source.path]);request.append(10)
                 try input.write(contentsOf:request)
                 var response = Data();let deadline = Date().addingTimeInterval(45)
                 while response.last != 10 {
