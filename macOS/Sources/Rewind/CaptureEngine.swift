@@ -416,14 +416,15 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
                         try database.updateIndex(frameID:frame.id,text:result.text,regions:result.regions,archive:frame.visualTime == nil ? result.archive:nil,sourceURL:result.sourceURL)
                     }.value
                     let work=Date().timeIntervalSince(started)
-                    nextIndexingAllowed = .now.advanced(by:.seconds(workBudget?.recoveryInterval(after:work,pending:pendingOCRCount) ?? BackgroundProcessingPolicy.recoveryInterval(after:work,pending:pendingOCRCount)))
+                    let recovery = workBudget?.recoveryInterval(after:work,pending:pendingOCRCount,latencySensitive:true) ?? BackgroundProcessingPolicy.recoveryInterval(after:work,pending:pendingOCRCount,latencySensitive:true)
+                    nextIndexingAllowed = .now.advanced(by:.seconds(recovery))
                     guard let saved else { continue }
                     retries.removeValue(forKey:frame.id)
                     pendingOCRCount = max(0,pendingOCRCount-1)
                     try Task.checkCancellation()
                     onIndexed?(saved)
                     if failures > 0 { failures = 0;onIndexingIssue?(nil) }
-                    diagnostics.write("OCR finished; mode=\(NativeOCR.backendLabel); elapsed=\(Date().timeIntervalSince(started))")
+                    diagnostics.write("OCR finished; mode=\(NativeOCR.backendLabel); elapsed=\(Date().timeIntervalSince(started)); pending=\(pendingOCRCount); recovery=\(recovery); thermal=\(ProcessInfo.processInfo.thermalState.rawValue); pressure=\(String(describing:workBudget?.state.pressure))")
                 } catch {
                     if error is CancellationError { break }
                     // Cleanup may remove a queued image before decoding begins.

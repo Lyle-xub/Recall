@@ -54,6 +54,23 @@ final class BackgroundPerformanceTests:XCTestCase {
         XCTAssertGreaterThanOrEqual(budget.recoveryInterval(after:1,pending:0),2)
     }
 
+    @MainActor func testLiveOCRDoesNotWaitForALargeBacklogToCatchUp() {
+        let budget = ForegroundWorkBudget(observeSystem:false)
+        defer {budget.stop()}
+        budget.setPressure(.warning)
+        let recovery = budget.recoveryInterval(after:15,pending:1,latencySensitive:true)
+        let thermalBound = BackgroundProcessingPolicy.recoveryInterval(after:15,pending:1,latencySensitive:true)
+        XCTAssertEqual(recovery,max(1,thermalBound),accuracy:0.001)
+        XCTAssertEqual(BackgroundProcessingPolicy.recoveryInterval(after:15,pending:1,latencySensitive:true,thermal:.nominal,lowPower:false),0.5)
+        for thermal in [ProcessInfo.ThermalState.fair,.serious,.critical] {
+            XCTAssertGreaterThan(BackgroundProcessingPolicy.recoveryInterval(after:15,pending:1,latencySensitive:true,thermal:thermal,lowPower:false),0.5)
+        }
+        XCTAssertEqual(BackgroundProcessingPolicy.recoveryInterval(after:15,pending:1,latencySensitive:true,thermal:.nominal,lowPower:true),10)
+        XCTAssertTrue(budget.state.limited)
+        budget.setPressure(.critical)
+        XCTAssertTrue(budget.state.defersBackground)
+    }
+
     @MainActor func testFailedImageDoesNotHideLaterDurableWindows() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer {try? FileManager.default.removeItem(at:root)}

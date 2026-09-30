@@ -61,6 +61,11 @@ actor ScreenIndexProcessor {
     private var order:[String] = []
     private var cachedBytes = 0
     func process(_ url:URL,archiveImage:Bool = true) throws -> ScreenIndexResult {
+        // Recording is requested by the user even while the overlay is hidden.
+        // End this assertion on success, failure and cancellation; idle sleep,
+        // foreground gates and the serial work budget remain enabled.
+        let activity = ProcessInfo.processInfo.beginActivity(options:.userInitiatedAllowingIdleSystemSleep,reason:"Recognize saved screen text")
+        defer {ProcessInfo.processInfo.endActivity(activity)}
         let data = try Data(contentsOf:url)
         let key = (archiveImage ? "tiles:":"visual:")+SHA256.hash(data:data).map { String(format:"%02x",$0) }.joined()
         if let cached = cache[key] {

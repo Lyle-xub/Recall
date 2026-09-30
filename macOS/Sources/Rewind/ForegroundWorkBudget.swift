@@ -105,13 +105,15 @@ import Combine
         try await gate.wait()
         guard !stopped else {throw CancellationError()}
     }
-    func recoveryInterval(after work:TimeInterval,pending:Int = 0)->TimeInterval {
+    func recoveryInterval(after work:TimeInterval,pending:Int = 0,latencySensitive:Bool = false)->TimeInterval {
         // Warning pressure still makes progress. Critical pressure waits at
         // the gate; it does not repeatedly reload models or restart a job.
-        // A large OCR backlog reuses the same serial worker. Warning pressure
-        // yields briefly without idling a full second after every short job;
-        // thermal and low-power recovery remain the lower bound.
-        max(BackgroundProcessingPolicy.recoveryInterval(after:work,pending:pending),state.pressure == .warning ? min(30,max(pending >= 32 ? 0.25:1,work*(pending >= 32 ? 0.1:2))):0)
+        // Screen text has a capture deadline even before the queue reaches 32.
+        // It reuses one bounded serial worker; a longer idle delay would create
+        // backlog without lowering its peak memory. Maintenance keeps its
+        // slower pacing, and heat/low-power recovery remain the lower bound.
+        let catchingUp = latencySensitive || pending >= 32
+        return max(BackgroundProcessingPolicy.recoveryInterval(after:work,pending:pending,latencySensitive:latencySensitive),state.pressure == .warning ? min(catchingUp ? 1:30,max(catchingUp ? 0.25:1,work*(catchingUp ? 0.1:2))):0)
     }
     func stop() {
         guard !stopped else {return};stopped=true

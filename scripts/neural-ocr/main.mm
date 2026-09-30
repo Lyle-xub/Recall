@@ -15,6 +15,32 @@
 #include <chrono>
 #include <set>
 #include <cstdlib>
+#include <thread>
+#include <pthread.h>
+
+// Activity is scoped to loading or one recognition request. The worker may
+// sleep normally while idle; the owner still controls heat and inter-job pacing.
+class OCRActivity {
+    id<NSObject> token;
+public:
+    explicit OCRActivity(NSString* reason):token([[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiatedAllowingIdleSystemSleep reason:reason]) {}
+    ~OCRActivity() {[[NSProcessInfo processInfo] endActivity:token];}
+    OCRActivity(const OCRActivity&)=delete;
+    OCRActivity& operator=(const OCRActivity&)=delete;
+};
+static OrtCustomThreadHandle createOCRThread(void*,OrtThreadWorkerFn worker,void* parameter) {
+    try {
+        auto thread=new std::thread([worker,parameter] {
+            pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED,0);
+            worker(parameter);
+        });
+        return reinterpret_cast<OrtCustomThreadHandle>(thread);
+    } catch(...) {return nullptr;}
+}
+static void joinOCRThread(OrtCustomThreadHandle handle) {
+    auto thread=reinterpret_cast<std::thread*>(const_cast<OrtCustomHandleType*>(handle));
+    thread->join();delete thread;
+}
 
 static std::string hashMat(const cv::Mat& m) {
     cv::Mat continuous=m.isContinuous()?m:m.clone();unsigned char digest[CC_SHA256_DIGEST_LENGTH];
@@ -53,11 +79,22 @@ class Engine {
     }
 public:
     explicit Engine(const std::string& root) {
+        OCRActivity activity(@"Load local screen text recognition");
         // Leave cores available for WindowServer, capture and foreground apps.
         // Thread count changes scheduling only, not models or input resolution.
         cv::setNumThreads(1);options.SetIntraOpNumThreads(2);options.SetInterOpNumThreads(1);
+        // POSIX inference threads otherwise default to a lower QoS than the
+        // Swift Process launcher. Explicit QoS keeps this bounded pool responsive.
+        options.SetCustomCreateThreadFn(createOCRThread);options.SetCustomJoinThreadFn(joinOCRThread);
         options.DisableCpuMemArena();options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-        options.AddConfigEntry("session.intra_op.allow_spinning","0");options.AddConfigEntry("session.inter_op.allow_spinning","0");
+        // Brief bounded spins avoid a kernel wake-up at every convolution.
+        // Stop as soon as Run returns so idle/detection/recognition pools never
+        // burn cores between jobs. This does not add inference threads.
+        options.AddConfigEntry("session.intra_op.allow_spinning","1");
+        options.AddConfigEntry("session.intra_op.spin_duration_us","500");
+        options.AddConfigEntry("session.intra_op.spin_backoff_max","4");
+        options.AddConfigEntry("session.force_spinning_stop","1");
+        options.AddConfigEntry("session.inter_op.allow_spinning","0");
         det=Ort::Session(env,(root+"/det.onnx").c_str(),options);rec=Ort::Session(env,(root+"/rec.onnx").c_str(),options);
         detIn=det.GetInputNameAllocated(0,allocator).get();detOut=det.GetOutputNameAllocated(0,allocator).get();
         recIn=rec.GetInputNameAllocated(0,allocator).get();recOut=rec.GetOutputNameAllocated(0,allocator).get();
@@ -88,6 +125,7 @@ public:
         return result;
     }
     NSDictionary* process(NSString* path) {
+        OCRActivity activity(@"Recognize saved screen text");
         auto start=std::chrono::steady_clock::now();auto image=readImage(path);int width=image.cols,height=image.rows;
         double scale=std::min(1.,1280./std::max(width,height));int dw=std::max(32,(int)std::round(width*scale/32)*32),dh=std::max(32,(int)std::round(height*scale/32)*32);
         auto input=tensor(image,dw,dh);auto output=run(det,detIn,detOut,input,dw,dh);
@@ -144,6 +182,7 @@ public:
 };
 int main(int argc,char** argv) {
     @autoreleasepool {
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED,0);
         try {
             if(argc!=2)return 2;Engine engine(argv[1]);std::string line;
             while(std::getline(std::cin,line)) { @autoreleasepool {
