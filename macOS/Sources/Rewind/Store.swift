@@ -39,6 +39,7 @@ final class MemoryStore: @unchecked Sendable {
         try execute("CREATE TABLE IF NOT EXISTS frames (id TEXT PRIMARY KEY, time REAL, app TEXT, text TEXT, starred INTEGER, deleted REAL, demo INTEGER, json TEXT)")
         try execute("CREATE INDEX IF NOT EXISTS frames_time ON frames(time DESC)")
         try execute("CREATE INDEX IF NOT EXISTS frames_app ON frames(app, time DESC)")
+        try execute("CREATE INDEX IF NOT EXISTS frames_pending_ocr ON frames(time,id) WHERE demo=0 AND deleted IS NULL AND json_extract(json,'$.indexingComplete')=0")
         try execute("CREATE INDEX IF NOT EXISTS frames_image ON frames(json_extract(json,'$.imagePath'))")
         try execute("CREATE INDEX IF NOT EXISTS frames_meeting_image ON frames(json_extract(json,'$.meetingImagePath'))")
         try execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, json TEXT)")
@@ -333,6 +334,16 @@ final class MemoryStore: @unchecked Sendable {
     }
     func frame(_ id: String) throws -> MemoryFrame? { try jsonRows("SELECT json FROM frames WHERE id=?",[id],as:MemoryFrame.self).first }
     func cliIntegrity() throws -> String { try jsonRows("SELECT json_quote(quick_check) FROM pragma_quick_check",as:String.self).first ?? "unknown" }
+    func pendingIndexWindow(limit:Int = 32,excluding:[String] = [])throws->(ids:[String],count:Int) {
+        try synchronized {
+            let count = try jsonRows("SELECT COUNT(*) FROM frames WHERE demo=0 AND deleted IS NULL AND json_extract(json,'$.indexingComplete')=0",as:Int.self).first ?? 0
+            let blocked = Array(Set(excluding).prefix(128))
+            let exclusion = blocked.isEmpty ? "":" AND id NOT IN ("+Array(repeating:"?",count:blocked.count).joined(separator:",")+")"
+            let values:[Any?] = blocked.map {$0 as Any?}+[max(1,min(32,limit))]
+            let ids = try jsonRows("SELECT json_quote(id) FROM frames WHERE demo=0 AND deleted IS NULL AND json_extract(json,'$.indexingComplete')=0\(exclusion) ORDER BY time,id LIMIT ?",values,as:String.self)
+            return (ids,count)
+        }
+    }
     func pendingIndexFrames() throws -> [MemoryFrame] { try jsonRows("SELECT json FROM frames WHERE demo=0 AND deleted IS NULL AND json_extract(json,'$.indexingComplete')=0 ORDER BY time",as:MemoryFrame.self) }
     func session(_ id: String) throws -> RecordingSession? { try jsonRows("SELECT json FROM sessions WHERE id=?",[id],as:RecordingSession.self).first }
     func sessions() throws -> [RecordingSession] { try jsonRows("SELECT json FROM sessions", as: RecordingSession.self) }

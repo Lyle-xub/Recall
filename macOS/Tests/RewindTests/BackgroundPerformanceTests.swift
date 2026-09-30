@@ -21,6 +21,50 @@ final class BackgroundPerformanceTests:XCTestCase {
         XCTAssertLessThanOrEqual(BackgroundProcessingPolicy.recoveryInterval(after:600,thermal:.critical,lowPower:true),60)
     }
 
+    func testCatchUpKeepsThermalAndLowPowerBudgetsAndBoundsDurableDiscovery()throws {
+        let normal = BackgroundProcessingPolicy.recoveryInterval(after:3,pending:500,thermal:.nominal,lowPower:false)
+        XCTAssertEqual(normal,0.15,accuracy:0.001)
+        XCTAssertGreaterThan(BackgroundProcessingPolicy.recoveryInterval(after:3,pending:500,thermal:.serious,lowPower:false),normal)
+        XCTAssertEqual(BackgroundProcessingPolicy.recoveryInterval(after:3,pending:500,thermal:.fair,lowPower:false),1.5)
+        XCTAssertEqual(BackgroundProcessingPolicy.recoveryInterval(after:3,pending:500,thermal:.fair,lowPower:true),3)
+        XCTAssertGreaterThan(BackgroundProcessingPolicy.recoveryInterval(after:3,pending:500,thermal:.nominal,lowPower:true),normal)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {try? FileManager.default.removeItem(at:root)}
+        let store = try MemoryStore(root:root)
+        let date = Date()
+        for i in 0..<70 {
+            try store.save(MemoryFrame(timestamp:date.addingTimeInterval(Double(i)),appName:"Synthetic",bundleID:"test",title:"",imagePath:"frames/source.png",text:"",regions:[],indexingComplete:false))
+        }
+        let window = try store.pendingIndexWindow(limit:10000)
+        XCTAssertEqual(window.ids.count,32);XCTAssertEqual(window.count,70)
+        let times = try window.ids.compactMap {try store.frame($0)?.timestamp}
+        XCTAssertEqual(times,times.sorted());XCTAssertEqual(times.first,date)
+        let unblocked = try store.pendingIndexWindow(excluding:window.ids)
+        XCTAssertEqual(unblocked.ids.count,32);XCTAssertEqual(unblocked.count,70)
+        XCTAssertTrue(Set(unblocked.ids).isDisjoint(with:window.ids))
+    }
+
+    @MainActor func testFailedImageDoesNotHideLaterDurableWindows() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {try? FileManager.default.removeItem(at:root)}
+        let store = try MemoryStore(root:root),date = Date()
+        for i in 0..<35 {
+            let frame = MemoryFrame(timestamp:date.addingTimeInterval(Double(i)),appName:"Test",bundleID:"test",title:"",imagePath:"frames/\(i == 0 ? "broken":"good-\(i)").png",text:"",regions:[],indexingComplete:false,visualTime:0)
+            try store.save(frame)
+        }
+        let capture = CaptureEngine(store:store,indexFrame:{url,_ in
+            if url.lastPathComponent == "broken.png" {throw RewindError.message("Permanent fixture failure")}
+            return ScreenIndexResult(text:"indexed",regions:[],archive:ScreenArchive(data:Data(),fileExtension:"png"))
+        })
+        let finished = expectation(description:"Every healthy window drains")
+        finished.expectedFulfillmentCount = 34
+        capture.onIndexed = {_ in finished.fulfill()}
+        capture.resumePendingIndexing()
+        await fulfillment(of:[finished],timeout:30)
+        await capture.suspendIndexing()
+        XCTAssertEqual(try store.pendingIndexWindow().count,1,"The failed original stays durable while later captures finish")
+    }
+
     @MainActor func testIndexingYieldsBetweenCachedJobsWithoutLosingSavedFrames() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at:root) }

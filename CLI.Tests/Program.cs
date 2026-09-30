@@ -6,6 +6,18 @@ using System.Text.Json;
 using Recall.Cli;
 using Rewind;
 
+if(args is ["--json-line-probe"])
+{
+    string? line;
+    while((line=await Console.In.ReadLineAsync())!=null)
+    {
+        using var request=JsonDocument.Parse(line);
+        if(request.RootElement.TryGetProperty("block",out _))await Task.Delay(Timeout.Infinite);
+        Console.WriteLine(JsonSerializer.Serialize(new {pid=Environment.ProcessId,value=request.RootElement.GetProperty("value").GetInt32()}));
+    }
+    return;
+}
+
 if(args.Length>=2 && args[0]=="--detached-argument-probe") {await File.WriteAllTextAsync(args[1],JsonSerializer.Serialize(args.Skip(2)));return;}
 
 if(args is ["--inference-test-child"]) {await Task.Delay(TimeSpan.FromSeconds(60));return;}
@@ -24,6 +36,7 @@ if(Environment.GetEnvironmentVariable("RECALL_TEST_TRANSCODE_GATE") is {Length:>
 
 if(Environment.GetEnvironmentVariable("RECALL_TEST_ARCHIVE_OCR")=="1" && args.Length>1 && args[1]=="stdout")
 {
+    if(Environment.GetEnvironmentVariable("RECALL_TEST_OCR_COUNTER") is { } counter)File.AppendAllText(counter,"call\n");
     using var input=File.OpenRead(args[0]);var header=new byte[24];input.ReadExactly(header);
     if(!header.AsSpan(0,8).SequenceEqual(new byte[]{137,80,78,71,13,10,26,10}))throw new Exception("OCR received archive metadata instead of PNG pixels");
     var width=System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(16,4));var height=System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(20,4));
@@ -47,6 +60,8 @@ async Task<JsonElement> Run(string library, int expected, params string[] words)
 Directory.CreateDirectory(root);
 try
 {
+    await OcrThroughputChecks.Run(root,Assert);
+    if(args.Contains("--ocr-throughput-only")) {Console.WriteLine($"{tests} OCR throughput assertions passed.");return;}
     if(args.Contains("--control-receipt-only")) {await ControlReceiptChecks.Run(root,Assert);Console.WriteLine($"{tests} control receipt assertions passed.");return;}
     if(args.Contains("--archive-media-only")) {await ArchiveMediaChecks.Run(root,Assert,Run);Console.WriteLine($"{tests} archive media assertions passed.");return;}
     await MigrationChecks.Run(root,Assert);

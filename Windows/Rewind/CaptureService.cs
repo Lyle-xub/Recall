@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
-using System.Threading.Channels;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
@@ -25,14 +24,13 @@ public sealed class CaptureService : IDisposable
     private RecordingSession? session;
     private volatile bool privacyPaused;
     private MemoryFrame? previous;
-    private readonly Channel<string> indexing = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
-    private readonly HashSet<string> queuedIndex = [];
     private readonly SemaphoreSlim indexGate = new(1,1);
     private readonly CancellationTokenSource lifetime = new();
-    private readonly Task indexingWorker;
+    private readonly DurableOcrWorker indexingWorker;
     private readonly object discoveryGate = new();
     private Task discoveryWorker = Task.CompletedTask;
     private bool discoveryStarted, discoveryStopped;
+    private volatile bool backgroundDiscoveryReady;
     private readonly VisualPromotionWorker visualPromotion;
     private volatile bool interfaceVisible;
     private RecordingSession? stoppedSession;
@@ -43,10 +41,12 @@ public sealed class CaptureService : IDisposable
     public event Action<RecordingSession>? SegmentFinished;
     public bool IsRecording => cts is { IsCancellationRequested: false };
     public bool IsPrivacyPaused => privacyPaused;
-    public CaptureService(MemoryStore store, bool deferBackgroundDiscovery = false)
+    public CaptureService(MemoryStore store, bool deferBackgroundDiscovery = false, bool interfaceVisible = false)
     {
         this.store = store;
-        interfaceVisible = !Environment.GetCommandLineArgs().Any(argument => argument is "--background" or "--cli-service" or "--visual-parity" or "--smoke-test");
+        // Visibility is owned by the caller. Legacy WPF callers that do not
+        // report Show/Hide must retain their original background-work behavior.
+        this.interfaceVisible = interfaceVisible;
         visualPromotion = new VisualPromotionWorker((sessionId, token) =>
         {
             token.ThrowIfCancellationRequested();
@@ -56,10 +56,12 @@ public sealed class CaptureService : IDisposable
                 return VisualVideoReader.Verify(store.Root, reference, token);
             })) FrameAdded?.Invoke(frame);
             return Task.CompletedTask;
-        }, error => Error?.Invoke("Visual archive verification retained original captures. " + error.Message), lifetime.Token, () => interfaceVisible);
-        // Discovery scans historical metadata only once at startup. Steady-state
-        // OCR and segment completion signal their specific ready session IDs.
-        indexingWorker = Task.Run(IndexLoop);
+        }, error => Error?.Invoke("Visual archive verification retained original captures. " + error.Message), lifetime.Token, () => this.interfaceVisible);
+        indexingWorker = new(store.PendingOcrIds, IndexFrame, (id, error) =>
+        {
+            store.Recognition(id, RecognitionState.Failed, error.Message);
+            if (store.Frame(id) is { } frame) FrameAdded?.Invoke(frame);
+        }, lifetime.Token, () => this.interfaceVisible || !backgroundDiscoveryReady);
         if (!deferBackgroundDiscovery) StartBackgroundDiscovery();
     }
     public void StartBackgroundDiscovery()
@@ -74,15 +76,15 @@ public sealed class CaptureService : IDisposable
                 {
                     while (interfaceVisible) await Task.Delay(200, lifetime.Token);
                     if (lifetime.IsCancellationRequested) return;
+                    store.PrepareOcrQueue();
+                    backgroundDiscoveryReady = true;
+                    indexingWorker.Wake();
+                    // Visual-session discovery runs once. OCR discovers bounded
+                    // windows directly from SQLite rather than queueing every ID.
                     foreach (var sessionId in store.UnfinishedVisualSessions())
                     {
                         if (lifetime.IsCancellationRequested) return;
                         visualPromotion.Request(sessionId);
-                    }
-                    foreach (var id in store.PendingFrameIds())
-                    {
-                        if (lifetime.IsCancellationRequested) return;
-                        QueueIndex(id);
                     }
                 }
                 catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
@@ -95,24 +97,14 @@ public sealed class CaptureService : IDisposable
         if (store.Session(sessionId) is { UnifiedVisualArchive: true, VisualArchiveReady: true, EndedAt: not null })
             visualPromotion.Request(sessionId);
     }
-    private void QueueIndex(string id)
+    private void QueueIndex(string id) => indexingWorker.Wake();
+    private async Task IndexFrame(string id, CancellationToken token)
     {
-        lock (queuedIndex) { if (queuedIndex.Add(id) && !indexing.Writer.TryWrite(id)) queuedIndex.Remove(id); }
-    }
-    private async Task IndexLoop()
-    {
-        await foreach (var id in indexing.Reader.ReadAllAsync())
+        await indexGate.WaitAsync(token);
+        try
         {
-            if (lifetime.IsCancellationRequested)
-                break;
-            try { while (interfaceVisible) await Task.Delay(200, lifetime.Token); }
-            catch (OperationCanceledException) { break; }
-            try { await indexGate.WaitAsync(lifetime.Token); }
-            catch (OperationCanceledException) { break; }
-            try
-            {
             var frame = store.Frame(id);
-            if (frame == null || frame.TextState is RecognitionState.Complete or RecognitionState.Empty) { lock (queuedIndex) queuedIndex.Remove(id); continue; }
+            if (frame == null || frame.DeletedAt != null || frame.TextState is RecognitionState.Complete or RecognitionState.Empty) { return; }
             var original = Path.Combine(store.Root, "frames", id + ".ocr.png");
             try
             {
@@ -125,11 +117,11 @@ public sealed class CaptureService : IDisposable
                     source.Save(original, ImageFormat.Png);
                     recognitionFile = original;
                 }
-                var recognized = await Recognize(recognitionFile, lifetime.Token);
+                var recognized = await Recognize(recognitionFile, token);
                 var meetingOriginal = Path.Combine(store.Root, "frames", id + "-meeting.ocr.png");
                 (string Text, List<TextRegion> Regions)? meeting = null;
                 if (File.Exists(meetingOriginal))
-                    meeting = await Recognize(meetingOriginal, lifetime.Token);
+                    meeting = await Recognize(meetingOriginal, token);
                 store.WithMediaLock(() =>
                 {
                     if (store.Frame(id) == null)
@@ -174,14 +166,11 @@ public sealed class CaptureService : IDisposable
                 if (File.Exists(meetingOriginal))
                     File.Delete(meetingOriginal);
             }
-            catch (OperationCanceledException) { store.Recognition(id, RecognitionState.Pending); break; }
-            catch (Exception ex) { store.Recognition(id, RecognitionState.Failed, ex.Message); }
-            lock (queuedIndex) queuedIndex.Remove(id);
+            catch (OperationCanceledException) { store.Recognition(id, RecognitionState.Pending); throw; }
             if (store.Frame(id) is { } updated)
                 FrameAdded?.Invoke(updated);
-            }
-            finally { indexGate.Release(); }
         }
+        finally { indexGate.Release(); }
     }
     public void SetInterfaceVisible(bool visible) => interfaceVisible = visible;
     public async Task<object> IndexOne(string id,string language,CancellationToken ct)
@@ -256,12 +245,9 @@ public sealed class CaptureService : IDisposable
     }
     public void Retry(MemoryFrame frame)
     {
-        lock (queuedIndex)
-        {
-            if (queuedIndex.Contains(frame.Id)) return;
-            store.Recognition(frame.Id, RecognitionState.Pending);
-            QueueIndex(frame.Id);
-        }
+        if (store.Frame(frame.Id)?.TextState == RecognitionState.Working) return;
+        store.Recognition(frame.Id, RecognitionState.Pending);
+        QueueIndex(frame.Id);
     }
     public async Task Start(AppSettings settings)
     {
@@ -605,8 +591,7 @@ public sealed class CaptureService : IDisposable
             Task discovery;
             lock (discoveryGate) { discoveryStopped = true; discovery = discoveryWorker; }
             await discovery;
-            indexing.Writer.TryComplete();
-            try { await indexingWorker; }
+            try { await indexingWorker.DisposeAsync(); }
             finally
             {
                 try { await visualPromotion.Stop(); }
@@ -624,7 +609,7 @@ public sealed class CaptureService : IDisposable
     {
         cts?.Cancel();
         lifetime.Cancel();
-        indexing.Writer.TryComplete();
+
     }
 }
 public record struct WindowInfo(IntPtr Handle, int Pid, string Process, string App, string Title);

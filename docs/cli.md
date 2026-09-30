@@ -187,7 +187,17 @@ The CLI starts it with the requested library in background service mode and uses
 the same native recorder. `service stop` gracefully exits a CLI-launched native
 instance; an independently opened desktop remains under its tray controls.
 
-The portable service captures still screenshots and runs OCR. It does not provide
+The portable service captures still screenshots and runs OCR. Captures are saved
+before a separate serial OCR worker processes them. Pending, failed and interrupted
+work is recovered from SQLite in windows of at most 32 IDs; stopping recording
+leaves indexing running, and restarting the service resumes unfinished work.
+Large backlogs shorten the idle interval without increasing inference concurrency.
+Exact input reuse avoids repeated recognition; changed pixels or language require
+fresh recognition. Native Mac indexing commands reuse the bundled recognizer for
+supported English/Chinese languages, while an explicit `RECALL_TESSERACT` override
+continues to use that engine.
+
+The portable service does not provide
 native video/audio recording or the full desktop's application metadata. Audio
 transcription of supplied files remains available separately. Unsupported capture
 requirements and missing engines are errors; no synthetic fallback frames are
@@ -206,8 +216,9 @@ custom directory.
 
 `index run` snapshots up to `--limit` pending/failed record IDs, or the explicit
 `--id`, and records a durable task. It processes each record through the current
-owner or offline adapter, using the requested Tesseract `--language`. Install that
-language's data and Tesseract on `PATH`, or set `RECALL_TESSERACT`. Native Mac images
+owner or offline adapter, using the requested OCR `--language`. Offline portable
+indexing and unsupported native languages require that language's data and
+Tesseract on `PATH`, or `RECALL_TESSERACT`. Native Mac images
 are decoded through the Swift store. Windows `.recallvideo` references and packed
 `.recallframe` images are decoded by the native owner, or materialized into a
 temporary image by FFmpeg when operating offline. A video reference must resolve

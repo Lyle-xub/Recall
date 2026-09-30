@@ -76,7 +76,7 @@ internal sealed class AppRuntime
         Store.RecoverInterruptedVisualSessions();
         HasMemories = Store.LatestArchiveDay() != null;
         usage = new(Store);
-        Capture = new(Store, deferBackgroundDiscovery: true);
+        Capture = new(Store, deferBackgroundDiscovery: true, interfaceVisible: interfaceVisible);
         Capture.SetInterfaceVisible(interfaceVisible);
         Recording = new(async () =>
         {

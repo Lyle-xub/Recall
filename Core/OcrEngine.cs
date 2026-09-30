@@ -1,19 +1,40 @@
 using System.Globalization;
+using System.Security.Cryptography;
 using Rewind;
 namespace Rewind;
 
 public static class OcrEngine
 {
+    static readonly SemaphoreSlim serial = new(1, 1);
+    static readonly Dictionary<string, (string Text, List<TextRegion> Regions, int Cost)> cache = [];
+    static readonly Queue<string> order = [];
+    static int bytes;
     public static async Task<(string Text, List<TextRegion> Regions)> Recognize(string image, string language, CancellationToken ct)
     {
         image = Path.GetFullPath(image);
         if (!File.Exists(image)) throw new FileNotFoundException("Image not found.", image);
         if (Path.GetExtension(image).ToLowerInvariant() is ".recallframe" or ".recallvisual" or ".recallvideo") throw new RecallException("unsupported_media", "Materialize the archive as an image before recognition, or use the Recall desktop/CLI indexing service.");
         var engine = Environment.GetEnvironmentVariable("RECALL_TESSERACT") ?? "tesseract";
-        var result = await ChildProcess.Run(engine, [image, "stdout", "-l", language, "--psm", "11", "tsv"], null, ct, 60);
-        if (result.ExitCode != 0) throw new RecallException("ocr_failed", "Tesseract failed. Check the image and installed language data.");
-        var regions = Parse(result.Output);
-        return (string.Join("\n", regions.Select(r => r.Text)), regions);
+        await serial.WaitAsync(ct);
+        try
+        {
+            await using var source = new FileStream(image, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.Asynchronous);
+            var digest = Convert.ToHexString(await SHA256.HashDataAsync(source, ct));
+            var version = File.Exists(engine) ? File.GetLastWriteTimeUtc(engine).Ticks : 0;
+            var key = engine + ":" + version + ":" + language + ":" + digest;
+            if (cache.TryGetValue(key, out var cached)) return (cached.Text, new(cached.Regions));
+            var result = await ChildProcess.Run(engine, [image, "stdout", "-l", language, "--psm", "11", "tsv"], null, ct, 60);
+            if (result.ExitCode != 0) throw new RecallException("ocr_failed", "Tesseract failed. Check the image and installed language data.");
+            var regions = Parse(result.Output); var text = string.Join("\n", regions.Select(r => r.Text));
+            int cost = text.Length * 2 + regions.Sum(r => r.Text.Length * 2 + 64);
+            if (cost <= 1024 * 1024)
+            {
+                cache[key] = (text, new(regions), cost); order.Enqueue(key); bytes += cost;
+                while (order.Count > 32 || bytes > 1024 * 1024) {var old = order.Dequeue(); bytes -= cache[old].Cost; cache.Remove(old);}
+            }
+            return (text, regions);
+        }
+        finally { serial.Release(); }
     }
     public static List<TextRegion> Parse(string tsv)
     {

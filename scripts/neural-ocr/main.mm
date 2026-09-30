@@ -13,6 +13,8 @@
 #include <deque>
 #include <numeric>
 #include <chrono>
+#include <set>
+#include <cstdlib>
 
 static std::string hashMat(const cv::Mat& m) {
     cv::Mat continuous=m.isContinuous()?m:m.clone();unsigned char digest[CC_SHA256_DIGEST_LENGTH];
@@ -64,18 +66,26 @@ public:
         characters.push_back("");std::istringstream stream(dictionary.get());std::string line;
         while(std::getline(stream,line)){if(!line.empty()&&line.back()=='\r')line.pop_back();characters.push_back(line);}characters.push_back(" ");
     }
-    Decode recognize(const cv::Mat& crop,bool& cached) {
-        auto key=hashMat(crop);auto found=cache.find(key);if(found!=cache.end()){cached=true;return found->second;}cached=false;
-        int width=std::max(32,std::min(4096,(int)std::ceil(crop.cols*48.0/crop.rows)));
-        auto values=tensor(crop,width,48);auto prediction=run(rec,recIn,recOut,values,width,48);
-        auto shape=prediction.GetTensorTypeAndShapeInfo().GetShape();if(shape.size()!=3||shape[2]!=(int64_t)characters.size())throw std::runtime_error("Unexpected recognition output");
-        auto scores=prediction.GetTensorData<float>();int64_t steps=shape[1],classes=shape[2];std::string text;double confidence=0;int count=0,previous=-1;
-        for(int64_t t=0;t<steps;t++) {
-            const float* row=scores+t*classes;int current=(int)std::distance(row,std::max_element(row,row+classes));
-            if(current!=0&&current!=previous){text+=characters[current];confidence+=row[current];count++;}previous=current;
+    std::vector<Decode> recognize(const std::vector<cv::Mat>& crops,int& hits) {
+        std::vector<Decode> result;result.reserve(crops.size());
+        for(const auto& crop:crops) {
+            int width=crop.cols;auto key=hashMat(crop);
+            if(auto found=cache.find(key);found!=cache.end()){result.push_back(found->second);++hits;continue;}
+            std::vector<float> values(crop.ptr<float>(),crop.ptr<float>()+crop.total());
+            auto prediction=run(rec,recIn,recOut,values,width,48);
+            auto shape=prediction.GetTensorTypeAndShapeInfo().GetShape();
+            if(shape.size()!=3||shape[0]!=1||shape[2]!=(int64_t)characters.size())throw std::runtime_error("Unexpected recognition output");
+            auto scores=prediction.GetTensorData<float>();int64_t steps=shape[1],classes=shape[2];
+            std::string text;double confidence=0;int decoded=0,previous=-1;
+            for(int64_t t=0;t<steps;++t) {
+                const float* row=scores+t*classes;int current=(int)std::distance(row,std::max_element(row,row+classes));
+                if(current!=0&&current!=previous){text+=characters[current];confidence+=row[current];++decoded;}previous=current;
+            }
+            Decode value{text,decoded?(float)(confidence/decoded):0};result.push_back(value);
+            cache[key]=value;order.push_back(key);
+            while(order.size()>768){cache.erase(order.front());order.pop_front();}
         }
-        Decode result{text,count?(float)(confidence/count):0};cache[key]=result;order.push_back(key);
-        while(order.size()>768){cache.erase(order.front());order.pop_front();}return result;
+        return result;
     }
     NSDictionary* process(NSString* path) {
         auto start=std::chrono::steady_clock::now();auto image=readImage(path);int width=image.cols,height=image.rows;
@@ -105,17 +115,29 @@ public:
         for(size_t i=1;i<boxes.size();i++)for(size_t j=i;j>0;j--) {
             auto& a=boxes[j-1];auto& b=boxes[j];if(std::abs(a.bounds.y-b.bounds.y)<std::min(a.bounds.height,b.bounds.height)*.45 && a.bounds.x>b.bounds.x)std::swap(a,b);else break;
         }
-        NSMutableArray* regions=[NSMutableArray array];int hits=0;
+        NSMutableArray* regions=[NSMutableArray array];int hits=0;std::vector<cv::Mat> crops;std::vector<Box> validBoxes;size_t inputBytes=0;
+        auto flush=[&] {
+            auto decodedLines=recognize(crops,hits);
+        for(size_t i=0;i<validBoxes.size();++i) {
+            const auto& box=validBoxes[i];const auto& decoded=decodedLines[i];if(decoded.text.empty()||decoded.score<.5)continue;
+            NSString* text=[[NSString alloc] initWithBytes:decoded.text.data() length:decoded.text.size() encoding:NSUTF8StringEncoding];if(!text)continue;
+            [regions addObject:@{@"text":text,@"x":@(box.bounds.x/(double)width),@"y":@(box.bounds.y/(double)height),@"width":@(box.bounds.width/(double)width),@"height":@(box.bounds.height/(double)height),@"confidence":@(decoded.score)}];
+        }
+            crops.clear();validBoxes.clear();inputBytes=0;
+        };
         for(const auto& box:boxes) {
             const auto& p=box.points;int cw=(int)std::max(cv::norm(p[0]-p[1]),cv::norm(p[2]-p[3])),ch=(int)std::max(cv::norm(p[0]-p[3]),cv::norm(p[1]-p[2]));
             if(cw<2||ch<2)continue;cw=std::min(16000,cw);ch=std::min(16000,ch);
             std::vector<cv::Point2f> dest={{0,0},{(float)cw,0},{(float)cw,(float)ch},{0,(float)ch}};cv::Mat crop;
             cv::warpPerspective(image,crop,cv::getPerspectiveTransform(p,dest),cv::Size(cw,ch),cv::INTER_CUBIC,cv::BORDER_REPLICATE);
             if(ch>cw*1.5)cv::rotate(crop,crop,cv::ROTATE_90_COUNTERCLOCKWISE);
-            bool cached=false;auto decoded=recognize(crop,cached);if(cached)hits++;if(decoded.text.empty()||decoded.score<.5)continue;
-            NSString* text=[[NSString alloc] initWithBytes:decoded.text.data() length:decoded.text.size() encoding:NSUTF8StringEncoding];if(!text)continue;
-            [regions addObject:@{@"text":text,@"x":@(box.bounds.x/(double)width),@"y":@(box.bounds.y/(double)height),@"width":@(box.bounds.width/(double)width),@"height":@(box.bounds.height/(double)height),@"confidence":@(decoded.score)}];
+            int rw=std::max(32,std::min(4096,(int)std::ceil(crop.cols*48.0/crop.rows)));
+            auto values=tensor(crop,rw,48);
+            cv::Mat normalized(3*48,rw,CV_32F,values.data());crops.push_back(normalized.clone());validBoxes.push_back(box);inputBytes+=values.size()*sizeof(float);
+            // Bound activation/input memory as well as model thread count.
+            if(crops.size()>=16||inputBytes>=8*1024*1024)flush();
         }
+        if(!crops.empty())flush();
         double elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
         return @{@"regions":regions,@"cachedLines":@(hits),@"seconds":@(elapsed),@"backend":@"ppocr-v6-small"};
     }

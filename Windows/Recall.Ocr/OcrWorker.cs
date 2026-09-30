@@ -17,16 +17,50 @@ internal record Region(string Text,double X,double Y,double Width,double Height)
 internal sealed class Engine:IDisposable {
     readonly InferenceSession detection,recognition;readonly string[] characters;
     readonly Dictionary<string,(string Text,float Score)> cache=[];readonly Queue<string> order=[];
-    public Engine(string root){Cv2.SetNumThreads(1);using var options=new SessionOptions{IntraOpNumThreads=Math.Min(4,Environment.ProcessorCount),InterOpNumThreads=1,EnableCpuMemArena=false,GraphOptimizationLevel=GraphOptimizationLevel.ORT_ENABLE_ALL};options.AddSessionConfigEntry("session.intra_op.allow_spinning","0");options.AddSessionConfigEntry("session.inter_op.allow_spinning","0");detection=new(Path.Combine(root,"det.onnx"),options);recognition=new(Path.Combine(root,"rec.onnx"),options);characters=new[]{""}.Concat(recognition.ModelMetadata.CustomMetadataMap["character"].TrimEnd('\n').Split('\n').Select(x=>x.TrimEnd('\r'))).Append(" ").ToArray();}
-    static DenseTensor<float> Input(Mat image,int width,int height){using var resized=new Mat();Cv2.Resize(image,resized,new(width,height));var result=new DenseTensor<float>([1,3,height,width]);for(var y=0;y<height;y++)for(var x=0;x<width;x++){var p=resized.At<Vec3b>(y,x);for(var c=0;c<3;c++)result[0,c,y,x]=p[c]/127.5f-1;}return result;}
+    public Engine(string root){Cv2.SetNumThreads(1);using var options=new SessionOptions{IntraOpNumThreads=Math.Min(2,Environment.ProcessorCount),InterOpNumThreads=1,EnableCpuMemArena=false,GraphOptimizationLevel=GraphOptimizationLevel.ORT_ENABLE_ALL};options.AddSessionConfigEntry("session.intra_op.allow_spinning","0");options.AddSessionConfigEntry("session.inter_op.allow_spinning","0");detection=new(Path.Combine(root,"det.onnx"),options);recognition=new(Path.Combine(root,"rec.onnx"),options);characters=new[]{""}.Concat(recognition.ModelMetadata.CustomMetadataMap["character"].TrimEnd('\n').Split('\n').Select(x=>x.TrimEnd('\r'))).Append(" ").ToArray();}
+    static unsafe DenseTensor<float> Input(Mat image,int width,int height){
+        using var resized=new Mat();Cv2.Resize(image,resized,new(width,height));var result=new DenseTensor<float>([1,3,height,width]);var values=result.Buffer.Span;
+        for(var y=0;y<height;y++){
+            var row=(byte*)resized.Ptr(y);
+            for(var x=0;x<width;x++)for(var c=0;c<3;c++)values[c*width*height+y*width+x]=row[x*3+c]/127.5f-1;
+        }
+        return result;
+    }
     static Tensor<float> Run(InferenceSession session,Mat image,int width,int height){var tensor=Input(image,width,height);using var output=session.Run([NamedOnnxValue.CreateFromTensor(session.InputMetadata.Keys.First(),tensor)]);var values=output.First().AsTensor<float>();return new DenseTensor<float>(values.ToArray(),values.Dimensions.ToArray());}
-    (string Text,float Score) Recognize(Mat crop){using var continuous=crop.Clone();var bytes=new byte[continuous.Rows*continuous.Cols*continuous.ElemSize()];Marshal.Copy(continuous.Data,bytes,0,bytes.Length);var hash=$"{crop.Width}x{crop.Height}:"+Convert.ToHexString(SHA256.HashData(bytes));if(cache.TryGetValue(hash,out var found))return found;
-        var width=Math.Clamp((int)Math.Ceiling(crop.Width*48.0/crop.Height),32,4096);var output=Run(recognition,crop,width,48);if(output.Rank!=3||output.Dimensions[2]!=characters.Length)throw new InvalidDataException("Unexpected recognition output");var text=new System.Text.StringBuilder();float score=0;int count=0,previous=-1;for(var t=0;t<output.Dimensions[1];t++){int best=0;float bestScore=float.MinValue;for(var c=0;c<characters.Length;c++)if(output[0,t,c]>bestScore){best=c;bestScore=output[0,t,c];}if(best>0&&best!=previous){text.Append(characters[best]);score+=bestScore;count++;}previous=best;}var value=(text.ToString(),count>0?score/count:0);cache[hash]=value;order.Enqueue(hash);while(order.Count>768)cache.Remove(order.Dequeue());return value;
+    (string Text,float Score)[] Recognize(IReadOnlyList<DenseTensor<float>> inputs){
+        var result=new (string Text,float Score)[inputs.Count];
+        for(int i=0;i<inputs.Count;i++){
+            var input=inputs[i];int width=input.Dimensions[3];
+            // Shape and every normalized pixel must match before reusing text.
+            var key=width+":"+Convert.ToHexString(SHA256.HashData(MemoryMarshal.AsBytes(input.Buffer.Span)));
+            if(cache.TryGetValue(key,out var found)){result[i]=found;continue;}
+            using var output=recognition.Run([NamedOnnxValue.CreateFromTensor(recognition.InputMetadata.Keys.First(),input)]);
+            var prediction=output.First().AsTensor<float>();
+            if(prediction.Rank!=3||prediction.Dimensions[0]!=1||prediction.Dimensions[2]!=characters.Length)throw new InvalidDataException("Unexpected recognition output");
+            var text=new System.Text.StringBuilder();float score=0;int decoded=0,previous=-1;
+            for(int t=0;t<prediction.Dimensions[1];t++){
+                int best=0;float bestScore=float.MinValue;
+                for(int c=0;c<characters.Length;c++)if(prediction[0,t,c]>bestScore){best=c;bestScore=prediction[0,t,c];}
+                if(best>0&&best!=previous){text.Append(characters[best]);score+=bestScore;decoded++;}previous=best;
+            }
+            var value=(text.ToString(),decoded>0?score/decoded:0);result[i]=value;
+            cache[key]=value;order.Enqueue(key);while(order.Count>768)cache.Remove(order.Dequeue());
+        }
+        return result;
     }
     public List<Region> Process(string path){using var image=Cv2.ImDecode(File.ReadAllBytes(path),ImreadModes.Color);if(image.Empty())throw new InvalidDataException("Unreadable image");int width=image.Width,height=image.Height;double scale=Math.Min(1,1280.0/Math.Max(width,height));int dw=Math.Max(32,(int)Math.Round(width*scale/32)*32),dh=Math.Max(32,(int)Math.Round(height*scale/32)*32);var output=Run(detection,image,dw,dh);int mh=output.Dimensions[2],mw=output.Dimensions[3];using var map=new Mat(mh,mw,MatType.CV_32FC1);Marshal.Copy(output.ToArray(),0,map.Data,mw*mh);using var bitmap=new Mat();using var threshold=new Mat();Cv2.Threshold(map,threshold,.3,255,ThresholdTypes.Binary);threshold.ConvertTo(bitmap,MatType.CV_8U);using var kernel=Cv2.GetStructuringElement(MorphShapes.Rect,new(2,2));Cv2.Dilate(bitmap,bitmap,kernel);Cv2.FindContours(bitmap,out Point[][] contours,out _,RetrievalModes.List,ContourApproximationModes.ApproxSimple);
         var boxes=new List<(Point2f[] Points,Rect Bounds)>();foreach(var contour in contours){if(boxes.Count>=1000||contour.Length<3)continue;var rect=Cv2.MinAreaRect(contour);if(Math.Min(rect.Size.Width,rect.Size.Height)<3)continue;var roi=Cv2.BoundingRect(contour).Intersect(new(0,0,mw,mh));if(roi.Width<1||roi.Height<1)continue;using var mask=new Mat(roi.Height,roi.Width,MatType.CV_8U,Scalar.All(0));var translated=contour.Select(p=>new Point(p.X-roi.X,p.Y-roi.Y)).ToArray();Cv2.FillPoly(mask,[translated],Scalar.White);using var region=new Mat(map,roi);if(Cv2.Mean(region,mask).Val0<.5)continue;float expand=(float)(Math.Abs(Cv2.ContourArea(contour))*1.6/Math.Max(1,Cv2.ArcLength(contour,true)));rect.Size=new(rect.Size.Width+2*expand,rect.Size.Height+2*expand);var pts=rect.Points().OrderBy(p=>p.X).ToArray();if(pts[0].Y>pts[1].Y)(pts[0],pts[1])=(pts[1],pts[0]);if(pts[2].Y>pts[3].Y)(pts[2],pts[3])=(pts[3],pts[2]);var ordered=new[]{pts[0],pts[2],pts[3],pts[1]}.Select(p=>new Point2f(Math.Clamp(p.X*width/mw,0,width-1),Math.Clamp(p.Y*height/mh,0,height-1))).ToArray();var bounds=Cv2.BoundingRect(ordered).Intersect(new(0,0,width,height));if(bounds.Width>=3&&bounds.Height>=3)boxes.Add((ordered,bounds));}
         boxes=boxes.OrderBy(b=>b.Bounds.Y).ThenBy(b=>b.Bounds.X).ToList();for(int i=1;i<boxes.Count;i++)for(int j=i;j>0;j--){var a=boxes[j-1];var b=boxes[j];if(Math.Abs(a.Bounds.Y-b.Bounds.Y)<Math.Min(a.Bounds.Height,b.Bounds.Height)*.45&&a.Bounds.X>b.Bounds.X)(boxes[j-1],boxes[j])=(boxes[j],boxes[j-1]);else break;}
-        var result=new List<Region>();foreach(var box in boxes){var p=box.Points;static double Distance(Point2f a,Point2f b)=>Math.Sqrt(Math.Pow(a.X-b.X,2)+Math.Pow(a.Y-b.Y,2));int cw=Math.Clamp((int)Math.Max(Distance(p[0],p[1]),Distance(p[2],p[3])),2,16000),ch=Math.Clamp((int)Math.Max(Distance(p[0],p[3]),Distance(p[1],p[2])),2,16000);using var transform=Cv2.GetPerspectiveTransform(p,new Point2f[]{new(0,0),new(cw,0),new(cw,ch),new(0,ch)});using var crop=new Mat();Cv2.WarpPerspective(image,crop,transform,new(cw,ch),InterpolationFlags.Cubic,BorderTypes.Replicate);if(ch>cw*1.5)Cv2.Rotate(crop,crop,RotateFlags.Rotate90Counterclockwise);var decoded=Recognize(crop);if(decoded.Text.Length==0||decoded.Score<.5)continue;result.Add(new(decoded.Text,(double)box.Bounds.X/width,(double)box.Bounds.Y/height,(double)box.Bounds.Width/width,(double)box.Bounds.Height/height));}return result;
+        var result=new List<Region>();var inputs=new List<DenseTensor<float>>();var boundsList=new List<Rect>();int inputBytes=0;
+        void Flush(){
+            var decoded=Recognize(inputs);
+            for(int i=0;i<decoded.Length;i++)if(decoded[i].Text.Length>0&&decoded[i].Score>=.5){var bounds=boundsList[i];result.Add(new(decoded[i].Text,(double)bounds.X/width,(double)bounds.Y/height,(double)bounds.Width/width,(double)bounds.Height/height));}
+            inputs.Clear();boundsList.Clear();inputBytes=0;
+        }
+        foreach(var box in boxes){var p=box.Points;static double Distance(Point2f a,Point2f b)=>Math.Sqrt(Math.Pow(a.X-b.X,2)+Math.Pow(a.Y-b.Y,2));int cw=Math.Clamp((int)Math.Max(Distance(p[0],p[1]),Distance(p[2],p[3])),2,16000),ch=Math.Clamp((int)Math.Max(Distance(p[0],p[3]),Distance(p[1],p[2])),2,16000);using var transform=Cv2.GetPerspectiveTransform(p,new Point2f[]{new(0,0),new(cw,0),new(cw,ch),new(0,ch)});using var crop=new Mat();Cv2.WarpPerspective(image,crop,transform,new(cw,ch),InterpolationFlags.Cubic,BorderTypes.Replicate);if(ch>cw*1.5)Cv2.Rotate(crop,crop,RotateFlags.Rotate90Counterclockwise);int rw=Math.Clamp((int)Math.Ceiling(crop.Width*48.0/crop.Height),32,4096);var input=Input(crop,rw,48);inputs.Add(input);boundsList.Add(box.Bounds);inputBytes+=checked((int)input.Length)*sizeof(float);
+            if(inputs.Count>=16||inputBytes>=8*1024*1024)Flush();
+        }
+        if(inputs.Count>0)Flush();return result;
     }
     public void Dispose(){detection.Dispose();recognition.Dispose();}
 }

@@ -142,7 +142,7 @@ static class DurableChecks
             if(LibraryControlClient.Owner(library)!=null)await LibraryControlClient.Send(library,"service-stop",new {},default);
             await Until(()=>LibraryControlClient.Owner(library)==null);
         }
-        using(var lease=new LibraryLease(library))assert(true,"Stopped service releases the OS lease");
+        using(var lease=await ReleasedLease(library))assert(true,"Stopped service releases the OS lease");
         var inference="test-"+Guid.NewGuid().ToString("N");
         try
         {
@@ -196,7 +196,7 @@ static class DurableChecks
             await command(library,0,["service","stop"]);
             await Until(()=>!InferenceOwnership.Matches(pid,birth));
             assert(LibraryControlClient.Owner(library)==null,"Native headless stop exits the process and retires ownership without an AppKit loop deadlock");
-            using var lease=new LibraryLease(library);
+            using var lease=await ReleasedLease(library);
         }
         finally
         {
@@ -208,6 +208,16 @@ static class DurableChecks
     {
         for(var i=0;i<200;i++){if(condition())return;await Task.Delay(25);}
         throw new Exception("Timed out waiting for a durable operation");
+    }
+    static async Task<LibraryLease> ReleasedLease(string root)
+    {
+        // Process-exit notification can precede the kernel releasing its final
+        // file descriptors. Assert readiness by acquiring the actual OS lease.
+        for(var attempt=0; ;attempt++)
+        {
+            try {return new LibraryLease(root);}
+            catch(RecallException e) when(e.Code=="busy" && attempt<200) {await Task.Delay(25);}
+        }
     }
     static bool CompletedReceipt(string root,string id)=>File.Exists(Path.Combine(root,".recall-control",id+".task.json")) && Wire.Element(LibraryControlClient.Result(root,id)).TryGetProperty("ok",out _);
 }

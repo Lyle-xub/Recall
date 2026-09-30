@@ -9,13 +9,29 @@ public sealed class HeadlessService
 {
     readonly MemoryStore store;
     readonly SemaphoreSlim operation = new(1,1);
+    readonly DurableOcrWorker indexing;
     readonly TaskCompletionSource shutdown = new(TaskCreationOptions.RunContinuationsAsynchronously);
     CancellationTokenSource? captureCancellation;
     Task? capture;
     RecordingSession? session;
     string? lastHash,lastId,lastError;
     int captured;
-    HeadlessService(MemoryStore store) { this.store=store; }
+    HeadlessService(MemoryStore store)
+    {
+        this.store=store;store.PrepareOcrQueue();
+        indexing=new(store.PendingOcrIds, async (id,ct) =>
+        {
+            var frame=await CaptureBoundary(() =>
+            {
+                var saved=store.Frame(id);
+                if(saved==null || saved.DeletedAt!=null || saved.TextState is RecognitionState.Complete or RecognitionState.Empty)return null;
+                store.Recognition(id,RecognitionState.Working);return saved;
+            },ct);
+            if(frame==null)return;
+            try {await ArchiveOcr.Recognize(store,frame,"eng",ct);}
+            catch(OperationCanceledException) {store.Recognition(id,RecognitionState.Pending);throw;}
+        }, (id,error) => {store.Recognition(id,RecognitionState.Failed,error.Message);lastError="Capture is saved; OCR will retry: "+error.Message;});
+    }
     public static async Task Serve(string root,CancellationToken ct = default)
     {
         try
@@ -28,7 +44,7 @@ public sealed class HeadlessService
             using var host=new LibraryControlHost(root,"headless",service.Control,ownership);
             using var signal=ct.Register(()=>service.shutdown.TrySetResult());
             try { await service.shutdown.Task; }
-            finally { await host.Stop(releaseOwnership:false);await service.Stop(); }
+            finally { await host.Stop(releaseOwnership:false);await service.Stop();await service.indexing.DisposeAsync(); }
         }
         catch(Exception e)
         {
@@ -90,7 +106,13 @@ public sealed class HeadlessService
         if(command=="recording-stop") {await Stop();return Status();}
         if(command=="service-stop") {await Stop();_ = Task.Run(async()=>{await Task.Delay(250);shutdown.TrySetResult();});return new {stopping=true};}
         if(command=="recording-status") return Status();
-        if(command=="tasks-status") return new {recording=Status(),indexing=false,error=lastError};
+        if(command=="tasks-status") return new {recording=Status(),indexing=indexing.Active,error=lastError};
+        if(command=="index-one") return await indexing.Exclusive(async () =>
+        {
+            var frame=await CaptureBoundary(()=>LibraryCommands.Require(store,args),CancellationToken.None);
+            await ArchiveOcr.Recognize(store,frame,args.Text("language")??"eng",CancellationToken.None);
+            return (object)new {completed=1,id=frame.Id};
+        },CancellationToken.None);
         await operation.WaitAsync();
         try
         {
@@ -110,18 +132,19 @@ public sealed class HeadlessService
                 captureCancellation?.Dispose();captureCancellation=new();capture=Loop(session,captureCancellation.Token);
                 return Status();
             }
-            if(command=="index-one")
-            {
-                var frame=LibraryCommands.Require(store,args);
-                await ArchiveOcr.Recognize(store,frame,args.Text("language")??"eng",CancellationToken.None);
-                return new {completed=1,id=frame.Id};
-            }
             if(command=="optimize") return await PortableMaintenance.Optimize(store,CancellationToken.None);
             return LibraryCommands.Execute(store,command,args);
         }
         finally {operation.Release();}
     }
     object Status()=>new {available=true,active=capture is {IsCompleted:false},requested=capture is {IsCompleted:false},owner="headless",captured,sessionId=session?.Id,error=lastError,mode="screenshots"};
+    async Task<T> CaptureBoundary<T>(Func<T> read,CancellationToken ct)
+    {
+        // Import and session metadata are two writes. Read only after capture
+        // finishes both, so a fast cache hit cannot be overwritten by its save.
+        await operation.WaitAsync(ct);
+        try {return read();} finally {operation.Release();}
+    }
     async Task Loop(RecordingSession recordingSession,CancellationToken ct)
     {
         try
@@ -163,8 +186,7 @@ public sealed class HeadlessService
             var frame=(MemoryFrame)LibraryCommands.Execute(store,"import",Wire.Element(new {image=file,app="Desktop",title="Headless screen capture"}));
             frame=frame with {SessionId=session!.Id,PixelHash=hash};store.Save(frame);
             lastId=frame.Id;lastHash=hash;captured++;
-            try {var text=await OcrEngine.Recognize(file,"eng",ct);store.Recognized(frame.Id,text.Text,text.Regions);}
-            catch(Exception e) when(e is not OperationCanceledException) {store.Recognition(frame.Id,RecognitionState.Failed,e.Message);lastError="Capture is saved; OCR needs attention: "+e.Message;}
+            indexing.Wake();
         }
         finally {if(Directory.Exists(temporary))Directory.Delete(temporary,true);}
     }

@@ -110,7 +110,9 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
     private var current: RecordingSession?
     private var settings = AppSettings()
     private var captureTasks: [UUID:Task<Void,Never>] = [:]
-    private var ocrQueue: [MemoryFrame] = []
+    private var ocrQueue: [String] = []
+    private var pendingOCRCount = 0
+    private var ocrWakeGeneration = 0
     private var ocrTask: Task<Void,Never>?
     private let workBudget:ForegroundWorkBudget?
     typealias IndexFrame = @Sendable (URL,Bool) async throws->ScreenIndexResult
@@ -145,7 +147,7 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
     var onRecognitionProgress: ((RecognitionProgress) -> Void)?
     var onFrameRecognition: ((String,MediaRecognitionState?) -> Void)?
     private func publishRecognitionProgress() {
-        onRecognitionProgress?(RecognitionProgress(pending:ocrQueue.count + (processingFrame ? 1:0), active:recognizingText))
+        onRecognitionProgress?(RecognitionProgress(pending:max(0,pendingOCRCount), active:recognizingText))
     }
     var onIndexingIssue: ((String?) -> Void)?
     var onStopped: (() -> Void)?
@@ -211,23 +213,18 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
     }
     static func displays() async throws -> [SCDisplay] { try await SCShareableContent.excludingDesktopWindows(false,onScreenWindowsOnly:true).displays }
     func resumePendingIndexing() {
-        ocrQueue += (try? store.pendingIndexFrames()) ?? []
-        publishRecognitionProgress()
-        if !ocrQueue.isEmpty { startOCRIfNeeded() }
+        startOCRIfNeeded()
     }
 
     private var indexingSuspended = false
     func suspendIndexing() async {
         indexingSuspended = true
         ocrTask?.cancel();await ocrTask?.value
-        ocrQueue.removeAll();publishRecognitionProgress()
+        ocrQueue.removeAll();pendingOCRCount = 0;publishRecognitionProgress()
     }
     func resumeIndexingAfterCleanup() async {
         indexingSuspended = false
-        let database = store
-        ocrQueue = (try? await Task.detached(priority:.utility) { try database.pendingIndexFrames() }.value) ?? []
-        publishRecognitionProgress()
-        if !ocrQueue.isEmpty { startOCRIfNeeded() }
+        startOCRIfNeeded()
     }
 
     func setInterfaceVisible(_ visible:Bool) {
@@ -338,19 +335,44 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
                     onFrame?(captured)
                     // Recognize adjacent captures in time order so unchanged
                     // lines reuse exact pixel results and older work cannot starve.
-                    if captured.indexingComplete != true { ocrQueue.append(captured);publishRecognitionProgress();startOCRIfNeeded() }
+                    if captured.indexingComplete != true { pendingOCRCount += 1;publishRecognitionProgress();startOCRIfNeeded() }
                 }
             } catch { diagnostics.write("Frame save failed; code=\((error as NSError).code)");onError?("Screen capture: \(error.localizedDescription)") }
         }
         refreshMeetingWindowIfNeeded(sessionID:sessionID)
     }
     private func startOCRIfNeeded() {
+        ocrWakeGeneration += 1
         guard !indexingSuspended else { return }
         guard ocrTask == nil else { return }
         ocrTask = Task(priority:.utility) { [self] in
             defer { ocrTask = nil; recognizingText = false; processingFrame = false; publishRecognitionProgress() }
             var failures = 0
-            while !ocrQueue.isEmpty,!Task.isCancelled {
+            var retries:[String:(due:ContinuousClock.Instant,attempts:Int)] = [:]
+            while !Task.isCancelled {
+                let database = store
+                if ocrQueue.isEmpty {
+                    let generation = ocrWakeGeneration
+                    let blocked = retries.filter {$0.value.due > .now}.map(\.key)
+                    let window:(ids:[String],count:Int)
+                    do {window = try await Task.detached(priority:.utility) {try database.pendingIndexWindow(excluding:blocked)}.value}
+                    catch {
+                        diagnostics.write("OCR discovery deferred; code=\((error as NSError).code)")
+                        do {try await Task.sleep(for:.seconds(1))} catch {break}
+                        continue
+                    }
+                    guard !Task.isCancelled else {break}
+                    ocrQueue = window.ids;pendingOCRCount = window.count
+                    publishRecognitionProgress()
+                    if ocrQueue.isEmpty {
+                        if generation != ocrWakeGeneration {continue}
+                        if window.count > 0 {
+                            do {try await Task.sleep(for:.seconds(1))} catch {break}
+                            continue
+                        }
+                        break
+                    }
+                }
                 // Retain the deadline even when the queue briefly empties, so
                 // incoming captures cannot bypass the background work budget.
                 do {
@@ -358,10 +380,10 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
                     try await workBudget?.waitForBackgroundWork()
                 }
                 catch { break }
-                let queued = ocrQueue.removeFirst(),database = store
+                let queued = ocrQueue.removeFirst()
                 let loaded:MemoryFrame?
-                if let readFrame {loaded=await readFrame(queued.id)}
-                else {loaded=try? await Task.detached(priority:.utility,operation:{try database.frame(queued.id)}).value}
+                if let readFrame {loaded=await readFrame(queued)}
+                else {loaded=try? await Task.detached(priority:.utility,operation:{try database.frame(queued)}).value}
                 guard let frame=loaded,frame.deletedAt == nil else {continue}
                 if frame.indexingComplete == true { onIndexed?(frame);continue }
                 // A database await may span fresh input. Keep the accepted ID
@@ -385,8 +407,10 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
                         try database.updateIndex(frameID:frame.id,text:result.text,regions:result.regions,archive:frame.visualTime == nil ? result.archive:nil,sourceURL:result.sourceURL)
                     }.value
                     let work=Date().timeIntervalSince(started)
-                    nextIndexingAllowed = .now.advanced(by:.seconds(workBudget?.recoveryInterval(after:work) ?? BackgroundProcessingPolicy.recoveryInterval(after:work)))
+                    nextIndexingAllowed = .now.advanced(by:.seconds(workBudget?.recoveryInterval(after:work,pending:pendingOCRCount) ?? BackgroundProcessingPolicy.recoveryInterval(after:work,pending:pendingOCRCount)))
                     guard let saved else { continue }
+                    retries.removeValue(forKey:frame.id)
+                    pendingOCRCount = max(0,pendingOCRCount-1)
                     try Task.checkCancellation()
                     onIndexed?(saved)
                     if failures > 0 { failures = 0;onIndexingIssue?(nil) }
@@ -404,9 +428,11 @@ final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
                     onFrameRecognition?(frame.id,issue)
                     onIndexingIssue?("Text recognition is retrying. Original screenshots are saved safely.")
                     diagnostics.write("Indexing deferred; domain=\((error as NSError).domain); code=\((error as NSError).code)")
-                    ocrQueue.append(saved)
-                    do { try await Task.sleep(for:.seconds(min(30,pow(2,Double(min(failures,5)))))) }
-                    catch { break }
+                    let attempts = min(6,(retries[saved.id]?.attempts ?? 0)+1)
+                    if retries.count >= 128,retries[saved.id] == nil,let oldest = retries.min(by:{$0.value.due < $1.value.due})?.key {retries.removeValue(forKey:oldest)}
+                    retries[saved.id] = (.now.advanced(by:.seconds(min(60,pow(2,Double(attempts))))),attempts)
+                    // Refill from SQLite after this window. A broken image must
+                    // not keep a one-item queue alive and hide newer captures.
                 }
             }
         }
